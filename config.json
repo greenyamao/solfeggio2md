@@ -7,7 +7,13 @@
   "output_dir": "C:\\Users\\greenbox\\Desktop\\pdf_to_md_music\\output",
   "dpi": 200,
   "delay": 0.5,
+  "smt_max_tokens": 512,
+  "qwen_context_length": 16196,
+  "qwen_eval_batch_size": 2048,
+  "qwen_flash_attention": true,
+  "qwen_offload_kv_cache_to_gpu": true,
   "overwrite": true,
-  "smt_device": "cpu",
+  "smt_device": "cuda",
+  "smt_model": "antoniorv6/smt-grandstaff",
   "system_prompt": "Ты — строгий OCR-транскрибатор. Перенеси весь текст страницы книги в Markdown дословно.\nСохраняй заголовки, списки и таблицы.\nВАЖНО: Если на странице встречаются технические метки вида <!-- MUSIC_STUB_ID:XXXX -->, ОБЯЗАТЕЛЬНО оставь их в тексте на тех же местах без изменений. Ничего не додумывай."
 }

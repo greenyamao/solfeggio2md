@@ -1,0 +1,14 @@
+# Runtime dependencies for PDF -> Markdown music pipeline.
+# Install PyTorch separately using the official selector for the target CUDA/CPU setup.
+streamlit>=1.63,<2
+PyMuPDF>=1.28,<2
+opencv-python-headless>=5,<6
+numpy>=2.5,<3
+Pillow>=12,<13
+music21>=10.5,<11
+transformers>=5.16,<6
+huggingface-hub>=1.5,<2
+safetensors>=0.8,<1
+
+# Optional SMT augmentation/training dependencies.
+scikit-image>=0.25,<1

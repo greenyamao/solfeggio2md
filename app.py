@@ -15,6 +15,11 @@ import pymupdf as fitz
 import streamlit as st
 import torch
 
+torch.set_float32_matmul_precision("high")
+if torch.cuda.is_available():
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
 # Подключение SMT (Sheet Music Transformer)
 SMT_IMPORT_ERROR = None
 try:
@@ -47,11 +52,17 @@ DEFAULT_CONFIG = {
     "lm_model": "default",
     "lm_temperature": 0.1,
     "lm_max_tokens": 8192,
+    "smt_max_tokens": 512,
     "output_dir": str(Path.cwd() / "output"),
     "dpi": 200,
     "delay": 0.5,
     "overwrite": False,
-    "smt_device": "cpu",
+    "smt_device": "cuda" if torch.cuda.is_available() else "cpu",
+    "smt_model": "antoniorv6/smt-grandstaff",
+    "qwen_context_length": 16196,
+    "qwen_eval_batch_size": 2048,
+    "qwen_flash_attention": True,
+    "qwen_offload_kv_cache_to_gpu": True,
     "system_prompt": (
         "Ты — строгий OCR-транскрибатор. Перенеси весь печатный текст страницы в чистый Markdown дословно.\n"
         "Сохраняй иерархию заголовков (#, ##, ###), таблицы и списки.\n"
@@ -165,59 +176,86 @@ def has_valid_final_cache(path):
 # ----------------- ДЕТЕКТОР НОТНЫХ СТАНОВ ----------------- #
 def detect_staff_regions(img_bgr):
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    
-    # Инвертируем изображение, если страница темная
     if np.mean(gray) < 120:
         gray = cv2.bitwise_not(gray)
 
-    thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 3)
-
     img_h, img_w = img_bgr.shape[:2]
-    # Оставляем только длинные горизонтальные штрихи. Текстовые строки обычно
-    # не образуют несколько параллельных линий с регулярным шагом.
-    h_len = max(25, int(img_w / 30))
-    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (h_len, 1))
+    thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 7)
+    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(15, img_w // 80), 1))
     staff_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, h_kernel)
 
-    # Вертикальная склейка (строго в пределах одной системы)
-    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(3, int(img_h / 80))))
-    dilated = cv2.dilate(staff_lines, v_kernel, iterations=2)
+    contours, _ = cv2.findContours(staff_lines, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    segments = []
+    for contour in contours:
+        x, y, width, height = cv2.boundingRect(contour)
+        if width >= img_w * 0.08 and height <= max(12, img_h * 0.02):
+            segments.append((x, y + height / 2, width, height))
 
-    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    boxes = []
+    # Connect line segments that belong to the same staff. Horizontal overlap
+    # keeps left/right columns separate even when their Y coordinates match.
+    parent = list(range(len(segments)))
 
-    for cnt in contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-        if w > img_w * 0.40 and (img_h * 0.015 < h < img_h * 0.30):
-            region = staff_lines[y:min(img_h, y + h), x:min(img_w, x + w)]
-            row_projection = np.count_nonzero(region, axis=1)
-            active_rows = row_projection > max(8, int(w * 0.12))
+    def find(index):
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
 
-            # Count distinct horizontal lines and their regularity. This rejects
-            # long borders, underlines, and most ordinary text blocks.
-            line_groups = []
-            for row_idx, is_active in enumerate(active_rows):
-                if is_active and (not line_groups or row_idx > line_groups[-1][-1] + 1):
-                    line_groups.append([row_idx])
-                elif is_active:
-                    line_groups[-1].append(row_idx)
-            line_centers = [sum(group) / len(group) for group in line_groups]
-            gaps = np.diff(line_centers)
-            regular_gaps = gaps[(gaps >= 2) & (gaps <= max(12, h * 0.20))]
-            line_coverage = float(np.count_nonzero(row_projection > max(8, int(w * 0.12)))) / max(h, 1)
+    def union(first, second):
+        first_root, second_root = find(first), find(second)
+        if first_root != second_root:
+            parent[second_root] = first_root
 
-            if len(line_centers) < 4 or len(regular_gaps) < 3 or line_coverage > 0.45:
-                continue
+    for first, left in enumerate(segments):
+        for second in range(first + 1, len(segments)):
+            right = segments[second]
+            vertical_distance = abs(left[1] - right[1])
+            overlap = min(left[0] + left[2], right[0] + right[2]) - max(left[0], right[0])
+            if vertical_distance <= max(32, img_h * 0.025) and overlap >= min(left[2], right[2]) * 0.25:
+                union(first, second)
 
-            pad_y = int(h * 0.15)
-            y1 = max(0, y - pad_y)
-            y2 = min(img_h, y + h + pad_y)
-            boxes.append((x, y1, w, y2 - y1))
+    component_segments = {}
+    for index, segment in enumerate(segments):
+        component_segments.setdefault(find(index), []).append(segment)
 
-    boxes.sort(key=lambda b: b[1])
+    candidates = []
+    for component in component_segments.values():
+        centers = sorted({round(segment[1]) for segment in component})
+        if len(centers) < 5:
+            continue
+        gaps = np.diff(centers)
+        typical_gap = float(np.median(gaps)) if gaps.size else 0
+        if typical_gap < 2 or np.any(gaps > max(32, typical_gap * 2.2)):
+            continue
+        left = min(segment[0] for segment in component)
+        right = max(segment[0] + segment[2] for segment in component)
+        if right - left < img_w * 0.08:
+            continue
+        pad_x = max(30, int((right - left) * 0.06))
+        pad_y = max(14, int(typical_gap * 2.2))
+        x1 = max(0, int(left - pad_x))
+        y1 = max(0, int(min(centers) - pad_y))
+        x2 = min(img_w, int(right + pad_x))
+        y2 = min(img_h, int(max(centers) + pad_y))
+        roi = thresh[y1:y2, x1:x2]
+        horizontal = cv2.morphologyEx(roi, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (max(15, (x2 - x1) // 80), 1)))
+        detail_density = np.mean(cv2.bitwise_xor(roi, horizontal) > 0)
+        if detail_density > 0.09:
+            continue
+        candidates.append((x1, y1, x2 - x1, y2 - y1))
+
+    boxes = sorted(candidates, key=lambda box: box[1])
     merged = []
     for box in boxes:
-        if merged and box[1] <= merged[-1][1] + merged[-1][3] * 0.25:
+        should_merge = False
+        if merged:
+            previous = merged[-1]
+            union_top = min(previous[1], box[1])
+            union_bottom = max(previous[1] + previous[3], box[1] + box[3])
+            vertical_gap = max(0, box[1] - (previous[1] + previous[3]), previous[1] - (box[1] + box[3]))
+            horizontal_overlap = min(previous[0] + previous[2], box[0] + box[2]) - max(previous[0], box[0])
+            should_merge = horizontal_overlap >= max(previous[2], box[2]) * 0.5 and vertical_gap <= img_h * 0.08 and union_bottom - union_top <= img_h * 0.30
+        if should_merge:
             previous = merged[-1]
             top = min(previous[1], box[1])
             bottom = max(previous[1] + previous[3], box[1] + box[3])
@@ -231,14 +269,11 @@ def detect_staff_regions(img_bgr):
 
 # ----------------- СИНГЛТОН SMT МОДЕЛИ ----------------- #
 @st.cache_resource
-def get_smt_engine(device: str):
+def get_smt_engine(device: str, model_id: str):
     if not SMT_AVAILABLE:
         return None
     try:
-        # LM Studio owns the GPU. Keeping OMR on CPU prevents a second model
-        # from competing with the 8 GB VRAM budget.
-        device = "cpu"
-        model = SMTModelForCausalLM.from_pretrained("antoniorv6/smt-camera-grandstaff").to(device)
+        model = SMTModelForCausalLM.from_pretrained(model_id).to(device)
         model.eval()
         return model
     except Exception as e:
@@ -247,7 +282,7 @@ def get_smt_engine(device: str):
 
 
 @torch.inference_mode()
-def transcribe_crop(model, crop_bgr, device):
+def transcribe_crop(model, crop_bgr, device, progress_callback=None, max_tokens=512, raw_output_path=None):
     if model is None:
         return "% [SMT не подключен]"
     try:
@@ -260,10 +295,19 @@ def transcribe_crop(model, crop_bgr, device):
                 (max(1, int(crop_bgr.shape[1] * scale)), max(1, int(crop_bgr.shape[0] * scale))),
                 interpolation=cv2.INTER_AREA,
             )
-        # This process must never move OMR tensors onto the GPU used by LM Studio.
-        tensor = convert_img_to_tensor(crop_bgr).unsqueeze(0).to("cpu")
-        predictions, _ = model.predict(tensor, convert_to_str=True)
-        raw_bekern = "".join(predictions).replace("<s>", "").replace("</s>", "").replace("<t>", "\t").replace("<b>", "\n")
+        tensor = convert_img_to_tensor(crop_bgr).unsqueeze(0).to(device)
+        autocast_context = torch.autocast("cuda", dtype=torch.float16) if str(device).startswith("cuda") else torch.autocast("cpu", enabled=False)
+        with autocast_context:
+            predictions, _ = model.predict(
+                tensor,
+                convert_to_str=True,
+                progress_callback=progress_callback,
+                max_tokens=max_tokens,
+            )
+        raw_bekern = "".join(predictions).replace("<s>", " ").replace("</s>", "").replace("<t>", "\t").replace("<b>", "\n")
+        raw_bekern = normalize_bekern(raw_bekern)
+        if raw_output_path:
+            raw_output_path.write_text(raw_bekern, encoding="utf-8")
         
         score = music21.converter.parse(raw_bekern, format='humdrum')
         score.makeNotation(inPlace=True)
@@ -271,6 +315,24 @@ def transcribe_crop(model, crop_bgr, device):
         return abc.strip()
     except Exception as exc:
         return f"% Ошибка нотации: {exc}"
+
+
+def normalize_bekern(raw_bekern):
+    text = raw_bekern.strip()
+    if not text:
+        raise ValueError("SMT вернул пустую нотацию")
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        raise ValueError("SMT вернул пустую нотацию")
+
+    if not any(line.startswith("**") for line in lines):
+        spine_count = max(len(line.split("\t")) for line in lines)
+        header = "\t".join(["**kern"] * spine_count)
+        terminator = "\t".join(["*-"] * spine_count)
+        text = "\n".join([header, *lines, terminator])
+
+    return text
 
 
 def strip_markdown_fences(text: str) -> str:
@@ -323,6 +385,65 @@ def stream_vlm(img_bytes: bytes, prompt: str, host: str, port: str, model: str, 
     return cleaned
 
 
+def lmstudio_request(host, port, path, payload, timeout=900):
+    url = f"http://{host.strip()}:{port.strip()}{path}"
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def load_qwen(host, port, model, context_length, eval_batch_size, flash_attention, offload_kv_cache):
+    return lmstudio_request(
+        host,
+        port,
+        "/api/v1/models/load",
+        {
+            "model": model,
+            "context_length": int(context_length),
+            "eval_batch_size": int(eval_batch_size),
+            "flash_attention": bool(flash_attention),
+            "offload_kv_cache_to_gpu": bool(offload_kv_cache),
+            "echo_load_config": True,
+        },
+    )
+
+
+def unload_lm_model(host, port, instance_id):
+    if instance_id:
+        return lmstudio_request(host, port, "/api/v1/models/unload", {"instance_id": instance_id}, timeout=120)
+    return None
+
+
+def request_vlm_native(img_bytes, prompt, host, port, model, temp, max_tokens, context_length):
+    b64 = base64.b64encode(img_bytes).decode("utf-8")
+    result = lmstudio_request(
+        host,
+        port,
+        "/api/v1/chat",
+        {
+            "model": model,
+            "system_prompt": prompt,
+            "input": [
+                {"type": "text", "content": "Распознай печатный текст на этой странице."},
+                {"type": "image", "data_url": f"data:image/jpeg;base64,{b64}"},
+            ],
+            "reasoning": "off",
+            "temperature": temp,
+            "max_output_tokens": int(max_tokens),
+            "context_length": int(context_length),
+            "stream": False,
+            "store": False,
+        },
+    )
+    output = [item.get("content", "") for item in result.get("output", []) if item.get("type") == "message"]
+    return strip_markdown_fences("\n".join(output).strip())
+
+
 # ----------------- НАСТРОЙКИ ----------------- #
 with st.sidebar:
     st.title("Настройки")
@@ -339,10 +460,24 @@ with st.sidebar:
     with st.expander("Обработка", expanded=False):
         dpi = st.number_input("Качество PDF (DPI)", min_value=150, max_value=300, value=int(cfg["dpi"]), step=10)
         delay = st.number_input("Пауза между страницами", min_value=0.0, value=float(cfg["delay"]), step=0.5)
+        qwen_context_length = st.number_input("Контекст Qwen", min_value=2048, max_value=262144, value=int(cfg.get("qwen_context_length", 16196)), step=1024)
+        qwen_eval_batch_size = st.number_input("Eval batch Qwen", min_value=128, max_value=4096, value=int(cfg.get("qwen_eval_batch_size", 2048)), step=128)
+        qwen_flash_attention = st.checkbox("Flash Attention Qwen", value=bool(cfg.get("qwen_flash_attention", True)))
+        qwen_offload_kv_cache = st.checkbox("KV cache на GPU", value=bool(cfg.get("qwen_offload_kv_cache_to_gpu", True)))
+        smt_model_id = st.text_input("OMR модель", value=cfg.get("smt_model", "antoniorv6/smt-grandstaff"))
+        smt_max_tokens = st.number_input(
+            "Максимум токенов OMR",
+            min_value=64,
+            max_value=1281,
+            value=min(1281, max(64, int(cfg.get("smt_max_tokens", 512)))),
+            step=64,
+            help="Меньшее значение ускоряет CPU-распознавание, но может обрезать длинную нотацию.",
+        )
         overwrite = st.checkbox("Перезаписывать готовые страницы", value=cfg["overwrite"])
     with st.expander("Инструкция модели", expanded=False):
         system_prompt = st.text_area("Системный промпт", value=cfg["system_prompt"], height=180)
-    smt_device = "cpu"
+    smt_device = "cuda" if torch.cuda.is_available() else "cpu"
+    st.caption(f"SMT будет работать на: `{smt_device}`. Перед Qwen GPU будет очищена.")
 
 st.title("PDF → учебник в Markdown")
 st.caption("Загрузите книги, дождитесь проверки очереди и запустите обработку. Результаты будут разложены по отдельным папкам автоматически.")
@@ -358,11 +493,15 @@ with tab_main:
         key="pdf_uploader",
     )
     up_files = st.session_state.get("pdf_uploader") or []
-    if up_files:
+    valid_uploads = [
+        uploaded for uploaded in up_files
+        if getattr(uploaded, "name", None) and callable(getattr(uploaded, "getvalue", None))
+    ]
+    if valid_uploads:
         td = Path.cwd() / ".queue_temp"
         td.mkdir(exist_ok=True)
         uploaded_paths = []
-        for uploaded in up_files:
+        for uploaded in valid_uploads:
             target = td / uploaded.name
             target.write_bytes(uploaded.getvalue())
             uploaded_paths.append(str(target))
@@ -428,6 +567,12 @@ with tab_main:
         "lm_host": lm_host, "lm_port": lm_port, "lm_model": lm_model,
         "lm_temperature": lm_temperature, "lm_max_tokens": lm_max_tokens,
         "output_dir": str(output_root), "dpi": int(dpi), "delay": float(delay),
+        "smt_max_tokens": int(smt_max_tokens),
+        "qwen_context_length": int(qwen_context_length),
+        "qwen_eval_batch_size": int(qwen_eval_batch_size),
+        "qwen_flash_attention": qwen_flash_attention,
+        "qwen_offload_kv_cache_to_gpu": qwen_offload_kv_cache,
+        "smt_model": smt_model_id,
         "overwrite": overwrite, "smt_device": smt_device, "system_prompt": system_prompt
     }
     if save_clicked:
@@ -479,148 +624,175 @@ with tab_results:
     else:
         st.info("Готовых книг пока нет.")
 
-# ----------------- ИСПОЛНИТЕЛЬНЫЙ ЦИКЛ ----------------- #
+# ----------------- ДВУХФАЗНЫЙ ИСПОЛНИТЕЛЬНЫЙ ЦИКЛ ----------------- #
 if st.session_state.is_running:
     base_out = Path(st.session_state.output_dir)
     base_out.mkdir(parents=True, exist_ok=True)
-    smt_model = get_smt_engine(smt_device)
+    smt_model = None
+    qwen_instance_id = None
 
-    for b_idx, pdf_path_str in enumerate(active_queue):
-        if not st.session_state.is_running:
-            break
+    try:
+        # Phase 1: unload Qwen, then run all OMR pages on the GPU.
+        view_stat.info("Фаза 1/2: освобождаем LM Studio и загружаем SMT на GPU...")
+        try:
+            models = json.loads(urllib.request.urlopen(
+                f"http://{lm_host.strip()}:{lm_port.strip()}/api/v1/models", timeout=30
+            ).read().decode("utf-8")).get("models", [])
+            qwen_info = next((item for item in models if item.get("key") == lm_model), None)
+            for loaded_instance in (qwen_info or {}).get("loaded_instances", []):
+                unload_lm_model(lm_host, lm_port, loaded_instance.get("id"))
+        except Exception as exc:
+            view_stat.warning(f"Qwen не была выгружена перед OMR: {exc}")
 
-        pdf_path = Path(pdf_path_str)
-        if not pdf_path.is_file():
-            continue
+        smt_model = get_smt_engine(smt_device, smt_model_id)
+        if smt_model is None:
+            raise RuntimeError("SMT не загрузилась, OMR-фаза остановлена")
 
-        book_title = pdf_path.stem
-        book_dir = base_out / book_title
-        crops_dir = book_dir / "1_crops"
-        masked_dir = book_dir / "2_masked_pages"
-        raw_md_dir = book_dir / "3_raw_md"
-        final_dir = book_dir / "4_final_pages"
+        total_pages_all = sum(count for count in page_counts.values() if isinstance(count, int))
+        processed_pages = 0
+        phase_progress = st.progress(0.0, text="Фаза 1/2: OMR GPU")
+        phase_detail = st.empty()
 
-        for d in [crops_dir, masked_dir, raw_md_dir, final_dir]:
-            d.mkdir(parents=True, exist_ok=True)
+        for pdf_path_str in active_queue:
+            if not st.session_state.is_running:
+                break
+            pdf_path = Path(pdf_path_str)
+            book_title = pdf_path.stem
+            book_dir = base_out / book_title
+            crops_dir = book_dir / "1_crops"
+            masked_dir = book_dir / "2_masked_pages"
+            raw_md_dir = book_dir / "3_raw_md"
+            final_dir = book_dir / "4_final_pages"
+            for directory in [crops_dir, masked_dir, raw_md_dir, final_dir]:
+                directory.mkdir(parents=True, exist_ok=True)
 
-        with fitz.open(pdf_path) as doc:
-            total_pages = len(doc)
+            with fitz.open(pdf_path) as doc:
+                total_pages = len(doc)
+                for p_num in range(1, total_pages + 1):
+                    if not st.session_state.is_running:
+                        break
+                    view_stat.warning(f"Фаза 1/2 OMR: {book_title} | страница {p_num}/{total_pages}")
+                    page = doc[p_num - 1]
+                    pix = page.get_pixmap(dpi=int(dpi))
+                    img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+                    img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR if pix.n == 4 else cv2.COLOR_RGB2BGR)
+                    del pix
+                    boxes = detect_staff_regions(img_bgr)
+                    masked_img = img_bgr.copy()
+                    crop_jobs = []
 
-            for p_num in range(1, total_pages + 1):
-                if not st.session_state.is_running:
-                    break
+                    for s_id, (x, y, w, h) in enumerate(boxes, start=1):
+                        crop_tag = f"{book_title}_P{p_num:04d}_S{s_id:02d}"
+                        crop_png = crops_dir / f"{crop_tag}.png"
+                        crop_abc_file = crops_dir / f"{crop_tag}.abc"
+                        crop_krn_file = crops_dir / f"{crop_tag}.krn"
+                        crop_mat = img_bgr[y:y+h, x:x+w]
+                        cached_crop = cv2.imread(str(crop_png)) if crop_png.exists() else None
+                        geometry_changed = cached_crop is None or cached_crop.shape[:2] != crop_mat.shape[:2]
+                        if geometry_changed or overwrite:
+                            cv2.imwrite(str(crop_png), crop_mat)
+                        crop_jobs.append((crop_tag, crop_abc_file, crop_krn_file, crop_mat, geometry_changed))
+                        cv2.rectangle(masked_img, (x, y), (x + w, y + h), (255, 255, 255), -1)
+                        cv2.putText(masked_img, f"<!-- MUSIC_STUB_ID:{crop_tag} -->", (x + 10, y + max(25, int(h / 2))), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (80, 80, 80), 2)
 
-                final_page_file = final_dir / f"page_{p_num:04d}.md"
-                masked_page_png = masked_dir / f"page_{p_num:04d}_masked.png"
-                raw_md_file = raw_md_dir / f"page_{p_num:04d}_raw.md"
+                    masked_page_png = masked_dir / f"page_{p_num:04d}_masked.png"
+                    cv2.imwrite(str(masked_page_png), masked_img)
+                    _, masked_jpg_bytes = cv2.imencode(".jpg", masked_img)
+                    view_img.image(masked_jpg_bytes.tobytes(), caption=f"OMR: страница {p_num}, систем: {len(boxes)}", width="stretch")
+                    for crop_index, (_, crop_abc_file, crop_krn_file, crop_mat, geometry_changed) in enumerate(crop_jobs, start=1):
+                        total_crops = max(1, len(crop_jobs))
+                        def update_omr_progress(token_index, token_total, finished=False):
+                            crop_fraction = ((crop_index - 1) + min(1.0, token_index / max(1, token_total))) / total_crops
+                            page_fraction = (processed_pages + crop_fraction) / max(1, total_pages_all)
+                            phase_progress.progress(page_fraction, text=f"Фаза 1/2 OMR GPU | стр. {processed_pages + 1}/{total_pages_all} | кроп {crop_index}/{total_crops} | токен {token_index}/{token_total}")
+                            phase_detail.caption(f"Текущий crop: {crop_index}/{total_crops} | токен {token_index}/{token_total}")
+                        if has_valid_abc_cache(crop_abc_file) and not overwrite and not geometry_changed:
+                            update_omr_progress(1, 1, True)
+                        else:
+                            abc_content = transcribe_crop(smt_model, crop_mat, smt_device, update_omr_progress, int(smt_max_tokens), crop_krn_file)
+                            crop_abc_file.write_text(abc_content, encoding="utf-8")
+                            update_omr_progress(1, 1, True)
+                        del crop_mat
 
-                # Проверка чекпоинта
-                if has_valid_final_cache(final_page_file) and not overwrite:
-                    view_stat.info(f"Стр. {p_num} загружена из кэша.")
-                    view_res.markdown(final_page_file.read_text(encoding="utf-8"))
-                    continue
+                    del img_bgr, masked_img, masked_jpg_bytes
+                    gc.collect()
+                    processed_pages += 1
+                    phase_progress.progress(processed_pages / max(1, total_pages_all), text=f"Фаза 1/2 OMR GPU | страниц готово {processed_pages}/{total_pages_all}")
 
-                view_stat.warning(f"Книга: {book_title} | Обработка страницы {p_num}/{total_pages}...")
+        # Explicitly release all SMT CUDA allocations before loading Qwen.
+        view_stat.info("Фаза 1/2 завершена. Освобождаем VRAM SMT...")
+        del smt_model
+        smt_model = None
+        get_smt_engine.clear()
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
 
-                # 1. Рендер страницы PDF
-                page = doc[p_num - 1]
-                pix = page.get_pixmap(dpi=int(dpi))
-                img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
-                img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR if pix.n == 4 else cv2.COLOR_RGB2BGR)
-                del pix
+        # Phase 2: load Qwen once, process all masked pages, then unload it.
+        view_stat.info("Фаза 2/2: загружаем Qwen с reasoning=off...")
+        loaded_qwen = load_qwen(lm_host, lm_port, lm_model, qwen_context_length, qwen_eval_batch_size, qwen_flash_attention, qwen_offload_kv_cache)
+        qwen_instance_id = loaded_qwen.get("instance_id")
+        view_stat.success(f"Qwen загружена: {loaded_qwen.get('load_config', {})}")
+        processed_text_pages = 0
+        phase_progress.progress(0.0, text="Фаза 2/2: Qwen text/VLM")
 
-                # 2. Детекция нотных станов (с автоинверсией фона)
-                boxes = detect_staff_regions(img_bgr)
-                masked_img = img_bgr.copy()
-                scores_on_page = {}
-                crop_jobs = []
-
-                for s_id, (x, y, w, h) in enumerate(boxes, start=1):
-                    crop_tag = f"{book_title}_P{p_num:04d}_S{s_id:02d}"
-                    crop_png = crops_dir / f"{crop_tag}.png"
-                    crop_abc_file = crops_dir / f"{crop_tag}.abc"
-
-                    crop_mat = img_bgr[y:y+h, x:x+w]
-                    if not crop_png.exists() or overwrite:
-                        cv2.imwrite(str(crop_png), crop_mat)
-
-                    crop_jobs.append((crop_tag, crop_abc_file, crop_mat))
-
-                    # Белая заплата и ID-метка рисуются до тяжелого OMR-инференса,
-                    # чтобы пользователь сразу видел, что страница обрабатывается.
-                    cv2.rectangle(masked_img, (x, y), (x + w, y + h), (255, 255, 255), -1)
-                    cv2.putText(
-                        masked_img,
-                        f"<!-- MUSIC_STUB_ID:{crop_tag} -->",
-                        (x + 10, y + max(25, int(h / 2))),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6,
-                        (80, 80, 80),
-                        2
-                    )
-
-                cv2.imwrite(str(masked_page_png), masked_img)
-                _, masked_jpg_bytes = cv2.imencode(".jpg", masked_img)
-                view_img.image(
-                    masked_jpg_bytes.tobytes(),
-                    caption=f"Стр. {p_num}: найдено нотных систем: {len(boxes)}. OMR еще выполняется...",
-                    width="stretch",
-                )
-
-                # 3. Инференс SMT по каждому кропу отдельно
-                for crop_index, (crop_tag, crop_abc_file, crop_mat) in enumerate(crop_jobs, start=1):
-                    view_stat.warning(
-                        f"Книга: {book_title} | Стр. {p_num}/{total_pages} | "
-                        f"OMR-кроп {crop_index}/{len(crop_jobs)} на CPU..."
-                    )
-                    if has_valid_abc_cache(crop_abc_file) and not overwrite:
-                        abc_content = crop_abc_file.read_text(encoding="utf-8")
+        for pdf_path_str in active_queue:
+            pdf_path = Path(pdf_path_str)
+            book_title = pdf_path.stem
+            book_dir = base_out / book_title
+            crops_dir = book_dir / "1_crops"
+            masked_dir = book_dir / "2_masked_pages"
+            raw_md_dir = book_dir / "3_raw_md"
+            final_dir = book_dir / "4_final_pages"
+            with fitz.open(pdf_path) as doc:
+                for p_num in range(1, len(doc) + 1):
+                    if not st.session_state.is_running:
+                        break
+                    final_page_file = final_dir / f"page_{p_num:04d}.md"
+                    raw_md_file = raw_md_dir / f"page_{p_num:04d}_raw.md"
+                    masked_page_png = masked_dir / f"page_{p_num:04d}_masked.png"
+                    if has_valid_final_cache(final_page_file) and not overwrite:
+                        view_res.markdown(final_page_file.read_text(encoding="utf-8"))
+                        processed_text_pages += 1
+                        phase_progress.progress(processed_text_pages / max(1, total_pages_all), text=f"Фаза 2/2 Qwen | страниц готово {processed_text_pages}/{total_pages_all}")
+                        continue
+                    view_stat.warning(f"Фаза 2/2 текст: {book_title} | страница {p_num}/{len(doc)}")
+                    masked_bytes = masked_page_png.read_bytes()
+                    view_img.image(masked_bytes, caption=f"Текстовая фаза: страница {p_num}", width="stretch")
+                    if raw_md_file.exists() and not overwrite:
+                        raw_text = raw_md_file.read_text(encoding="utf-8")
                     else:
-                        abc_content = transcribe_crop(smt_model, crop_mat, smt_device)
-                        crop_abc_file.write_text(abc_content, encoding="utf-8")
+                        raw_text = request_vlm_native(masked_bytes, system_prompt, lm_host, lm_port, lm_model, lm_temperature, lm_max_tokens, qwen_context_length)
+                        raw_md_file.write_text(raw_text, encoding="utf-8")
 
-                    scores_on_page[crop_tag] = abc_content
+                    def inject_abc(match):
+                        cid = match.group(1).strip()
+                        abc_file = crops_dir / f"{cid}.abc"
+                        abc = abc_file.read_text(encoding="utf-8") if abc_file.exists() else "% [Ноты не найдены]"
+                        return f"\n\n```abc\n{abc}\n```\n\n"
 
-                # 4. Распознавание текста через LM Studio (без нот модель не галлюцинирует)
-                if raw_md_file.exists() and not overwrite:
-                    raw_text = raw_md_file.read_text(encoding="utf-8")
-                else:
-                    raw_text = stream_vlm(
-                        img_bytes=masked_jpg_bytes.tobytes(),
-                        prompt=system_prompt,
-                        host=lm_host,
-                        port=lm_port,
-                        model=lm_model,
-                        temp=lm_temperature,
-                        max_tokens=lm_max_tokens,
-                        out_placeholder=view_res
-                    )
-                    raw_md_file.write_text(raw_text, encoding="utf-8")
+                    final_text = re.sub(r"<!--\s*MUSIC_STUB_ID:\s*(.*?)\s*-->", inject_abc, raw_text)
+                    final_page_file.write_text(final_text, encoding="utf-8")
+                    view_res.markdown(final_text)
+                    processed_text_pages += 1
+                    phase_progress.progress(processed_text_pages / max(1, total_pages_all), text=f"Фаза 2/2 Qwen | страниц готово {processed_text_pages}/{total_pages_all}")
 
-                # 5. Подстановка ABC-нотации вместо меток
-                def inject_abc(match):
-                    cid = match.group(1).strip()
-                    abc = scores_on_page.get(cid, "")
-                    if not abc:
-                        c_file = crops_dir / f"{cid}.abc"
-                        abc = c_file.read_text(encoding="utf-8") if c_file.exists() else "% [Ноты не найдены]"
-                    return f"\n\n```abc\n{abc}\n```\n\n"
-
-                final_text = re.sub(r"<!--\s*MUSIC_STUB_ID:\s*(.*?)\s*-->", inject_abc, raw_text)
-                final_page_file.write_text(final_text, encoding="utf-8")
-                view_res.markdown(final_text)
-
-                # Очистка памяти
-                del img_bgr, masked_img
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                gc.collect()
-                time.sleep(float(delay))
-
-            # Склейка всей книги в единый файл
             all_pages = sorted(final_dir.glob("page_*.md"))
-            full_content = "\n\n---\n\n".join([f"<!-- PAGE {p.stem} -->\n" + p.read_text(encoding="utf-8") for p in all_pages])
+            full_content = "\n\n---\n\n".join([f"<!-- PAGE {page.stem} -->\n" + page.read_text(encoding="utf-8") for page in all_pages])
             (book_dir / f"{book_title}_complete.md").write_text(full_content, encoding="utf-8")
-
-    st.session_state.is_running = False
-    st.success("Все книги из очереди успешно обработаны!")
+    finally:
+        if smt_model is not None:
+            del smt_model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+        if qwen_instance_id:
+            try:
+                unload_lm_model(lm_host, lm_port, qwen_instance_id)
+            except Exception as exc:
+                st.error(f"Не удалось выгрузить Qwen: {exc}")
+        st.session_state.is_running = False
+        st.success("Обе фазы завершены, модели выгружены из памяти.")
