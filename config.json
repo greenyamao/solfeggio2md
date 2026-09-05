@@ -1,0 +1,13 @@
+{
+  "lm_host": "127.0.0.1",
+  "lm_port": "1234",
+  "lm_model": "qwen/qwen3.5-9b",
+  "lm_temperature": 0.1,
+  "lm_max_tokens": 8192,
+  "output_dir": "C:\\Users\\greenbox\\Desktop\\pdf_to_md_music\\output",
+  "dpi": 200,
+  "delay": 0.5,
+  "overwrite": true,
+  "smt_device": "cpu",
+  "system_prompt": "Ты — строгий OCR-транскрибатор. Перенеси весь текст страницы книги в Markdown дословно.\nСохраняй заголовки, списки и таблицы.\nВАЖНО: Если на странице встречаются технические метки вида <!-- MUSIC_STUB_ID:XXXX -->, ОБЯЗАТЕЛЬНО оставь их в тексте на тех же местах без изменений. Ничего не додумывай."
+}
