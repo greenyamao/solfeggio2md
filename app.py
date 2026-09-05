@@ -251,6 +251,15 @@ def transcribe_crop(model, crop_bgr, device):
     if model is None:
         return "% [SMT не подключен]"
     try:
+        max_height = int(getattr(model.config, "maxh", crop_bgr.shape[0]))
+        max_width = int(getattr(model.config, "maxw", crop_bgr.shape[1]))
+        scale = min(1.0, max_height / crop_bgr.shape[0], max_width / crop_bgr.shape[1])
+        if scale < 1.0:
+            crop_bgr = cv2.resize(
+                crop_bgr,
+                (max(1, int(crop_bgr.shape[1] * scale)), max(1, int(crop_bgr.shape[0] * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
         # This process must never move OMR tensors onto the GPU used by LM Studio.
         tensor = convert_img_to_tensor(crop_bgr).unsqueeze(0).to("cpu")
         predictions, _ = model.predict(tensor, convert_to_str=True)
@@ -524,6 +533,7 @@ if st.session_state.is_running:
                 boxes = detect_staff_regions(img_bgr)
                 masked_img = img_bgr.copy()
                 scores_on_page = {}
+                crop_jobs = []
 
                 for s_id, (x, y, w, h) in enumerate(boxes, start=1):
                     crop_tag = f"{book_title}_P{p_num:04d}_S{s_id:02d}"
@@ -534,16 +544,10 @@ if st.session_state.is_running:
                     if not crop_png.exists() or overwrite:
                         cv2.imwrite(str(crop_png), crop_mat)
 
-                    # 3. Инференс SMT
-                    if has_valid_abc_cache(crop_abc_file) and not overwrite:
-                        abc_content = crop_abc_file.read_text(encoding="utf-8")
-                    else:
-                        abc_content = transcribe_crop(smt_model, crop_mat, smt_device)
-                        crop_abc_file.write_text(abc_content, encoding="utf-8")
+                    crop_jobs.append((crop_tag, crop_abc_file, crop_mat))
 
-                    scores_on_page[crop_tag] = abc_content
-
-                    # Белая заплата и ID-метка на очищенном скане
+                    # Белая заплата и ID-метка рисуются до тяжелого OMR-инференса,
+                    # чтобы пользователь сразу видел, что страница обрабатывается.
                     cv2.rectangle(masked_img, (x, y), (x + w, y + h), (255, 255, 255), -1)
                     cv2.putText(
                         masked_img,
@@ -557,7 +561,25 @@ if st.session_state.is_running:
 
                 cv2.imwrite(str(masked_page_png), masked_img)
                 _, masked_jpg_bytes = cv2.imencode(".jpg", masked_img)
-                view_img.image(masked_jpg_bytes.tobytes(), caption=f"Стр. {p_num}: {len(boxes)} нотных систем найдено", width="stretch")
+                view_img.image(
+                    masked_jpg_bytes.tobytes(),
+                    caption=f"Стр. {p_num}: найдено нотных систем: {len(boxes)}. OMR еще выполняется...",
+                    width="stretch",
+                )
+
+                # 3. Инференс SMT по каждому кропу отдельно
+                for crop_index, (crop_tag, crop_abc_file, crop_mat) in enumerate(crop_jobs, start=1):
+                    view_stat.warning(
+                        f"Книга: {book_title} | Стр. {p_num}/{total_pages} | "
+                        f"OMR-кроп {crop_index}/{len(crop_jobs)} на CPU..."
+                    )
+                    if has_valid_abc_cache(crop_abc_file) and not overwrite:
+                        abc_content = crop_abc_file.read_text(encoding="utf-8")
+                    else:
+                        abc_content = transcribe_crop(smt_model, crop_mat, smt_device)
+                        crop_abc_file.write_text(abc_content, encoding="utf-8")
+
+                    scores_on_page[crop_tag] = abc_content
 
                 # 4. Распознавание текста через LM Studio (без нот модель не галлюцинирует)
                 if raw_md_file.exists() and not overwrite:
