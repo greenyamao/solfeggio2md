@@ -6,8 +6,9 @@ import json
 import torch
 import numpy as np
 from typing import Dict, List, Any, Optional
+import pymupdf as fitz
 
-from core.page_preprocessor import deskew_page, PagePreprocessor
+from core.page_preprocessor import deskew_page, PagePreprocessor, normalize_staff_crop
 from core.layout_detector import LayoutDetector
 
 
@@ -88,6 +89,44 @@ class PipelineWorker:
         pages.sort(key=lambda p: p["page_id"])
         return pages
 
+    def _ensure_layout_detector(self):
+        if self.layout_detector is None:
+            weights_path = self.root_dir / "weights" / "ola-layout-analysis-2.0-2025-03-09.pt"
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            self.layout_detector = LayoutDetector(weights_path=str(weights_path), device=device)
+
+    def _generate_debug_page(self, book_name: str, p_num: int, debug_file: Path) -> bool:
+        """
+        Generates original scan with YOLO bounding boxes on demand if missing from disk.
+        """
+        pdf_path = self.root_dir / "in" / f"{book_name}.pdf"
+        if not pdf_path.is_file():
+            # Try to locate by prefix/name in in/
+            candidates = list((self.root_dir / "in").glob("*.pdf"))
+            if candidates:
+                pdf_path = candidates[0]
+            else:
+                return False
+
+        try:
+            self._ensure_layout_detector()
+            with fitz.open(pdf_path) as doc:
+                if p_num > len(doc) or p_num < 1:
+                    return False
+                page = doc[p_num - 1]
+                pix = page.get_pixmap(dpi=200)
+                img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+                img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR if pix.n == 4 else cv2.COLOR_RGB2BGR)
+
+            deskewed_bgr, _ = deskew_page(img_bgr)
+            detections = self.layout_detector.detect(deskewed_bgr)
+            debug_img = self.layout_detector.render_debug_image(deskewed_bgr, detections)
+            debug_file.parent.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(debug_file), debug_img)
+            return True
+        except Exception as e:
+            return False
+
     def get_page_data(self, page_id: str) -> Dict[str, Any]:
         """
         Loads real data for a given page including crops, deskewed crops,
@@ -101,6 +140,12 @@ class PipelineWorker:
         book_dir = self.root_dir / "output" / book_name
         p_num = int(p_suffix)
         masked_file = book_dir / "2_masked_pages" / f"page_{p_num:04d}_masked.png"
+        debug_file = book_dir / "2_masked_pages" / f"page_{p_num:04d}_debug.png"
+
+        # Generate debug image with YOLO bounding boxes if not yet on disk
+        if not debug_file.is_file():
+            self._generate_debug_page(book_name, p_num, debug_file)
+
         crops_dir = book_dir / "1_crops"
         crops_data = []
 
@@ -113,16 +158,30 @@ class PipelineWorker:
                 cls_name = "grand_staff" if "grand_staff" in cf.stem else "staff"
                 abc_file = crops_dir / f"{cf.stem}.abc"
                 abc_txt = abc_file.read_text(encoding="utf-8", errors="replace").strip() if abc_file.is_file() else ""
+
+                deskew_file = crops_dir / f"{cf.stem}_deskew.png"
+                cf_bgr = cv2.imread(str(cf))
+                if cf_bgr is not None:
+                    h_c, w_c = cf_bgr.shape[:2]
+                    if not deskew_file.is_file():
+                        dewarped_bgr, tilt_deg, bend_px = normalize_staff_crop(cf_bgr)
+                        cv2.imwrite(str(deskew_file), dewarped_bgr)
+                    else:
+                        _, tilt_deg, bend_px = normalize_staff_crop(cf_bgr)
+                else:
+                    h_c, w_c, tilt_deg, bend_px = 60, 1000, 0.0, 0.0
+
                 crops_data.append({
                     "id": f"S{idx:02d}",
                     "crop_stem": cf.stem,
                     "class": cls_name,
                     "index": idx,
                     "raw_url": f"/output/{book_name}/1_crops/{cf.name}",
-                    "deskew_url": f"/output/{book_name}/1_crops/{cf.name}",
-                    "skew_angle": 0.0,
-                    "width": 800,
-                    "height": 200,
+                    "deskew_url": f"/output/{book_name}/1_crops/{cf.stem}_deskew.png",
+                    "skew_angle": round(tilt_deg, 1),
+                    "bend_delta": round(bend_px, 1),
+                    "width": w_c,
+                    "height": h_c,
                     "abc": abc_txt,
                     "kern": "",
                     "model_used": "OMR" if abc_txt else "Pending"
@@ -138,11 +197,13 @@ class PipelineWorker:
             markdown_text = f"*(Текст страницы еще не распознан. Запустите пакетную обработку в Панели управления)*\n"
 
         mask_rel = f"/output/{book_name}/2_masked_pages/page_{p_num:04d}_masked.png"
+        debug_rel = f"/output/{book_name}/2_masked_pages/page_{p_num:04d}_debug.png" if debug_file.is_file() else mask_rel
+
         return {
             "page_id": page_id,
             "title": f"Стр. {p_num}",
-            "original_url": mask_rel,
-            "debug_url": mask_rel,
+            "original_url": debug_rel,
+            "debug_url": debug_rel,
             "mask_url": mask_rel,
             "crops": crops_data,
             "markdown": markdown_text
@@ -171,7 +232,11 @@ class PipelineWorker:
             return {"status": "error", "message": f"Invalid page_id: {page_id}"}
         book_name, _ = page_id.split("__page_", 1)
         crops_dir = self.root_dir / "output" / book_name / "1_crops"
-        crop_file = crops_dir / f"{crop_stem}.png"
+        
+        # Prefer deskewed crop if available
+        deskew_file = crops_dir / f"{crop_stem}_deskew.png"
+        raw_file = crops_dir / f"{crop_stem}.png"
+        crop_file = deskew_file if deskew_file.is_file() else raw_file
         
         if not crop_file.is_file():
             return {"status": "error", "message": f"Crop file not found: {crop_file}"}

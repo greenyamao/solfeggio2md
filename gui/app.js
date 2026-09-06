@@ -530,7 +530,8 @@
     crops.forEach((crop, idx) => {
       const chip = document.createElement('button');
       chip.className = `staff-chip ${idx === state.selectedCropIndex ? 'active' : ''}`;
-      chip.innerHTML = `<span>#${crop.index} ${crop.class}</span> <span class="badge badge-grand">${crop.skew_angle > 0 ? '+' : ''}${crop.skew_angle}°</span>`;
+      const bendTxt = crop.bend_delta ? ` ~${crop.bend_delta}px` : '';
+      chip.innerHTML = `<span>#${crop.index} ${crop.class}</span> <span class="badge badge-grand">${crop.skew_angle > 0 ? '+' : ''}${crop.skew_angle}°${bendTxt}</span>`;
       chip.addEventListener('click', () => {
         state.selectedCropIndex = idx;
         renderMode2();
@@ -541,12 +542,19 @@
     const activeCrop = crops[state.selectedCropIndex];
     DOM.normRawImg.src = activeCrop.raw_url;
     DOM.normDeskewImg.src = activeCrop.deskew_url;
-    DOM.normAngleBadge.textContent = `Угол доворота: ${activeCrop.skew_angle > 0 ? '+' : ''}${activeCrop.skew_angle}°`;
+    const bendInfo = activeCrop.bend_delta ? ` • Прогиб: ${activeCrop.bend_delta} px` : '';
+    DOM.normAngleBadge.textContent = `Поворот: ${activeCrop.skew_angle > 0 ? '+' : ''}${activeCrop.skew_angle}°${bendInfo}`;
     DOM.normRawDim.textContent = `${activeCrop.width} × ${activeCrop.height} px`;
     DOM.normStaffId.textContent = `#${activeCrop.index} (${activeCrop.id})`;
     DOM.normStaffClass.textContent = activeCrop.class;
     DOM.normStaffRes.textContent = `${activeCrop.width} × ${activeCrop.height} px`;
-    DOM.normStaffStatus.textContent = Math.abs(activeCrop.skew_angle) < 0.05 ? 'Идеально горизонтально' : 'Выровнен 2D-DFT';
+    if (activeCrop.bend_delta > 2.5) {
+      DOM.normStaffStatus.textContent = `Устранён прогиб (${activeCrop.bend_delta} px) + доворот (${activeCrop.skew_angle}°)`;
+    } else if (Math.abs(activeCrop.skew_angle) >= 0.25) {
+      DOM.normStaffStatus.textContent = `Устранён поворот (${activeCrop.skew_angle}°)`;
+    } else {
+      DOM.normStaffStatus.textContent = 'Идеально горизонтально';
+    }
   }
 
   function renderMode3() {

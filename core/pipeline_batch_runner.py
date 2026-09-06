@@ -26,7 +26,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from core.lmstudio_client import LMStudioClient
-from core.page_preprocessor import PagePreprocessor, deskew_page
+from core.page_preprocessor import PagePreprocessor, deskew_page, normalize_staff_crop
 from core.layout_detector import LayoutDetector
 
 
@@ -561,11 +561,21 @@ class PipelineBatchRunner:
                     deskewed_bgr, detections, tag_prefix=f"{pdf_path.stem}_P{p_idx:04d}"
                 )
 
+                # Render and save debug image with YOLO bounding boxes for UI inspection
+                debug_img = self.layout_detector.render_debug_image(deskewed_bgr, detections)
+                debug_file = masked_dir / f"page_{p_idx:04d}_debug.png"
+                cv2.imwrite(str(debug_file), debug_img)
+
                 cv2.imwrite(str(mask_file), masked_img)
 
                 for crop in crops_data:
                     crop_name = f"{crop['stub_id']}.png"
                     cv2.imwrite(str(crops_dir / crop_name), crop["crop_img"])
+
+                    # Normalize and dewarp staff for OMR
+                    dewarped_bgr, _, _ = normalize_staff_crop(crop["crop_img"])
+                    deskew_name = f"{crop['stub_id']}_deskew.png"
+                    cv2.imwrite(str(crops_dir / deskew_name), dewarped_bgr)
 
                 pages_done_count += 1
                 chk["phases"]["slicing"]["pages_done"] = pages_done_count
@@ -624,7 +634,9 @@ class PipelineBatchRunner:
             if not overwrite and crop_file.stem in existing_valid_abcs:
                 continue
 
-            crop_bgr = cv2.imread(str(crop_file))
+            deskew_file = crops_dir / f"{crop_file.stem}_deskew.png"
+            crop_path_to_read = deskew_file if deskew_file.is_file() else crop_file
+            crop_bgr = cv2.imread(str(crop_path_to_read))
             if crop_bgr is None:
                 continue
 

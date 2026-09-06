@@ -151,3 +151,78 @@ class PagePreprocessor:
             })
             
         return results
+
+
+def normalize_staff_crop(crop_bgr: np.ndarray) -> Tuple[np.ndarray, float, float]:
+    """
+    High-precision music staff crop normalization:
+    1. Detects local staff-line rotational tilt (degrees).
+    2. Detects non-linear arching/spine curvature (bend delta in pixels).
+    3. Straightens and dewarps the staff lines using subpixel coordinate remap.
+    
+    Returns:
+        (normalized_crop_bgr, tilt_angle_degrees, bend_delta_pixels)
+    """
+    h_orig, w_orig = crop_bgr.shape[:2]
+    if h_orig < 20 or w_orig < 50:
+        return crop_bgr, 0.0, 0.0
+
+    # Add vertical headroom padding so arched staff lines don't get clipped
+    pad_v = max(12, int(h_orig * 0.25))
+    padded = cv2.copyMakeBorder(crop_bgr, pad_v, pad_v, 0, 0, cv2.BORDER_CONSTANT, value=(255, 255, 255))
+    h, w = padded.shape[:2]
+
+    gray = cv2.cvtColor(padded, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    k_len = max(15, w // 35)
+    horiz_k = cv2.getStructuringElement(cv2.MORPH_RECT, (k_len, 1))
+    staff_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, horiz_k)
+
+    num_cols = min(25, max(8, w // 40))
+    win_w = w / num_cols
+    xs, ys = [], []
+    for i in range(num_cols):
+        x1 = int(i * win_w)
+        x2 = int((i + 1) * win_w)
+        slice_img = staff_lines[:, x1:x2]
+        proj = np.sum(slice_img, axis=1)
+        if np.sum(proj) > 0:
+            com_y = float(np.average(np.arange(h), weights=proj))
+            ys.append(com_y)
+            xs.append((x1 + x2) / 2.0)
+
+    if len(ys) < 5:
+        return crop_bgr, 0.0, 0.0
+
+    # Quadratic curve fit: y = a*x^2 + b*x + c
+    poly = np.polyfit(xs, ys, 2)
+    curve_y = np.polyval(poly, np.arange(w))
+    bend_delta = float(np.max(curve_y) - np.min(curve_y))
+
+    # Center slope gives the overall rotational tilt
+    center_x = w / 2.0
+    slope = 2 * poly[0] * center_x + poly[1]
+    tilt_deg = float(np.degrees(np.arctan(slope)))
+
+    # If already virtually straight, return original with measured metrics
+    if bend_delta < 2.0 and abs(tilt_deg) < 0.25:
+        return crop_bgr, tilt_deg, bend_delta
+
+    target_y = h / 2.0
+    shift_y = curve_y - target_y
+
+    map_x = np.tile(np.arange(w, dtype=np.float32), (h, 1))
+    map_y = np.empty((h, w), dtype=np.float32)
+    for y in range(h):
+        map_y[y, :] = np.float32(y + shift_y)
+
+    dewarped = cv2.remap(
+        padded,
+        map_x,
+        map_y,
+        interpolation=cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(255, 255, 255)
+    )
+    return dewarped, tilt_deg, bend_delta
