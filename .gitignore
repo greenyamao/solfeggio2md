@@ -1,4 +1,21 @@
+# Virtual environments
+venv/
+.venv/
+
+# Caches
+__pycache__/
+*.pyc
+
+# Local data & temporary processing
 /SMT
 /output
 /.queue_temp
 /in
+test_bench/output/
+
+# Large model weights (download via scripts)
+weights/*.pt
+weights/*.pth
+weights/*.safetensors
+weights/*.bin
+
