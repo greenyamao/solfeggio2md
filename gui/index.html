@@ -3,30 +3,45 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Solfeggio OCR Workbench</title>
+  <title>Solfeggio OCR Studio</title>
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-  <!-- Header & Master Navigation Toolbar -->
+  <!-- Master Application Header -->
   <header id="app-header">
     <div class="brand-section">
-      <span class="brand-icon">🎵</span>
-      <span class="brand-title">Solfeggio OCR Workbench</span>
+      <svg class="icon-brand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9 18V5l12-2v13"></path>
+        <circle cx="6" cy="18" r="3"></circle>
+        <circle cx="18" cy="16" r="3"></circle>
+      </svg>
+      <span class="brand-title">SOLFEGGIO OCR STUDIO</span>
       <span class="brand-badge">Dual-Model OMR + VLM</span>
     </div>
 
-    <!-- Page Switcher (Left / Right Arrows or [◄ / ►]) -->
-    <div class="nav-section">
-      <button id="btn-prev-page" class="btn-nav" title="Предыдущая страница (Клавиша: ◄ или A)">◄</button>
-      <select id="page-select" class="page-selector" title="Выбор страницы учебника">
-        <option value="">Загрузка страниц...</option>
-      </select>
-      <button id="btn-next-page" class="btn-nav" title="Следующая страница (Клавиша: ► или D)">►</button>
-      <span id="page-counter" class="page-counter">-- / --</span>
+    <!-- Workspace View Mode Switcher -->
+    <div class="workspace-switcher">
+      <button id="btn-ws-dashboard" class="btn-workspace active">
+        <svg class="svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="3" width="7" height="7"></rect>
+          <rect x="14" y="3" width="7" height="7"></rect>
+          <rect x="14" y="14" width="7" height="7"></rect>
+          <rect x="3" y="14" width="7" height="7"></rect>
+        </svg>
+        <span>Конвейер обработки</span>
+      </button>
+
+      <button id="btn-ws-workbench" class="btn-workspace">
+        <svg class="svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"></path>
+          <circle cx="12" cy="12" r="3"></circle>
+        </svg>
+        <span>Детальная инспекция</span>
+      </button>
     </div>
 
-    <!-- View Mode Switchers [1, 2, 3, 4] -->
-    <div class="mode-section">
+    <!-- Workbench Sub-modes (Visible in Workbench View) -->
+    <div id="workbench-submodes" class="mode-section" style="display: none;">
       <button id="btn-mode-1" class="btn-mode active" data-mode="1" title="Горячая клавиша: 1">
         <span class="key-badge">1</span>
         <span>Скан vs Маска</span>
@@ -44,181 +59,309 @@
         <span>Книга (Финал)</span>
       </button>
     </div>
+
+    <!-- Header Actions (Settings Trigger) -->
+    <div class="header-actions">
+      <button id="btn-open-settings" class="btn-action" title="Параметры и конфигурация">
+        <svg class="svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+        </svg>
+        <span>Параметры</span>
+      </button>
+    </div>
   </header>
 
-  <!-- Master Zero-Scroll Viewport Container -->
+  <!-- Master Zero-Scroll Workspace Container -->
   <main id="app-viewport">
-    
+
     <!-- ====================================================================
-         MODE 1: Scan vs Mask (50/50 Split Screen)
+         WORKSPACE 1: BATCH PIPELINE DASHBOARD (Queue, HUD, Multi-Pass)
          ==================================================================== -->
-    <div id="view-mask" class="view-panel active">
-      <div class="split-container">
-        <!-- Left: Annotated Scan -->
-        <div class="split-column">
-          <div class="panel-header">
-            <div class="panel-title-group">
-              <span class="panel-title">📷 Исходный скан с разметкой YOLO OLA</span>
-              <span id="badge-staves-count" class="badge badge-staff">0 станов</span>
-            </div>
-            <span class="badge badge-grand">YOLOv8 Layout v2.0</span>
+    <div id="workspace-dashboard" class="workspace-panel active">
+      
+      <!-- Fixed-Height Unified Progress HUD (Strict Zero-Scroll Component) -->
+      <section class="hud-dashboard-card">
+        <div class="hud-row">
+          <div class="hud-metric-group">
+            <span class="hud-metric-label">ОБЩИЙ ПРОГРЕСС ОЧЕРЕДИ</span>
+            <span id="hud-queue-metric" class="hud-metric-value">0.0% (Книг: 0/0 • Стр: 0)</span>
           </div>
-          <div class="panel-canvas">
-            <img id="scan-debug-img" class="fit-image" alt="Аннотированный скан" src="" />
+          <div class="hud-progress-wrapper">
+            <div id="hud-queue-bar" class="hud-progress-fill" style="width: 0%;"></div>
+          </div>
+          <div class="hud-time-group">
+            <span class="hud-metric-label">ВРЕМЯ ОБРАБОТКИ</span>
+            <span id="hud-time-metric" class="hud-metric-value">00:00 • ETA: --:--</span>
           </div>
         </div>
 
-        <!-- Right: Masked Page with White Stubs for VLM -->
-        <div class="split-column">
-          <div class="panel-header">
-            <div class="panel-title-group">
-              <span class="panel-title">🎭 Маскированная страница (Белые заплатки)</span>
-              <span class="badge badge-mask">&lt;!-- MUSIC_STUB_ID --&gt;</span>
-            </div>
-            <span class="text-secondary" style="font-size: 11px;">Вход для LM Studio VLM</span>
+        <div class="hud-row" style="margin-top: 10px;">
+          <div class="hud-metric-group">
+            <span class="hud-metric-label">ТЕКУЩИЙ ЭТАП ПРОХОДА</span>
+            <span id="hud-phase-name" class="hud-phase-highlight">Готов к запуску</span>
           </div>
-          <div class="panel-canvas">
-            <img id="scan-mask-img" class="fit-image" alt="Маскированная страница" src="" />
+          <div class="hud-progress-wrapper">
+            <div id="hud-phase-bar" class="hud-progress-fill fill-accent" style="width: 0%;"></div>
+          </div>
+          <div class="hud-status-group">
+            <span id="hud-item-detail" class="hud-detail-text">Очередь ожидает команды</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Pipeline Control Action Bar -->
+      <section class="pipeline-controls-bar">
+        <div class="controls-left">
+          <button id="btn-pipeline-start" class="btn-control btn-primary">
+            <svg class="svg-icon" viewBox="0 0 24 24" fill="currentColor">
+              <polygon points="5 3 19 12 5 21 5 3"></polygon>
+            </svg>
+            <span>Запустить конвейер</span>
+          </button>
+
+          <button id="btn-pipeline-pause" class="btn-control" disabled>
+            <svg class="svg-icon" viewBox="0 0 24 24" fill="currentColor">
+              <rect x="6" y="4" width="4" height="16"></rect>
+              <rect x="14" y="4" width="4" height="16"></rect>
+            </svg>
+            <span>Приостановить</span>
+          </button>
+
+          <button id="btn-pipeline-stop" class="btn-control btn-danger" disabled>
+            <svg class="svg-icon" viewBox="0 0 24 24" fill="currentColor">
+              <rect x="4" y="4" width="16" height="16"></rect>
+            </svg>
+            <span>Остановить</span>
+          </button>
+        </div>
+
+        <div class="controls-right">
+          <button id="btn-queue-clear" class="btn-action">
+            <svg class="svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="3 6 5 6 21 6"></polyline>
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+            </svg>
+            <span>Очистить очередь</span>
+          </button>
+        </div>
+      </section>
+
+      <!-- Dashboard Main Split Layout (Queue Table vs Live View) -->
+      <div class="dashboard-split-container">
+        <!-- Left Pane: Queue Table & Dropzone -->
+        <div class="dashboard-left-pane">
+          <!-- Compact PDF Drag & Drop Zone -->
+          <div id="pdf-dropzone" class="dropzone-box">
+            <svg class="svg-icon-large" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+              <polyline points="14 2 14 8 20 8"></polyline>
+              <line x1="12" y1="18" x2="12" y2="12"></line>
+              <line x1="9" y1="15" x2="15" y2="15"></line>
+            </svg>
+            <div class="dropzone-text-group">
+              <span class="dropzone-title">Перетащите PDF файлы сюда</span>
+              <span class="dropzone-sub">или нажмите для выбора с диска</span>
+            </div>
+            <input type="file" id="pdf-file-input" accept=".pdf" multiple style="display: none;">
+          </div>
+
+          <!-- Queue Items Table -->
+          <div class="queue-table-container">
+            <div class="queue-table-header">
+              <span>ОЧЕРЕДЬ КНИГ К ОБРАБОТКЕ</span>
+              <span id="queue-count-badge" class="badge badge-staff">0 файлов</span>
+            </div>
+            <div id="queue-table-body" class="queue-table-body">
+              <!-- Rendered dynamically -->
+              <div class="queue-empty-placeholder">
+                <span>Очередь пуста. Добавьте один или несколько PDF документов.</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right Pane: Live View & Checkpoint Journal -->
+        <div class="dashboard-right-pane">
+          <div class="live-card">
+            <div class="panel-header">
+              <span class="panel-title">Текущая страница (Live предпросмотр)</span>
+              <span id="live-book-badge" class="badge badge-grand">Режим ожидания</span>
+            </div>
+            <div class="live-image-canvas">
+              <img id="live-preview-img" class="fit-image" alt="Предпросмотр" src="" />
+              <div id="live-empty-banner" class="live-empty-state">
+                <span>Изображение появится после старта конвейера</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- System Journal Log Console -->
+          <div class="log-card">
+            <div class="log-header">
+              <span>ЖУРНАЛ ОПЕРАЦИЙ</span>
+              <span id="log-status-dot" class="status-dot"></span>
+            </div>
+            <pre id="log-console-box" class="log-console-box"></pre>
           </div>
         </div>
       </div>
+
     </div>
 
     <!-- ====================================================================
-         MODE 2: Staff Normalization & Deskew (Raw vs Deskewed)
+         WORKSPACE 2: VISUAL INSPECTION WORKBENCH (4 Detailed Modes)
          ==================================================================== -->
-    <div id="view-normalization" class="view-panel">
-      <!-- Staves Selector Sub-bar -->
-      <div id="staves-subbar-2" class="subbar-staves">
-        <!-- Rendered dynamically: [ #1 staff | -0.33° ], [ #2 grand_staff | 0.00° ] -->
-      </div>
-
-      <div class="split-container" style="flex: 1;">
-        <!-- Left: Raw Crop -->
-        <div class="split-column">
-          <div class="panel-header">
-            <div class="panel-title-group">
-              <span class="panel-title">✂️ Исходная вырезка со скана</span>
-              <span id="norm-raw-dim" class="badge badge-staff">--x-- px</span>
-            </div>
-            <span class="text-muted" style="font-size: 12px;">Без доворота</span>
-          </div>
-          <div class="panel-canvas">
-            <img id="norm-raw-img" class="fit-image" alt="Исходная вырезка" src="" />
-          </div>
-        </div>
-
-        <!-- Right: Deskewed Crop with Rotation Angle -->
-        <div class="split-column">
-          <div class="panel-header">
-            <div class="panel-title-group">
-              <span class="panel-title">📐 Нормализованный стан (Выровненный)</span>
-              <span id="norm-angle-badge" class="badge badge-grand">Угол: 0.00°</span>
-            </div>
-            <label class="toggle-group">
-              <input type="checkbox" id="toggle-guidelines" checked>
-              <span>Красные лазерные линии</span>
-            </label>
-          </div>
-          <div class="panel-canvas" id="norm-deskew-canvas">
-            <div id="guidelines-layer" class="guide-lines-overlay"></div>
-            <img id="norm-deskew-img" class="fit-image" alt="Выровненный стан" src="" />
-          </div>
+    <div id="workspace-workbench" class="workspace-panel">
+      <!-- Page Navigation Sub-bar for Workbench -->
+      <div class="workbench-nav-bar">
+        <div class="nav-section">
+          <button id="btn-prev-page" class="btn-nav" title="Предыдущая страница (◄ или A)">◄</button>
+          <select id="page-select" class="page-selector" title="Выбор страницы"></select>
+          <button id="btn-next-page" class="btn-nav" title="Следующая страница (► или D)">►</button>
+          <span id="page-counter" class="page-counter">-- / --</span>
         </div>
       </div>
 
-      <!-- Bottom Staff Details Dock -->
-      <div class="stats-card-dock">
-        <span>Стан: <strong id="norm-staff-id">--</strong></span>
-        <span>Класс: <strong id="norm-staff-class">--</strong></span>
-        <span>Ширина / Высота: <strong id="norm-staff-res">--</strong></span>
-        <span>Выравнивание: <strong id="norm-staff-status" style="color: var(--accent-green);">Строго параллельно</strong></span>
-      </div>
-    </div>
-
-    <!-- ====================================================================
-         MODE 3: Crop vs Transcribed ABC (OMR Inspection)
-         ==================================================================== -->
-    <div id="view-omr" class="view-panel">
-      <div class="split-container">
-        <!-- Left Pane: Crop Selection & Image -->
-        <div class="omr-left-pane">
-          <div id="staves-subbar-3" class="subbar-staves">
-            <!-- Rendered dynamically -->
-          </div>
-          <div class="crop-preview-box">
-            <img id="omr-crop-img" alt="Вырезка нот" src="" />
-          </div>
-          <div class="panel-header" style="background: var(--bg-surface-elevated); border-top: 1px solid var(--border-subtle);">
-            <span id="omr-model-badge" class="badge badge-grand">Transcoda-59M (RoPE)</span>
-            <button id="btn-rerun-omr" class="btn-action">
-              <span>⚡ Перераспознать стан</span>
-            </button>
+      <!-- Viewports Container (Modes 1, 2, 3, 4) -->
+      <div class="workbench-viewports">
+        <!-- MODE 1: Scan vs Mask -->
+        <div id="view-mask" class="view-panel active">
+          <div class="split-container">
+            <div class="split-column">
+              <div class="panel-header">
+                <div class="panel-title-group">
+                  <span class="panel-title">Исходный скан с разметкой YOLO OLA v2.0</span>
+                  <span id="badge-staves-count" class="badge badge-staff">0 станов</span>
+                </div>
+                <span class="badge badge-grand">OLA v2.0</span>
+              </div>
+              <div class="panel-canvas">
+                <img id="scan-debug-img" class="fit-image" alt="Аннотированный скан" src="" />
+              </div>
+            </div>
+            <div class="split-column">
+              <div class="panel-header">
+                <div class="panel-title-group">
+                  <span class="panel-title">Маскированная страница для VLM</span>
+                  <span class="badge badge-mask">&lt;!-- MUSIC_STUB_ID --&gt;</span>
+                </div>
+                <span class="text-secondary" style="font-size: 11px;">Белые плашки</span>
+              </div>
+              <div class="panel-canvas">
+                <img id="scan-mask-img" class="fit-image" alt="Маскированная страница" src="" />
+              </div>
+            </div>
           </div>
         </div>
 
-        <!-- Right Pane: Decoded ABC / Kern Code -->
-        <div class="omr-right-pane">
-          <div class="omr-toolbar">
-            <div style="display: flex; gap: 8px;">
-              <button id="btn-tab-abc" class="btn-action active" style="font-weight: bold;">ABC Нотация</button>
-              <button id="btn-tab-kern" class="btn-action">Humdrum **kern</button>
+        <!-- MODE 2: Normalization & Deskew -->
+        <div id="view-normalization" class="view-panel">
+          <div id="staves-subbar-2" class="subbar-staves"></div>
+          <div class="split-container" style="flex: 1;">
+            <div class="split-column">
+              <div class="panel-header">
+                <div class="panel-title-group">
+                  <span class="panel-title">Исходная вырезка со скана</span>
+                  <span id="norm-raw-dim" class="badge badge-staff">--x-- px</span>
+                </div>
+              </div>
+              <div class="panel-canvas">
+                <img id="norm-raw-img" class="fit-image" alt="Исходная вырезка" src="" />
+              </div>
             </div>
-            <div style="display: flex; gap: 8px;">
-              <button id="btn-copy-code" class="btn-action btn-primary" title="Скопировать нотный код в буфер обмена">
-                <span>📋 Копировать ноты</span>
-              </button>
+            <div class="split-column">
+              <div class="panel-header">
+                <div class="panel-title-group">
+                  <span class="panel-title">Выровненный стан (jdeskew 2D-DFT)</span>
+                  <span id="norm-angle-badge" class="badge badge-grand">Угол: 0.00°</span>
+                </div>
+                <label class="toggle-group">
+                  <input type="checkbox" id="toggle-guidelines" checked>
+                  <span>Направляющие сетки</span>
+                </label>
+              </div>
+              <div class="panel-canvas">
+                <div id="guidelines-layer" class="guide-lines-overlay"></div>
+                <img id="norm-deskew-img" class="fit-image" alt="Выровненный стан" src="" />
+              </div>
             </div>
           </div>
-
-          <div class="code-editor-container">
-            <div class="code-editor-header">
-              <span id="omr-code-meta" style="font-size: 12px; color: var(--text-secondary);">Синтаксис ABC 2.1 • Multi-Voice Support</span>
-              <span id="omr-copy-status" style="font-size: 11px; color: var(--accent-green); display: none;">Скопировано в буфер!</span>
-            </div>
-            <pre id="omr-code-box" class="code-box" contenteditable="true" spellcheck="false"></pre>
+          <div class="stats-card-dock">
+            <span>Стан: <strong id="norm-staff-id">--</strong></span>
+            <span>Класс: <strong id="norm-staff-class">--</strong></span>
+            <span>Разрешение: <strong id="norm-staff-res">--</strong></span>
+            <span>Параллельность: <strong id="norm-staff-status" style="color: var(--accent-green);">Строго горизонтально</strong></span>
           </div>
         </div>
-      </div>
-    </div>
 
-    <!-- ====================================================================
-         MODE 4: Electronic Book Final (Scan vs Rendered Markdown Page)
-         ==================================================================== -->
-    <div id="view-final" class="view-panel">
-      <div class="split-container">
-        <!-- Left: Original Scan -->
-        <div class="split-column" style="flex: 4.5;">
-          <div class="panel-header">
-            <span class="panel-title">📖 Оригинальный скан учебника</span>
-            <span class="badge badge-staff">Контрольный оригинал</span>
-          </div>
-          <div class="panel-canvas">
-            <img id="final-scan-img" class="fit-image" alt="Оригинальный скан" src="" />
+        <!-- MODE 3: OMR Verification -->
+        <div id="view-omr" class="view-panel">
+          <div class="split-container">
+            <div class="omr-left-pane">
+              <div id="staves-subbar-3" class="subbar-staves"></div>
+              <div class="crop-preview-box">
+                <img id="omr-crop-img" alt="Вырезка нот" src="" />
+              </div>
+              <div class="panel-header" style="background: var(--bg-surface-elevated); border-top: 1px solid var(--border-subtle);">
+                <span id="omr-model-badge" class="badge badge-grand">Transcoda-59M (RoPE)</span>
+                <button id="btn-rerun-omr" class="btn-action">
+                  <span>Перераспознать стан</span>
+                </button>
+              </div>
+            </div>
+            <div class="omr-right-pane">
+              <div class="omr-toolbar">
+                <div style="display: flex; gap: 8px;">
+                  <button id="btn-tab-abc" class="btn-action active" style="font-weight: bold;">ABC Нотация</button>
+                  <button id="btn-tab-kern" class="btn-action">Humdrum **kern</button>
+                </div>
+                <button id="btn-copy-code" class="btn-action btn-primary">
+                  <span>Копировать ноты</span>
+                </button>
+              </div>
+              <div class="code-editor-container">
+                <div class="code-editor-header">
+                  <span id="omr-code-meta" style="font-size: 12px; color: var(--text-secondary);">Синтаксис ABC 2.1 • Multi-Voice Support</span>
+                  <span id="omr-copy-status" style="font-size: 11px; color: var(--accent-green); display: none;">Скопировано в буфер</span>
+                </div>
+                <pre id="omr-code-box" class="code-box" contenteditable="true" spellcheck="false"></pre>
+              </div>
+            </div>
           </div>
         </div>
 
-        <!-- Right: Beautiful Rendered Book Typography Page -->
-        <div class="split-column" style="flex: 5.5;">
-          <div class="panel-header">
-            <div class="panel-title-group">
-              <span class="panel-title">📚 Отрендеренная электронная книга</span>
-              <span class="badge badge-grand">Markdown + Ноты</span>
+        <!-- MODE 4: Book Final -->
+        <div id="view-final" class="view-panel">
+          <div class="split-container">
+            <div class="split-column" style="flex: 4.5;">
+              <div class="panel-header">
+                <span class="panel-title">Оригинальный скан страницы</span>
+                <span class="badge badge-staff">Контрольный эталон</span>
+              </div>
+              <div class="panel-canvas">
+                <img id="final-scan-img" class="fit-image" alt="Оригинальный скан" src="" />
+              </div>
             </div>
-            <div style="display: flex; gap: 6px;">
-              <button id="btn-toggle-md-raw" class="btn-action">📝 Исходный текст</button>
-              <button id="btn-save-md" class="btn-action btn-primary">💾 Сохранить</button>
+            <div class="split-column" style="flex: 5.5;">
+              <div class="panel-header">
+                <div class="panel-title-group">
+                  <span class="panel-title">Отрендеренное издание книги</span>
+                  <span class="badge badge-grand">Типографика + Ноты</span>
+                </div>
+                <div style="display: flex; gap: 6px;">
+                  <button id="btn-toggle-md-raw" class="btn-action">Исходный Markdown</button>
+                  <button id="btn-save-md" class="btn-action btn-primary">Сохранить</button>
+                </div>
+              </div>
+              <div class="book-reader-container">
+                <article id="book-rendered-content" class="book-page-sheet"></article>
+                <textarea id="book-raw-editor" class="code-box" style="display: none; width: 100%; height: 100%; border-radius: 6px; font-size: 14px;"></textarea>
+              </div>
             </div>
-          </div>
-
-          <!-- Book Container with Custom Internal Scrollbar -->
-          <div class="book-reader-container">
-            <article id="book-rendered-content" class="book-page-sheet">
-              <!-- Rendered via marked.js with custom music blocks -->
-            </article>
-            <textarea id="book-raw-editor" class="code-box" style="display: none; width: 100%; height: 100%; border-radius: 6px; font-size: 14px;"></textarea>
           </div>
         </div>
+
       </div>
     </div>
 
@@ -229,25 +372,130 @@
     <div class="status-left">
       <div id="vram-status-pill" class="vram-pill vram-safe">
         <span class="vram-dot"></span>
-        <span id="vram-text">VRAM: 0 MB (Purged & Safe for VLM)</span>
+        <span id="vram-text">VRAM: 0 MB (Safe for VLM)</span>
       </div>
       <span id="device-name-text">GPU: NVIDIA RTX 5070 Mobile</span>
     </div>
 
     <div class="status-center">
-      <span id="page-summary-text">Учебник сольфеджио • Загрузка...</span>
+      <span id="page-summary-text">Конвейер готов</span>
     </div>
 
     <div class="status-right">
-      <span>[1-4] Режимы</span>
+      <span>[1-4] Режимы инспекции</span>
       <span>•</span>
-      <span>[◄ ►] Стр.</span>
+      <span>[◄ ►] Переход по страницам</span>
       <span>•</span>
-      <span>[▲ ▼] Станы</span>
-      <span>•</span>
-      <span>[Ctrl+C] ABC</span>
+      <span>[▲ ▼] Выбор станов</span>
     </div>
   </footer>
+
+  <!-- ====================================================================
+       SETTINGS MODAL (Configuration & LM Studio Connection Hub)
+       ==================================================================== -->
+  <div id="modal-settings" class="modal-backdrop" style="display: none;">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <span class="modal-title">Параметры и конфигурация системы</span>
+        <button id="btn-close-settings" class="btn-icon-close">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <!-- Group 1: LM Studio API -->
+        <fieldset class="settings-group">
+          <legend>LM Studio (Vision-Language Model)</legend>
+          <div class="form-row-split">
+            <div class="form-field">
+              <label>Хост сервера</label>
+              <input type="text" id="cfg-lm-host" value="127.0.0.1">
+            </div>
+            <div class="form-field">
+              <label>Порт API</label>
+              <input type="text" id="cfg-lm-port" value="1234">
+            </div>
+            <div class="form-field" style="align-self: flex-end;">
+              <button id="btn-test-lmstudio" class="btn-action" style="height: 38px;">
+                <span>Проверить связь</span>
+              </button>
+            </div>
+          </div>
+          <div id="lmstudio-test-result" class="test-feedback-line"></div>
+
+          <div class="form-row-split" style="margin-top: 10px;">
+            <div class="form-field" style="flex: 2;">
+              <label>Идентификатор модели (ID)</label>
+              <input type="text" id="cfg-lm-model" value="qwen/qwen3.5-9b">
+            </div>
+            <div class="form-field" style="flex: 1;">
+              <label>Температура</label>
+              <input type="number" id="cfg-lm-temp" step="0.05" min="0" max="1" value="0.1">
+            </div>
+            <div class="form-field" style="flex: 1;">
+              <label>Макс. токенов</label>
+              <input type="number" id="cfg-lm-tokens" step="512" min="512" value="8192">
+            </div>
+          </div>
+
+          <div class="form-row-split" style="margin-top: 10px;">
+            <div class="form-field">
+              <label>Контекст (Qwen)</label>
+              <input type="number" id="cfg-qwen-context" step="1024" min="2048" value="16196">
+            </div>
+            <div class="form-field">
+              <label>Batch Size</label>
+              <input type="number" id="cfg-qwen-batch" step="256" min="128" value="2048">
+            </div>
+            <div class="form-field" style="display: flex; align-items: center; gap: 8px; margin-top: 24px;">
+              <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                <input type="checkbox" id="cfg-flash-att" checked>
+                <span>Flash Attention</span>
+              </label>
+            </div>
+          </div>
+        </fieldset>
+
+        <!-- Group 2: Document Preprocessing & OMR -->
+        <fieldset class="settings-group" style="margin-top: 16px;">
+          <legend>Параметры предобработки и OMR</legend>
+          <div class="form-row-split">
+            <div class="form-field">
+              <label>Качество рендеринга PDF (DPI)</label>
+              <input type="number" id="cfg-dpi" min="150" max="300" step="10" value="200">
+            </div>
+            <div class="form-field">
+              <label>Максимум токенов OMR</label>
+              <input type="number" id="cfg-smt-tokens" min="64" max="1280" step="64" value="512">
+            </div>
+            <div class="form-field">
+              <label>Устройство OMR</label>
+              <select id="cfg-smt-device">
+                <option value="cuda">CUDA (NVIDIA GPU)</option>
+                <option value="cpu">CPU</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-row" style="margin-top: 10px;">
+            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+              <input type="checkbox" id="cfg-overwrite">
+              <span>Перезаписывать готовые страницы (принудительный перерасчет без кэша)</span>
+            </label>
+          </div>
+        </fieldset>
+
+        <!-- Group 3: System Prompt -->
+        <fieldset class="settings-group" style="margin-top: 16px;">
+          <legend>Системный промпт для VLM</legend>
+          <textarea id="cfg-system-prompt" class="code-box" style="height: 100px; width: 100%; font-size: 13px; line-height: 1.5;"></textarea>
+        </fieldset>
+      </div>
+
+      <div class="modal-footer">
+        <button id="btn-cancel-settings" class="btn-action">Отмена</button>
+        <button id="btn-save-settings" class="btn-action btn-primary">Сохранить параметры</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Scripts -->
   <script src="/static/lib/marked.min.js"></script>

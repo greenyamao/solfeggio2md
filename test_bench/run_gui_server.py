@@ -1,5 +1,5 @@
 """
-Runs the Workbench HTTP backend for browser testing and inspection.
+Runs the Workbench & Batch Studio HTTP backend for browser testing and inspection.
 """
 
 import sys
@@ -12,12 +12,16 @@ if str(ROOT_DIR) not in sys.path:
 
 from run_workbench import create_app
 from core.pipeline_worker import PipelineWorker
+from core.pipeline_batch_runner import PipelineBatchRunner
+
 
 def run():
     worker = PipelineWorker()
-    app = create_app(worker)
-    print("Serving Workbench at http://127.0.0.1:18492 ...")
+    runner = PipelineBatchRunner()
+    app = create_app(worker, runner)
+    print("Serving Studio at http://127.0.0.1:18492 ...")
     bottle.run(app, host='127.0.0.1', port=18492, quiet=False)
+
 
 if __name__ == "__main__":
     run()

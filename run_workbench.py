@@ -1,24 +1,26 @@
 """
-Solfeggio OCR Workbench — Standalone Windows Desktop GUI
+Solfeggio OCR Workbench & Batch Studio — Standalone Windows Desktop GUI
 Powered by pywebview (Microsoft Edge WebView2) and local Bottle server.
 """
 
-import os
-import sys
 import json
-import time
+import os
+import shutil
 import socket
+import sys
 import threading
+import time
 from pathlib import Path
 import bottle
 import webview
 
-# Add project root to sys.path
 ROOT_DIR = Path(__file__).parent.resolve()
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from core.pipeline_worker import PipelineWorker
+from core.pipeline_batch_runner import PipelineBatchRunner
+from core.lmstudio_client import LMStudioClient
 
 
 def find_available_port(start_port: int = 18492) -> int:
@@ -29,12 +31,13 @@ def find_available_port(start_port: int = 18492) -> int:
     return start_port
 
 
-def create_app(worker: PipelineWorker) -> bottle.Bottle:
+def create_app(worker: PipelineWorker, runner: PipelineBatchRunner) -> bottle.Bottle:
     app = bottle.Bottle()
     gui_dir = ROOT_DIR / "gui"
-    output_dir = ROOT_DIR / "test_bench" / "output"
+    test_bench_output = ROOT_DIR / "test_bench" / "output"
+    production_output = ROOT_DIR / "output"
 
-    # Static Assets
+    # ---------------- Static Asset Serving ---------------- #
     @app.route('/')
     def index():
         return bottle.static_file('index.html', root=str(gui_dir))
@@ -45,9 +48,12 @@ def create_app(worker: PipelineWorker) -> bottle.Bottle:
 
     @app.route('/output/<filepath:path>')
     def serve_output(filepath):
-        return bottle.static_file(filepath, root=str(output_dir))
+        # Check test_bench output first, then production output
+        if (test_bench_output / filepath).is_file():
+            return bottle.static_file(filepath, root=str(test_bench_output))
+        return bottle.static_file(filepath, root=str(production_output))
 
-    # REST APIs
+    # ---------------- Inspection Workbench APIs ---------------- #
     @app.route('/api/pages')
     def api_pages():
         bottle.response.content_type = 'application/json; charset=utf-8'
@@ -95,13 +101,140 @@ def create_app(worker: PipelineWorker) -> bottle.Bottle:
             bottle.response.status = 500
             return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
 
+    # ---------------- Batch Pipeline Runner APIs ---------------- #
+    @app.route('/api/queue', method='GET')
+    def api_queue_get():
+        bottle.response.content_type = 'application/json; charset=utf-8'
+        return json.dumps({"queue": runner.get_queue()}, ensure_ascii=False)
+
+    @app.route('/api/queue/add', method='POST')
+    def api_queue_add():
+        bottle.response.content_type = 'application/json; charset=utf-8'
+        try:
+            data = bottle.request.json or {}
+            path_str = data.get("path", "").strip().strip('"')
+            if not path_str:
+                return json.dumps({"status": "error", "message": "Путь к файлу не указан"}, ensure_ascii=False)
+
+            p = Path(path_str)
+            added_count = 0
+            if p.is_dir():
+                for sub_pdf in sorted(p.glob("*.pdf")):
+                    if runner.add_pdf(str(sub_pdf)):
+                        added_count += 1
+            elif p.is_file() and p.suffix.lower() == ".pdf":
+                if runner.add_pdf(str(p)):
+                    added_count += 1
+
+            return json.dumps({"status": "success", "added": added_count, "queue": runner.get_queue()}, ensure_ascii=False)
+        except Exception as e:
+            bottle.response.status = 500
+            return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+    @app.route('/api/queue/upload', method='POST')
+    def api_queue_upload():
+        bottle.response.content_type = 'application/json; charset=utf-8'
+        try:
+            upload = bottle.request.files.get('file')
+            if not upload:
+                return json.dumps({"status": "error", "message": "Файл не получен"}, ensure_ascii=False)
+
+            temp_dir = ROOT_DIR / ".queue_temp"
+            temp_dir.mkdir(exist_ok=True)
+            save_path = temp_dir / upload.raw_filename
+            upload.save(str(save_path), overwrite=True)
+
+            runner.add_pdf(str(save_path))
+            return json.dumps({"status": "success", "queue": runner.get_queue()}, ensure_ascii=False)
+        except Exception as e:
+            bottle.response.status = 500
+            return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+    @app.route('/api/queue/remove', method='POST')
+    def api_queue_remove():
+        bottle.response.content_type = 'application/json; charset=utf-8'
+        try:
+            data = bottle.request.json or {}
+            item_id = str(data.get("id", ""))
+            ok = runner.remove_pdf(item_id)
+            return json.dumps({"status": "success" if ok else "not_found", "queue": runner.get_queue()}, ensure_ascii=False)
+        except Exception as e:
+            bottle.response.status = 500
+            return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+    @app.route('/api/queue/clear', method='POST')
+    def api_queue_clear():
+        bottle.response.content_type = 'application/json; charset=utf-8'
+        runner.clear_queue()
+        return json.dumps({"status": "success", "queue": runner.get_queue()}, ensure_ascii=False)
+
+    @app.route('/api/pipeline/start', method='POST')
+    def api_pipeline_start():
+        bottle.response.content_type = 'application/json; charset=utf-8'
+        ok = runner.start()
+        return json.dumps({"status": "success" if ok else "already_running"}, ensure_ascii=False)
+
+    @app.route('/api/pipeline/pause', method='POST')
+    def api_pipeline_pause():
+        bottle.response.content_type = 'application/json; charset=utf-8'
+        runner.pause()
+        return json.dumps({"status": "success"}, ensure_ascii=False)
+
+    @app.route('/api/pipeline/resume', method='POST')
+    def api_pipeline_resume():
+        bottle.response.content_type = 'application/json; charset=utf-8'
+        runner.resume()
+        return json.dumps({"status": "success"}, ensure_ascii=False)
+
+    @app.route('/api/pipeline/stop', method='POST')
+    def api_pipeline_stop():
+        bottle.response.content_type = 'application/json; charset=utf-8'
+        runner.stop()
+        return json.dumps({"status": "success"}, ensure_ascii=False)
+
+    @app.route('/api/pipeline/status', method='GET')
+    def api_pipeline_status():
+        bottle.response.content_type = 'application/json; charset=utf-8'
+        return json.dumps(runner.get_metrics(), ensure_ascii=False)
+
+    # ---------------- Configuration & LM Studio Test ---------------- #
+    @app.route('/api/config', method='GET')
+    def api_config_get():
+        bottle.response.content_type = 'application/json; charset=utf-8'
+        return json.dumps(runner.config, ensure_ascii=False)
+
+    @app.route('/api/config', method='POST')
+    def api_config_post():
+        bottle.response.content_type = 'application/json; charset=utf-8'
+        try:
+            data = bottle.request.json or {}
+            runner.save_config(data)
+            return json.dumps({"status": "success", "config": runner.config}, ensure_ascii=False)
+        except Exception as e:
+            bottle.response.status = 500
+            return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+    @app.route('/api/lmstudio/test', method='GET')
+    def api_lmstudio_test():
+        bottle.response.content_type = 'application/json; charset=utf-8'
+        client = LMStudioClient(
+            host=runner.config.get("lm_host", "127.0.0.1"),
+            port=runner.config.get("lm_port", "1234"),
+        )
+        online, message = client.check_connection()
+        models = client.list_models() if online else []
+        return json.dumps(
+            {"online": online, "message": message, "models": models}, ensure_ascii=False
+        )
+
     return app
 
 
 def main():
     worker = PipelineWorker()
+    runner = PipelineBatchRunner()
     port = find_available_port(18492)
-    app = create_app(worker)
+    app = create_app(worker, runner)
 
     server_thread = threading.Thread(
         target=lambda: bottle.run(app, host='127.0.0.1', port=port, quiet=True),
@@ -112,14 +245,14 @@ def main():
 
     server_url = f"http://127.0.0.1:{port}"
     print(f"============================================================")
-    print(f"🎵 Solfeggio OCR Workbench Visual Inspection Studio")
-    print(f"   Local Server: {server_url}")
-    print(f"   Launching Dedicated Desktop Window (WebView2)...")
+    print(f"Solfeggio OCR Workbench & Batch Studio")
+    print(f"Local Server: {server_url}")
+    print(f"Launching Dedicated Desktop Window (WebView2)...")
     print(f"============================================================")
 
     try:
         window = webview.create_window(
-            title="🎵 Solfeggio OCR Workbench — Visual Inspection Studio",
+            title="Solfeggio OCR Workbench & Batch Studio",
             url=server_url,
             width=1600,
             height=950,
@@ -129,7 +262,7 @@ def main():
         )
         webview.start(debug=False)
     except Exception as e:
-        print(f"⚠️ pywebview GUI launch error: {e}")
+        print(f"pywebview GUI launch error: {e}")
         print(f"Falling back to system browser: {server_url}")
         import webbrowser
         webbrowser.open(server_url)
