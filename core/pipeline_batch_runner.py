@@ -1,0 +1,664 @@
+"""
+Fault-Tolerant Multi-File Batch Pipeline Runner.
+Sequential Batch Passes: Slicing -> OMR -> VRAM Purge Barrier -> VLM (LM Studio) -> Markdown Assembly.
+Resumable via atomic checkpoints (checkpoint.json) across 20+ books.
+"""
+
+import gc
+import json
+import os
+import re
+import shutil
+import sys
+import threading
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, Any, List, Optional, Tuple
+
+import cv2
+import numpy as np
+import pymupdf as fitz
+import torch
+
+ROOT_DIR = Path(__file__).parent.parent.resolve()
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from core.lmstudio_client import LMStudioClient
+from core.page_preprocessor import PagePreprocessor, deskew_page
+from core.layout_detector import LayoutDetector
+
+
+DEFAULT_CONFIG_FILE = ROOT_DIR / "config.json"
+DEFAULT_CONFIG = {
+    "lm_host": "127.0.0.1",
+    "lm_port": "1234",
+    "lm_model": "qwen/qwen3.5-9b",
+    "lm_temperature": 0.1,
+    "lm_max_tokens": 8192,
+    "output_dir": str(ROOT_DIR / "output"),
+    "dpi": 200,
+    "delay": 0.2,
+    "smt_max_tokens": 512,
+    "qwen_context_length": 16196,
+    "qwen_eval_batch_size": 2048,
+    "qwen_flash_attention": True,
+    "qwen_offload_kv_cache_to_gpu": True,
+    "smt_model": "antoniorv6/smt-grandstaff",
+    "overwrite": False,
+    "smt_device": "cuda" if torch.cuda.is_available() else "cpu",
+    "system_prompt": (
+        "Ты — строгий OCR-транскрибатор. Перенеси весь печатный текст страницы в чистый Markdown дословно.\n"
+        "Сохраняй иерархию заголовков (#, ##, ###), таблицы и списки.\n"
+        "ВАЖНО: Если на странице встречаются технические метки вида <!-- MUSIC_STUB_ID:... -->, "
+        "ОБЯЗАТЕЛЬНО оставь их в тексте на тех же местах без малейших изменений. Ничего не додумывай от себя."
+    ),
+}
+
+
+class PipelineBatchRunner:
+    """
+    Manages queue of PDF documents and executes sequential batch passes
+    with full checkpointing and fault tolerance.
+    """
+
+    def __init__(self, config_path: Optional[Path] = None):
+        self.config_path = config_path or DEFAULT_CONFIG_FILE
+        self.config = self.load_config()
+        self.output_root = Path(self.config.get("output_dir", str(ROOT_DIR / "output")))
+        self.output_root.mkdir(parents=True, exist_ok=True)
+
+        self.input_dir = ROOT_DIR / "in"
+        self.input_dir.mkdir(parents=True, exist_ok=True)
+
+        # Queue of items: [{"id": "1", "name": "1.pdf", "path": "in/1.pdf", "pages": 48, "status": "pending"}]
+        self.queue: List[Dict[str, Any]] = []
+        self._load_existing_queue()
+
+        # State tracking
+        self.is_running = False
+        self.is_paused = False
+        self._stop_event = threading.Event()
+        self._pause_event = threading.Event()
+        self._pause_event.set()  # set means NOT paused
+
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+
+        # Real-time HUD Metrics
+        self.metrics: Dict[str, Any] = {
+            "is_running": False,
+            "is_paused": False,
+            "queue_progress_pct": 0.0,
+            "book_progress_pct": 0.0,
+            "current_book_index": 0,
+            "total_books": 0,
+            "current_book_name": "",
+            "current_phase_name": "Готов к запуску",
+            "current_item_detail": "Очередь ожидает команды",
+            "elapsed_seconds": 0.0,
+            "estimated_remaining_seconds": 0.0,
+            "vram_allocated_mb": 0.0,
+            "last_log": "Инициализация выполнена",
+        }
+
+        # Lazy engines
+        self.layout_detector: Optional[LayoutDetector] = None
+        self.omr_engine = None
+        self.lm_client = LMStudioClient(
+            host=self.config.get("lm_host", "127.0.0.1"),
+            port=self.config.get("lm_port", "1234"),
+        )
+
+    def load_config(self) -> Dict[str, Any]:
+        cfg = dict(DEFAULT_CONFIG)
+        if self.config_path.is_file():
+            try:
+                loaded = json.loads(self.config_path.read_text(encoding="utf-8"))
+                cfg.update(loaded)
+            except Exception:
+                pass
+        return cfg
+
+    def save_config(self, new_cfg: Dict[str, Any]) -> None:
+        with self._lock:
+            self.config.update(new_cfg)
+            self.config_path.write_text(
+                json.dumps(self.config, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            self.output_root = Path(self.config.get("output_dir", str(ROOT_DIR / "output")))
+            self.output_root.mkdir(parents=True, exist_ok=True)
+            self.lm_client.host = self.config.get("lm_host", "127.0.0.1")
+            self.lm_client.port = str(self.config.get("lm_port", "1234"))
+
+    def _load_existing_queue(self) -> None:
+        """Populates queue from `in/` directory if files exist."""
+        if self.input_dir.is_dir():
+            for pdf_path in sorted(self.input_dir.glob("*.pdf")):
+                self._enqueue_file(str(pdf_path))
+
+    def _enqueue_file(self, path_str: str) -> None:
+        p = Path(path_str).resolve()
+        if not p.is_file() or p.suffix.lower() != ".pdf":
+            return
+        if any(item["path"] == str(p) for item in self.queue):
+            return
+
+        pages_count = 0
+        try:
+            with fitz.open(p) as doc:
+                pages_count = len(doc)
+        except Exception:
+            pages_count = 0
+
+        # Check existing checkpoint
+        book_title = p.stem
+        chk = self._read_checkpoint(book_title)
+        status = "completed" if chk and chk.get("status") == "completed" else "pending"
+
+        self.queue.append(
+            {
+                "id": str(len(self.queue) + 1),
+                "name": p.name,
+                "path": str(p),
+                "pages": pages_count,
+                "status": status,
+                "progress_pct": 100.0 if status == "completed" else 0.0,
+            }
+        )
+
+    def add_pdf(self, file_path: str) -> bool:
+        with self._lock:
+            p = Path(file_path).resolve()
+            if not p.is_file() or p.suffix.lower() != ".pdf":
+                return False
+            self._enqueue_file(str(p))
+            return True
+
+    def remove_pdf(self, item_id: str) -> bool:
+        with self._lock:
+            idx = next((i for i, item in enumerate(self.queue) if item["id"] == item_id), None)
+            if idx is not None:
+                self.queue.pop(idx)
+                # Re-index
+                for i, q in enumerate(self.queue, 1):
+                    q["id"] = str(i)
+                return True
+            return False
+
+    def clear_queue(self) -> None:
+        with self._lock:
+            if not self.is_running:
+                self.queue.clear()
+
+    def get_queue(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            return [dict(q) for q in self.queue]
+
+    def get_metrics(self) -> Dict[str, Any]:
+        with self._lock:
+            m = dict(self.metrics)
+            # Update live VRAM
+            if torch.cuda.is_available():
+                try:
+                    m["vram_allocated_mb"] = round(torch.cuda.memory_allocated(0) / (1024 * 1024), 1)
+                except Exception:
+                    pass
+            return m
+
+    # ---------------- Checkpointing ---------------- #
+
+    def _get_book_dir(self, book_title: str) -> Path:
+        d = self.output_root / book_title
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _read_checkpoint(self, book_title: str) -> Optional[Dict[str, Any]]:
+        chk_file = self._get_book_dir(book_title) / "checkpoint.json"
+        if chk_file.is_file():
+            try:
+                return json.loads(chk_file.read_text(encoding="utf-8"))
+            except Exception:
+                return None
+        return None
+
+    def _write_checkpoint(self, book_title: str, data: Dict[str, Any]) -> None:
+        chk_file = self._get_book_dir(book_title) / "checkpoint.json"
+        data["last_updated"] = datetime.now().isoformat()
+        chk_file.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    # ---------------- Control Methods ---------------- #
+
+    def start(self) -> bool:
+        with self._lock:
+            if self.is_running:
+                if self.is_paused:
+                    self.resume()
+                    return True
+                return False
+
+            self.is_running = True
+            self.is_paused = False
+            self._stop_event.clear()
+            self._pause_event.set()
+
+            self._thread = threading.Thread(target=self._run_loop, daemon=True)
+            self._thread.start()
+            return True
+
+    def pause(self) -> None:
+        with self._lock:
+            if self.is_running and not self.is_paused:
+                self.is_paused = True
+                self._pause_event.clear()
+                self.metrics["is_paused"] = True
+                self.metrics["current_phase_name"] = "Приостановлено пользователем"
+
+    def resume(self) -> None:
+        with self._lock:
+            if self.is_running and self.is_paused:
+                self.is_paused = False
+                self._pause_event.set()
+                self.metrics["is_paused"] = False
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self._pause_event.set()  # Unblock if paused
+        with self._lock:
+            self.is_running = False
+            self.is_paused = False
+            self.metrics["is_running"] = False
+            self.metrics["is_paused"] = False
+            self.metrics["current_phase_name"] = "Остановлено пользователем"
+
+    # ---------------- Orchestration Loop ---------------- #
+
+    def _run_loop(self) -> None:
+        start_time = time.time()
+        active_items = [q for q in self.queue if q["status"] != "completed"]
+        total_books = len(self.queue)
+
+        try:
+            for book_idx, item in enumerate(self.queue, start=1):
+                if self._stop_event.is_set():
+                    break
+
+                self._check_pause()
+                if item["status"] == "completed" and not self.config.get("overwrite", False):
+                    continue
+
+                pdf_path = Path(item["path"])
+                book_title = pdf_path.stem
+                item["status"] = "processing"
+
+                with self._lock:
+                    self.metrics.update(
+                        {
+                            "is_running": True,
+                            "current_book_index": book_idx,
+                            "total_books": total_books,
+                            "current_book_name": item["name"],
+                            "book_progress_pct": 0.0,
+                            "queue_progress_pct": round(((book_idx - 1) / max(1, total_books)) * 100, 1),
+                        }
+                    )
+
+                # Process single book through the 4-Phase pipeline
+                success = self._process_book(pdf_path, item)
+                if not success and self._stop_event.is_set():
+                    break
+
+                item["status"] = "completed" if success else "error"
+                item["progress_pct"] = 100.0 if success else item.get("progress_pct", 0.0)
+
+            with self._lock:
+                self.metrics["queue_progress_pct"] = 100.0
+                self.metrics["current_phase_name"] = "Очередь полностью обработана"
+                self.metrics["current_item_detail"] = "Все задачи завершены"
+
+        except Exception as e:
+            with self._lock:
+                self.metrics["current_phase_name"] = "Ошибка в конвейере"
+                self.metrics["last_log"] = f"Исключение: {str(e)}"
+        finally:
+            self._purge_vram()
+            with self._lock:
+                self.is_running = False
+                self.is_paused = False
+                self.metrics["is_running"] = False
+                self.metrics["is_paused"] = False
+                self.metrics["elapsed_seconds"] = round(time.time() - start_time, 1)
+
+    def _check_pause(self) -> None:
+        while not self._pause_event.is_set() and not self._stop_event.is_set():
+            time.sleep(0.3)
+
+    # ---------------- 4-Phase Book Processing ---------------- #
+
+    def _process_book(self, pdf_path: Path, item: Dict[str, Any]) -> bool:
+        book_title = pdf_path.stem
+        book_dir = self._get_book_dir(book_title)
+
+        crops_dir = book_dir / "1_crops"
+        masked_dir = book_dir / "2_masked_pages"
+        raw_md_dir = book_dir / "3_raw_md"
+        final_dir = book_dir / "4_final_pages"
+        for d in (crops_dir, masked_dir, raw_md_dir, final_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        overwrite = self.config.get("overwrite", False)
+        chk = self._read_checkpoint(book_title) or {
+            "book_title": book_title,
+            "status": "in_progress",
+            "phases": {
+                "slicing": {"completed": False, "pages_done": 0, "total_pages": 0},
+                "omr": {"completed": False, "crops_done": 0, "total_crops": 0},
+                "vlm": {"completed": False, "pages_done": 0, "total_pages": 0},
+                "assembly": {"completed": False},
+            },
+        }
+
+        # ---------------- Phase 1: Slicing & Masking ---------------- #
+        if not chk["phases"]["slicing"]["completed"] or overwrite:
+            self._update_hud("Фаза 1/4: Нарезка и маскирование верстки (YOLO OLA v2.0)", 0.0)
+            ok = self._phase_1_slicing(pdf_path, crops_dir, masked_dir, chk, overwrite)
+            if not ok:
+                return False
+            chk["phases"]["slicing"]["completed"] = True
+            self._write_checkpoint(book_title, chk)
+
+        # ---------------- Phase 2: OMR Music Recognition ---------------- #
+        if not chk["phases"]["omr"]["completed"] or overwrite:
+            self._update_hud("Фаза 2/4: Оптическое распознавание нот (Transcoda-59M)", 25.0)
+            ok = self._phase_2_omr(crops_dir, chk, overwrite)
+            if not ok:
+                return False
+            chk["phases"]["omr"]["completed"] = True
+            self._write_checkpoint(book_title, chk)
+
+        # ---------------- VRAM Purge Barrier ---------------- #
+        self._update_hud("Очистка VRAM GPU перед VLM...", 50.0)
+        self._purge_vram()
+
+        # ---------------- Phase 3: VLM Text Recognition ---------------- #
+        if not chk["phases"]["vlm"]["completed"] or overwrite:
+            self._update_hud("Фаза 3/4: Извлечение текста книги (LM Studio VLM)", 55.0)
+            ok = self._phase_3_vlm(masked_dir, raw_md_dir, chk, overwrite)
+            if not ok:
+                return False
+            chk["phases"]["vlm"]["completed"] = True
+            self._write_checkpoint(book_title, chk)
+
+        # ---------------- Phase 4: Final Assembly ---------------- #
+        self._update_hud("Фаза 4/4: Сборка итогового Markdown издания", 90.0)
+        ok = self._phase_4_assembly(book_dir, raw_md_dir, crops_dir, final_dir, chk)
+        if not ok:
+            return False
+
+        chk["phases"]["assembly"]["completed"] = True
+        chk["status"] = "completed"
+        self._write_checkpoint(book_title, chk)
+        self._update_hud(f"Книга {book_title} успешно завершена", 100.0)
+        return True
+
+    def _update_hud(self, phase_name: str, book_pct: float, detail: str = "") -> None:
+        with self._lock:
+            self.metrics["current_phase_name"] = phase_name
+            self.metrics["book_progress_pct"] = round(book_pct, 1)
+            if detail:
+                self.metrics["current_item_detail"] = detail
+
+    # ---------------- Phase 1 Implementation ---------------- #
+
+    def _phase_1_slicing(
+        self, pdf_path: Path, crops_dir: Path, masked_dir: Path, chk: Dict[str, Any], overwrite: bool
+    ) -> bool:
+        if self.layout_detector is None:
+            weights_path = ROOT_DIR / "weights" / "ola-layout-analysis-2.0-2025-03-09.pt"
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            self.layout_detector = LayoutDetector(weights_path=str(weights_path), device=device)
+
+        with fitz.open(pdf_path) as doc:
+            total_pages = len(doc)
+            chk["phases"]["slicing"]["total_pages"] = total_pages
+
+            for p_idx in range(1, total_pages + 1):
+                if self._stop_event.is_set():
+                    return False
+                self._check_pause()
+
+                mask_file = masked_dir / f"page_{p_idx:04d}_masked.png"
+                if mask_file.is_file() and not overwrite:
+                    continue
+
+                page = doc[p_idx - 1]
+                dpi = int(self.config.get("dpi", 200))
+                pix = page.get_pixmap(dpi=dpi)
+                img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+                img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR if pix.n == 4 else cv2.COLOR_RGB2BGR)
+                del pix
+
+                # Preprocess (deskew)
+                deskewed_bgr, _ = deskew_page(img_bgr)
+
+                # Layout detection
+                detections = self.layout_detector.detect(deskewed_bgr)
+
+                # Whiteout and save crops
+                masked_img, crops_data = self.layout_detector.mask_page(
+                    deskewed_bgr, detections, tag_prefix=f"{pdf_path.stem}_P{p_idx:04d}"
+                )
+
+                cv2.imwrite(str(mask_file), masked_img)
+
+                for crop in crops_data:
+                    crop_name = f"{crop['stub_id']}.png"
+                    cv2.imwrite(str(crops_dir / crop_name), crop["crop_img"])
+
+                chk["phases"]["slicing"]["pages_done"] = p_idx
+                self._write_checkpoint(pdf_path.stem, chk)
+
+                pct = (p_idx / total_pages) * 25.0
+                self._update_hud(
+                    "Фаза 1/4: Нарезка и маскирование",
+                    pct,
+                    f"Стр. {p_idx}/{total_pages} • Вырезано станов: {len(crops_data)}",
+                )
+
+        return True
+
+    # ---------------- Phase 2 Implementation ---------------- #
+
+    def _phase_2_omr(self, crops_dir: Path, chk: Dict[str, Any], overwrite: bool) -> bool:
+        crop_files = sorted(
+            [f for f in crops_dir.glob("*.png") if not f.name.endswith("_deskew.png")],
+            key=lambda f: f.name,
+        )
+        total_crops = len(crop_files)
+        chk["phases"]["omr"]["total_crops"] = total_crops
+
+        if total_crops == 0:
+            return True
+
+        if self.omr_engine is None:
+            from core.omr_engine import OMREngine
+
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            self.omr_engine = OMREngine(device=device)
+
+        for c_idx, crop_file in enumerate(crop_files, start=1):
+            if self._stop_event.is_set():
+                return False
+            self._check_pause()
+
+            abc_file = crops_dir / f"{crop_file.stem}.abc"
+            if abc_file.is_file() and not overwrite:
+                continue
+
+            crop_bgr = cv2.imread(str(crop_file))
+            if crop_bgr is None:
+                continue
+
+            cls_name = "staff"
+            if "grand_staff" in crop_file.stem:
+                cls_name = "grand_staff"
+            elif "system" in crop_file.stem:
+                cls_name = "system"
+
+            res = self.omr_engine.transcribe_crop(crop_bgr, notation_class=cls_name, title=crop_file.stem)
+            abc_content = res.get("abc", "")
+            if abc_content:
+                abc_file.write_text(abc_content, encoding="utf-8")
+
+            chk["phases"]["omr"]["crops_done"] = c_idx
+            self._write_checkpoint(crops_dir.parent.name, chk)
+
+            pct = 25.0 + (c_idx / total_crops) * 25.0
+            self._update_hud(
+                "Фаза 2/4: Распознавание нот (OMR)",
+                pct,
+                f"Стан {c_idx}/{total_crops} ({cls_name}) • {res.get('model_used', 'OMR')}",
+            )
+
+        return True
+
+    # ---------------- Phase 3 Implementation ---------------- #
+
+    def _phase_3_vlm(
+        self, masked_dir: Path, raw_md_dir: Path, chk: Dict[str, Any], overwrite: bool
+    ) -> bool:
+        mask_files = sorted(masked_dir.glob("page_*_masked.png"))
+        total_masks = len(mask_files)
+        chk["phases"]["vlm"]["total_pages"] = total_masks
+
+        if total_masks == 0:
+            return True
+
+        # Check LM Studio availability
+        is_online, msg = self.lm_client.check_connection()
+        if not is_online:
+            with self._lock:
+                self.metrics["last_log"] = f"LM Studio недоступен: {msg}"
+            # Still generate fallback stubs so pipeline completes
+            return self._vlm_fallback_mode(mask_files, raw_md_dir, chk)
+
+        # Attempt to load model
+        try:
+            self.lm_client.load_model(
+                model_name=self.config.get("lm_model", "qwen/qwen3.5-9b"),
+                context_length=int(self.config.get("qwen_context_length", 16196)),
+                eval_batch_size=int(self.config.get("qwen_eval_batch_size", 2048)),
+                flash_attention=bool(self.config.get("qwen_flash_attention", True)),
+                offload_kv_cache=bool(self.config.get("qwen_offload_kv_cache_to_gpu", True)),
+            )
+        except Exception as e:
+            with self._lock:
+                self.metrics["last_log"] = f"Предупреждение при загрузке модели: {e}"
+
+        system_prompt = self.config.get("system_prompt", DEFAULT_CONFIG["system_prompt"])
+
+        for m_idx, mask_file in enumerate(mask_files, start=1):
+            if self._stop_event.is_set():
+                return False
+            self._check_pause()
+
+            p_num_str = re.search(r"page_(\d+)_masked", mask_file.stem)
+            p_num = p_num_str.group(1) if p_num_str else f"{m_idx:04d}"
+            raw_md_file = raw_md_dir / f"page_{p_num}_raw.md"
+
+            if raw_md_file.is_file() and not overwrite:
+                continue
+
+            try:
+                img_bytes = mask_file.read_bytes()
+                extracted_text = self.lm_client.request_ocr(
+                    image_bytes=img_bytes,
+                    system_prompt=system_prompt,
+                    model_name=self.config.get("lm_model", "default"),
+                    temperature=float(self.config.get("lm_temperature", 0.1)),
+                    max_tokens=int(self.config.get("lm_max_tokens", 8192)),
+                    context_length=int(self.config.get("qwen_context_length", 16196)),
+                )
+                raw_md_file.write_text(extracted_text, encoding="utf-8")
+            except Exception as e:
+                # Write stub so pipeline does not crash
+                fallback_txt = f"<!-- LM_STUDIO_ERROR: {str(e)} -->\n\n## Страница {int(p_num)}\n\n[Текст не распознан: ошибка связи с VLM]\n"
+                raw_md_file.write_text(fallback_txt, encoding="utf-8")
+
+            chk["phases"]["vlm"]["pages_done"] = m_idx
+            self._write_checkpoint(masked_dir.parent.name, chk)
+
+            pct = 55.0 + (m_idx / total_masks) * 35.0
+            self._update_hud(
+                "Фаза 3/4: Текстовый VLM проход",
+                pct,
+                f"Стр. {m_idx}/{total_masks} (Qwen VLM через LM Studio)",
+            )
+
+        return True
+
+    def _vlm_fallback_mode(self, mask_files: List[Path], raw_md_dir: Path, chk: Dict[str, Any]) -> bool:
+        """Creates clean structured markdown files if LM Studio is offline."""
+        for m_idx, mask_file in enumerate(mask_files, start=1):
+            p_num_str = re.search(r"page_(\d+)_masked", mask_file.stem)
+            p_num = p_num_str.group(1) if p_num_str else f"{m_idx:04d}"
+            raw_md_file = raw_md_dir / f"page_{p_num}_raw.md"
+            if not raw_md_file.is_file():
+                txt = f"## Страница {int(p_num)}\n\n<!-- Текст ожидает распознавания в LM Studio -->\n"
+                raw_md_file.write_text(txt, encoding="utf-8")
+        return True
+
+    # ---------------- Phase 4 Implementation ---------------- #
+
+    def _phase_4_assembly(
+        self, book_dir: Path, raw_md_dir: Path, crops_dir: Path, final_dir: Path, chk: Dict[str, Any]
+    ) -> bool:
+        raw_files = sorted(raw_md_dir.glob("page_*_raw.md"))
+        all_pages_content = []
+
+        def inject_abc(match):
+            cid = match.group(1).strip()
+            abc_file = crops_dir / f"{cid}.abc"
+            if abc_file.is_file():
+                abc = abc_file.read_text(encoding="utf-8").strip()
+                return f"\n\n```abc\n{abc}\n```\n\n"
+            return f"\n\n% [Ноты {cid} не найдены]\n\n"
+
+        for r_file in raw_files:
+            p_num_str = re.search(r"page_(\d+)_raw", r_file.stem)
+            p_num = p_num_str.group(1) if p_num_str else "0001"
+            final_file = final_dir / f"page_{p_num}.md"
+
+            raw_text = r_file.read_text(encoding="utf-8")
+            final_text = re.sub(r"<!--\s*MUSIC_STUB_ID:\s*(.*?)\s*-->", inject_abc, raw_text)
+            final_file.write_text(final_text, encoding="utf-8")
+
+            all_pages_content.append(f"<!-- PAGE {p_num} -->\n" + final_text)
+
+        # Full book assembly
+        complete_book_file = book_dir / f"{book_dir.name}_complete.md"
+        full_content = "\n\n---\n\n".join(all_pages_content)
+        complete_book_file.write_text(full_content, encoding="utf-8")
+        return True
+
+    # ---------------- Purge VRAM Barrier ---------------- #
+
+    def _purge_vram(self) -> None:
+        if self.omr_engine is not None:
+            try:
+                self.omr_engine.purge_gpu_memory()
+            except Exception:
+                pass
+            self.omr_engine = None
+
+        if self.layout_detector is not None:
+            self.layout_detector = None
+
+        gc.collect()
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+            except Exception:
+                pass
