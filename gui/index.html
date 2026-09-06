@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Solfeggio OCR Workbench</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <!-- Header & Master Navigation Toolbar -->
+  <header id="app-header">
+    <div class="brand-section">
+      <span class="brand-icon">🎵</span>
+      <span class="brand-title">Solfeggio OCR Workbench</span>
+      <span class="brand-badge">Dual-Model OMR + VLM</span>
+    </div>
+
+    <!-- Page Switcher (Left / Right Arrows or [◄ / ►]) -->
+    <div class="nav-section">
+      <button id="btn-prev-page" class="btn-nav" title="Предыдущая страница (Клавиша: ◄ или A)">◄</button>
+      <select id="page-select" class="page-selector" title="Выбор страницы учебника">
+        <option value="">Загрузка страниц...</option>
+      </select>
+      <button id="btn-next-page" class="btn-nav" title="Следующая страница (Клавиша: ► или D)">►</button>
+      <span id="page-counter" class="page-counter">-- / --</span>
+    </div>
+
+    <!-- View Mode Switchers [1, 2, 3, 4] -->
+    <div class="mode-section">
+      <button id="btn-mode-1" class="btn-mode active" data-mode="1" title="Горячая клавиша: 1">
+        <span class="key-badge">1</span>
+        <span>Скан vs Маска</span>
+      </button>
+      <button id="btn-mode-2" class="btn-mode" data-mode="2" title="Горячая клавиша: 2">
+        <span class="key-badge">2</span>
+        <span>Нормализация</span>
+      </button>
+      <button id="btn-mode-3" class="btn-mode" data-mode="3" title="Горячая клавиша: 3">
+        <span class="key-badge">3</span>
+        <span>Вырезка ➔ ABC</span>
+      </button>
+      <button id="btn-mode-4" class="btn-mode" data-mode="4" title="Горячая клавиша: 4">
+        <span class="key-badge">4</span>
+        <span>Книга (Финал)</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Master Zero-Scroll Viewport Container -->
+  <main id="app-viewport">
+    
+    <!-- ====================================================================
+         MODE 1: Scan vs Mask (50/50 Split Screen)
+         ==================================================================== -->
+    <div id="view-mask" class="view-panel active">
+      <div class="split-container">
+        <!-- Left: Annotated Scan -->
+        <div class="split-column">
+          <div class="panel-header">
+            <div class="panel-title-group">
+              <span class="panel-title">📷 Исходный скан с разметкой YOLO OLA</span>
+              <span id="badge-staves-count" class="badge badge-staff">0 станов</span>
+            </div>
+            <span class="badge badge-grand">YOLOv8 Layout v2.0</span>
+          </div>
+          <div class="panel-canvas">
+            <img id="scan-debug-img" class="fit-image" alt="Аннотированный скан" src="" />
+          </div>
+        </div>
+
+        <!-- Right: Masked Page with White Stubs for VLM -->
+        <div class="split-column">
+          <div class="panel-header">
+            <div class="panel-title-group">
+              <span class="panel-title">🎭 Маскированная страница (Белые заплатки)</span>
+              <span class="badge badge-mask">&lt;!-- MUSIC_STUB_ID --&gt;</span>
+            </div>
+            <span class="text-secondary" style="font-size: 11px;">Вход для LM Studio VLM</span>
+          </div>
+          <div class="panel-canvas">
+            <img id="scan-mask-img" class="fit-image" alt="Маскированная страница" src="" />
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ====================================================================
+         MODE 2: Staff Normalization & Deskew (Raw vs Deskewed)
+         ==================================================================== -->
+    <div id="view-normalization" class="view-panel">
+      <!-- Staves Selector Sub-bar -->
+      <div id="staves-subbar-2" class="subbar-staves">
+        <!-- Rendered dynamically: [ #1 staff | -0.33° ], [ #2 grand_staff | 0.00° ] -->
+      </div>
+
+      <div class="split-container" style="flex: 1;">
+        <!-- Left: Raw Crop -->
+        <div class="split-column">
+          <div class="panel-header">
+            <div class="panel-title-group">
+              <span class="panel-title">✂️ Исходная вырезка со скана</span>
+              <span id="norm-raw-dim" class="badge badge-staff">--x-- px</span>
+            </div>
+            <span class="text-muted" style="font-size: 12px;">Без доворота</span>
+          </div>
+          <div class="panel-canvas">
+            <img id="norm-raw-img" class="fit-image" alt="Исходная вырезка" src="" />
+          </div>
+        </div>
+
+        <!-- Right: Deskewed Crop with Rotation Angle -->
+        <div class="split-column">
+          <div class="panel-header">
+            <div class="panel-title-group">
+              <span class="panel-title">📐 Нормализованный стан (Выровненный)</span>
+              <span id="norm-angle-badge" class="badge badge-grand">Угол: 0.00°</span>
+            </div>
+            <label class="toggle-group">
+              <input type="checkbox" id="toggle-guidelines" checked>
+              <span>Красные лазерные линии</span>
+            </label>
+          </div>
+          <div class="panel-canvas" id="norm-deskew-canvas">
+            <div id="guidelines-layer" class="guide-lines-overlay"></div>
+            <img id="norm-deskew-img" class="fit-image" alt="Выровненный стан" src="" />
+          </div>
+        </div>
+      </div>
+
+      <!-- Bottom Staff Details Dock -->
+      <div class="stats-card-dock">
+        <span>Стан: <strong id="norm-staff-id">--</strong></span>
+        <span>Класс: <strong id="norm-staff-class">--</strong></span>
+        <span>Ширина / Высота: <strong id="norm-staff-res">--</strong></span>
+        <span>Выравнивание: <strong id="norm-staff-status" style="color: var(--accent-green);">Строго параллельно</strong></span>
+      </div>
+    </div>
+
+    <!-- ====================================================================
+         MODE 3: Crop vs Transcribed ABC (OMR Inspection)
+         ==================================================================== -->
+    <div id="view-omr" class="view-panel">
+      <div class="split-container">
+        <!-- Left Pane: Crop Selection & Image -->
+        <div class="omr-left-pane">
+          <div id="staves-subbar-3" class="subbar-staves">
+            <!-- Rendered dynamically -->
+          </div>
+          <div class="crop-preview-box">
+            <img id="omr-crop-img" alt="Вырезка нот" src="" />
+          </div>
+          <div class="panel-header" style="background: var(--bg-surface-elevated); border-top: 1px solid var(--border-subtle);">
+            <span id="omr-model-badge" class="badge badge-grand">Transcoda-59M (RoPE)</span>
+            <button id="btn-rerun-omr" class="btn-action">
+              <span>⚡ Перераспознать стан</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Right Pane: Decoded ABC / Kern Code -->
+        <div class="omr-right-pane">
+          <div class="omr-toolbar">
+            <div style="display: flex; gap: 8px;">
+              <button id="btn-tab-abc" class="btn-action active" style="font-weight: bold;">ABC Нотация</button>
+              <button id="btn-tab-kern" class="btn-action">Humdrum **kern</button>
+            </div>
+            <div style="display: flex; gap: 8px;">
+              <button id="btn-copy-code" class="btn-action btn-primary" title="Скопировать нотный код в буфер обмена">
+                <span>📋 Копировать ноты</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="code-editor-container">
+            <div class="code-editor-header">
+              <span id="omr-code-meta" style="font-size: 12px; color: var(--text-secondary);">Синтаксис ABC 2.1 • Multi-Voice Support</span>
+              <span id="omr-copy-status" style="font-size: 11px; color: var(--accent-green); display: none;">Скопировано в буфер!</span>
+            </div>
+            <pre id="omr-code-box" class="code-box" contenteditable="true" spellcheck="false"></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ====================================================================
+         MODE 4: Electronic Book Final (Scan vs Rendered Markdown Page)
+         ==================================================================== -->
+    <div id="view-final" class="view-panel">
+      <div class="split-container">
+        <!-- Left: Original Scan -->
+        <div class="split-column" style="flex: 4.5;">
+          <div class="panel-header">
+            <span class="panel-title">📖 Оригинальный скан учебника</span>
+            <span class="badge badge-staff">Контрольный оригинал</span>
+          </div>
+          <div class="panel-canvas">
+            <img id="final-scan-img" class="fit-image" alt="Оригинальный скан" src="" />
+          </div>
+        </div>
+
+        <!-- Right: Beautiful Rendered Book Typography Page -->
+        <div class="split-column" style="flex: 5.5;">
+          <div class="panel-header">
+            <div class="panel-title-group">
+              <span class="panel-title">📚 Отрендеренная электронная книга</span>
+              <span class="badge badge-grand">Markdown + Ноты</span>
+            </div>
+            <div style="display: flex; gap: 6px;">
+              <button id="btn-toggle-md-raw" class="btn-action">📝 Исходный текст</button>
+              <button id="btn-save-md" class="btn-action btn-primary">💾 Сохранить</button>
+            </div>
+          </div>
+
+          <!-- Book Container with Custom Internal Scrollbar -->
+          <div class="book-reader-container">
+            <article id="book-rendered-content" class="book-page-sheet">
+              <!-- Rendered via marked.js with custom music blocks -->
+            </article>
+            <textarea id="book-raw-editor" class="code-box" style="display: none; width: 100%; height: 100%; border-radius: 6px; font-size: 14px;"></textarea>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- Bottom Hardware & System Status Bar -->
+  <footer id="app-statusbar">
+    <div class="status-left">
+      <div id="vram-status-pill" class="vram-pill vram-safe">
+        <span class="vram-dot"></span>
+        <span id="vram-text">VRAM: 0 MB (Purged & Safe for VLM)</span>
+      </div>
+      <span id="device-name-text">GPU: NVIDIA RTX 5070 Mobile</span>
+    </div>
+
+    <div class="status-center">
+      <span id="page-summary-text">Учебник сольфеджио • Загрузка...</span>
+    </div>
+
+    <div class="status-right">
+      <span>[1-4] Режимы</span>
+      <span>•</span>
+      <span>[◄ ►] Стр.</span>
+      <span>•</span>
+      <span>[▲ ▼] Станы</span>
+      <span>•</span>
+      <span>[Ctrl+C] ABC</span>
+    </div>
+  </footer>
+
+  <!-- Scripts -->
+  <script src="/static/lib/marked.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
