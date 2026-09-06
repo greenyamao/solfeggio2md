@@ -424,6 +424,36 @@ class PipelineBatchRunner:
             },
         }
 
+        # Physical disk inspection: sync checkpoint with actual files on disk
+        if not overwrite:
+            try:
+                with fitz.open(pdf_path) as doc:
+                    tot_p = len(doc)
+            except Exception:
+                tot_p = chk["phases"]["slicing"].get("total_pages", 0)
+
+            existing_m = len([f for f in masked_dir.glob("page_*_masked.png") if f.stat().st_size > 1000])
+            if existing_m >= tot_p and tot_p > 0:
+                chk["phases"]["slicing"]["completed"] = True
+                chk["phases"]["slicing"]["pages_done"] = tot_p
+                chk["phases"]["slicing"]["total_pages"] = tot_p
+
+            c_files = [f for f in crops_dir.glob("*.png") if not f.name.endswith("_deskew.png")]
+            existing_a = len([f for f in crops_dir.glob("*.abc") if f.stat().st_size > 0])
+            if len(c_files) > 0 and existing_a >= len(c_files):
+                chk["phases"]["omr"]["completed"] = True
+                chk["phases"]["omr"]["crops_done"] = len(c_files)
+                chk["phases"]["omr"]["total_crops"] = len(c_files)
+
+            m_files = list(masked_dir.glob("page_*_masked.png"))
+            existing_r = len([f for f in raw_md_dir.glob("page_*_raw.md") if f.stat().st_size > 0])
+            if len(m_files) > 0 and existing_r >= len(m_files):
+                chk["phases"]["vlm"]["completed"] = True
+                chk["phases"]["vlm"]["pages_done"] = len(m_files)
+                chk["phases"]["vlm"]["total_pages"] = len(m_files)
+
+            self._write_checkpoint(book_title, chk)
+
         # ---------------- Phase 1: Slicing & Masking ---------------- #
         if not chk["phases"]["slicing"]["completed"] or overwrite:
             self._update_hud("Фаза 1/4: Нарезка и маскирование верстки (YOLO OLA v2.0)", 0.0)
@@ -479,30 +509,42 @@ class PipelineBatchRunner:
     def _phase_1_slicing(
         self, pdf_path: Path, crops_dir: Path, masked_dir: Path, chk: Dict[str, Any], overwrite: bool
     ) -> bool:
-        if self.layout_detector is None:
-            weights_path = ROOT_DIR / "weights" / "ola-layout-analysis-2.0-2025-03-09.pt"
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            self.layout_detector = LayoutDetector(weights_path=str(weights_path), device=device)
-
         with fitz.open(pdf_path) as doc:
             total_pages = len(doc)
             chk["phases"]["slicing"]["total_pages"] = total_pages
 
-            pages_done = chk["phases"]["slicing"].get("pages_done", 0)
-            # 1-page overlap on resume to guarantee no corrupted half-written files
-            start_page = max(1, pages_done) if (pages_done > 0 and not overwrite) else 1
+            existing_valid_pages = set()
+            if not overwrite:
+                for f in masked_dir.glob("page_*_masked.png"):
+                    m = re.search(r"page_(\d+)_masked", f.stem)
+                    if m and f.stat().st_size > 1000:
+                        existing_valid_pages.add(int(m.group(1)))
 
-            for p_idx in range(start_page, total_pages + 1):
+            if not overwrite and len(existing_valid_pages) >= total_pages and total_pages > 0:
+                chk["phases"]["slicing"]["completed"] = True
+                chk["phases"]["slicing"]["pages_done"] = total_pages
+                self._write_checkpoint(pdf_path.stem, chk)
+                self._update_hud("Фаза 1/4: Нарезка уже выполнена на диске", 25.0, f"Все {total_pages} стр. готовы")
+                return True
+
+            if self.layout_detector is None:
+                weights_path = ROOT_DIR / "weights" / "ola-layout-analysis-2.0-2025-03-09.pt"
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                self.layout_detector = LayoutDetector(weights_path=str(weights_path), device=device)
+
+            dpi = int(self.config.get("dpi", 200))
+            pages_done_count = len(existing_valid_pages)
+
+            for p_idx in range(1, total_pages + 1):
                 if self._stop_event.is_set():
                     return False
                 self._check_pause()
 
                 mask_file = masked_dir / f"page_{p_idx:04d}_masked.png"
-                if p_idx < start_page and mask_file.is_file() and not overwrite:
+                if not overwrite and p_idx in existing_valid_pages:
                     continue
 
                 page = doc[p_idx - 1]
-                dpi = int(self.config.get("dpi", 200))
                 pix = page.get_pixmap(dpi=dpi)
                 img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
                 img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR if pix.n == 4 else cv2.COLOR_RGB2BGR)
@@ -525,7 +567,8 @@ class PipelineBatchRunner:
                     crop_name = f"{crop['stub_id']}.png"
                     cv2.imwrite(str(crops_dir / crop_name), crop["crop_img"])
 
-                chk["phases"]["slicing"]["pages_done"] = p_idx
+                pages_done_count += 1
+                chk["phases"]["slicing"]["pages_done"] = pages_done_count
                 self._write_checkpoint(pdf_path.stem, chk)
 
                 pct = (p_idx / total_pages) * 25.0
@@ -548,6 +591,20 @@ class PipelineBatchRunner:
         chk["phases"]["omr"]["total_crops"] = total_crops
 
         if total_crops == 0:
+            chk["phases"]["omr"]["completed"] = True
+            return True
+
+        existing_valid_abcs = set()
+        if not overwrite:
+            for f in crops_dir.glob("*.abc"):
+                if f.stat().st_size > 0:
+                    existing_valid_abcs.add(f.stem)
+
+        if not overwrite and len(existing_valid_abcs) >= total_crops:
+            chk["phases"]["omr"]["completed"] = True
+            chk["phases"]["omr"]["crops_done"] = total_crops
+            self._write_checkpoint(crops_dir.parent.name, chk)
+            self._update_hud("Фаза 2/4: OMR уже выполнен на диске", 50.0, f"Все {total_crops} станов готовы")
             return True
 
         if self.omr_engine is None:
@@ -556,18 +613,15 @@ class PipelineBatchRunner:
             device = "cuda" if torch.cuda.is_available() else "cpu"
             self.omr_engine = OMREngine(device=device)
 
-        crops_done = chk["phases"]["omr"].get("crops_done", 0)
-        # 1-crop overlap on resume to re-verify last crop in case it was interrupted
-        start_idx = max(1, crops_done) if (crops_done > 0 and not overwrite) else 1
+        crops_done_count = len(existing_valid_abcs)
 
-        for c_idx in range(start_idx, total_crops + 1):
+        for c_idx, crop_file in enumerate(crop_files, start=1):
             if self._stop_event.is_set():
                 return False
             self._check_pause()
 
-            crop_file = crop_files[c_idx - 1]
             abc_file = crops_dir / f"{crop_file.stem}.abc"
-            if c_idx < start_idx and abc_file.is_file() and not overwrite:
+            if not overwrite and crop_file.stem in existing_valid_abcs:
                 continue
 
             crop_bgr = cv2.imread(str(crop_file))
@@ -585,7 +639,8 @@ class PipelineBatchRunner:
             if abc_content:
                 abc_file.write_text(abc_content, encoding="utf-8")
 
-            chk["phases"]["omr"]["crops_done"] = c_idx
+            crops_done_count += 1
+            chk["phases"]["omr"]["crops_done"] = crops_done_count
             self._write_checkpoint(crops_dir.parent.name, chk)
 
             pct = 25.0 + (c_idx / total_crops) * 25.0
@@ -595,6 +650,8 @@ class PipelineBatchRunner:
                 f"Стан {c_idx}/{total_crops} ({cls_name}) • {res.get('model_used', 'OMR')}",
             )
 
+        chk["phases"]["omr"]["completed"] = True
+        self._write_checkpoint(crops_dir.parent.name, chk)
         return True
 
     # ---------------- Phase 3 Implementation ---------------- #
@@ -607,6 +664,22 @@ class PipelineBatchRunner:
         chk["phases"]["vlm"]["total_pages"] = total_masks
 
         if total_masks == 0:
+            chk["phases"]["vlm"]["completed"] = True
+            return True
+
+        existing_valid_mds = set()
+        if not overwrite:
+            for f in raw_md_dir.glob("page_*_raw.md"):
+                if f.stat().st_size > 0:
+                    m = re.search(r"page_(\d+)_raw", f.stem)
+                    if m:
+                        existing_valid_mds.add(m.group(1))
+
+        if not overwrite and len(existing_valid_mds) >= total_masks:
+            chk["phases"]["vlm"]["completed"] = True
+            chk["phases"]["vlm"]["pages_done"] = total_masks
+            self._write_checkpoint(masked_dir.parent.name, chk)
+            self._update_hud("Фаза 3/4: Текст VLM уже извлечен на диске", 90.0, f"Все {total_masks} стр. готовы")
             return True
 
         # Check LM Studio availability
@@ -614,7 +687,6 @@ class PipelineBatchRunner:
         if not is_online:
             with self._lock:
                 self.metrics["last_log"] = f"LM Studio недоступен: {msg}"
-            # Still generate fallback stubs so pipeline completes
             return self._vlm_fallback_mode(mask_files, raw_md_dir, chk)
 
         # Attempt to load model
@@ -631,22 +703,18 @@ class PipelineBatchRunner:
                 self.metrics["last_log"] = f"Предупреждение при загрузке модели: {e}"
 
         system_prompt = self.config.get("system_prompt", DEFAULT_CONFIG["system_prompt"])
+        vlm_done_count = len(existing_valid_mds)
 
-        pages_done = chk["phases"]["vlm"].get("pages_done", 0)
-        # 1-page overlap on resume to re-verify last page in case it was interrupted
-        start_idx = max(1, pages_done) if (pages_done > 0 and not overwrite) else 1
-
-        for m_idx in range(start_idx, total_masks + 1):
+        for m_idx, mask_file in enumerate(mask_files, start=1):
             if self._stop_event.is_set():
                 return False
             self._check_pause()
 
-            mask_file = mask_files[m_idx - 1]
             p_num_str = re.search(r"page_(\d+)_masked", mask_file.stem)
             p_num = p_num_str.group(1) if p_num_str else f"{m_idx:04d}"
             raw_md_file = raw_md_dir / f"page_{p_num}_raw.md"
 
-            if m_idx < start_idx and raw_md_file.is_file() and not overwrite:
+            if not overwrite and p_num in existing_valid_mds:
                 continue
 
             try:
@@ -661,11 +729,11 @@ class PipelineBatchRunner:
                 )
                 raw_md_file.write_text(extracted_text, encoding="utf-8")
             except Exception as e:
-                # Write stub so pipeline does not crash
                 fallback_txt = f"<!-- LM_STUDIO_ERROR: {str(e)} -->\n\n## Страница {int(p_num)}\n\n[Текст не распознан: ошибка связи с VLM]\n"
                 raw_md_file.write_text(fallback_txt, encoding="utf-8")
 
-            chk["phases"]["vlm"]["pages_done"] = m_idx
+            vlm_done_count += 1
+            chk["phases"]["vlm"]["pages_done"] = vlm_done_count
             self._write_checkpoint(masked_dir.parent.name, chk)
 
             pct = 55.0 + (m_idx / total_masks) * 35.0
@@ -675,6 +743,8 @@ class PipelineBatchRunner:
                 f"Стр. {m_idx}/{total_masks} (Qwen VLM через LM Studio)",
             )
 
+        chk["phases"]["vlm"]["completed"] = True
+        self._write_checkpoint(masked_dir.parent.name, chk)
         return True
 
     def _vlm_fallback_mode(self, mask_files: List[Path], raw_md_dir: Path, chk: Dict[str, Any]) -> bool:
@@ -693,6 +763,12 @@ class PipelineBatchRunner:
     def _phase_4_assembly(
         self, book_dir: Path, raw_md_dir: Path, crops_dir: Path, final_dir: Path, chk: Dict[str, Any]
     ) -> bool:
+        overwrite = self.config.get("overwrite", False)
+        complete_book_file = book_dir / f"{book_dir.name}_complete.md"
+        if not overwrite and complete_book_file.is_file() and complete_book_file.stat().st_size > 0:
+            chk["phases"]["assembly"]["completed"] = True
+            return True
+
         raw_files = sorted(raw_md_dir.glob("page_*_raw.md"))
         all_pages_content = []
 
@@ -715,10 +791,9 @@ class PipelineBatchRunner:
 
             all_pages_content.append(f"<!-- PAGE {p_num} -->\n" + final_text)
 
-        # Full book assembly
-        complete_book_file = book_dir / f"{book_dir.name}_complete.md"
         full_content = "\n\n---\n\n".join(all_pages_content)
         complete_book_file.write_text(full_content, encoding="utf-8")
+        chk["phases"]["assembly"]["completed"] = True
         return True
 
     # ---------------- Purge VRAM Barrier ---------------- #

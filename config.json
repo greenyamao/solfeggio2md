@@ -13,7 +13,7 @@
   "qwen_flash_attention": true,
   "qwen_offload_kv_cache_to_gpu": true,
   "smt_model": "antoniorv6/smt-grandstaff",
-  "overwrite": true,
+  "overwrite": false,
   "smt_device": "cuda",
   "system_prompt": "Ты — строгий OCR-транскрибатор. Перенеси весь текст страницы книги в Markdown дословно.\nСохраняй заголовки, списки и таблицы.\nВАЖНО: Если на странице встречаются технические метки вида <!-- MUSIC_STUB_ID:XXXX -->, ОБЯЗАТЕЛЬНО оставь их в тексте на тех же местах без изменений. Ничего не додумывай."
 }
