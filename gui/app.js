@@ -257,6 +257,13 @@
       const elapsed = formatSeconds(data.elapsed_seconds);
       DOM.hudTimeMetric.textContent = `Прошло: ${elapsed}`;
 
+      // Auto-refresh queue every 2.5 seconds so files added via Windows Explorer or external copy
+      // appear automatically in the UI table
+      if (!state._lastQueueSync || (Date.now() - state._lastQueueSync > 2500)) {
+        state._lastQueueSync = Date.now();
+        refreshQueue();
+      }
+
       // Auto-refresh workbench pages if in workbench view and pipeline is running
       if (state.activeWorkspace === 'workbench' && (data.is_running || state.pages.length === 0)) {
         if (!state._lastPagesCheck || (Date.now() - state._lastPagesCheck > 3000)) {
@@ -315,14 +322,34 @@
       DOM.pdfFileInput.click();
     });
 
-    DOM.pdfFileInput.addEventListener('change', async (e) => {
-      const files = Array.from(e.target.files);
-      for (const file of files) {
+    // Prevent default window navigation when dragging files onto WebView
+    window.addEventListener('dragover', (e) => e.preventDefault());
+    window.addEventListener('drop', (e) => e.preventDefault());
+
+    async function handleUploadFiles(files) {
+      const pdfFiles = Array.from(files).filter(f => f.name.toLowerCase().endsWith('.pdf'));
+      if (pdfFiles.length === 0) {
+        alert('Пожалуйста, выберите файл в формате .pdf');
+        return;
+      }
+      DOM.queueCountBadge.textContent = 'Загрузка...';
+      for (const file of pdfFiles) {
         const formData = new FormData();
         formData.append('file', file);
-        await fetch('/api/queue/upload', { method: 'POST', body: formData });
+        try {
+          const resp = await fetch('/api/queue/upload', { method: 'POST', body: formData });
+          if (!resp.ok) {
+            console.error('Upload failed with status', resp.status);
+          }
+        } catch (err) {
+          console.error('Upload error:', err);
+        }
       }
       await refreshQueue();
+    }
+
+    DOM.pdfFileInput.addEventListener('change', async (e) => {
+      await handleUploadFiles(e.target.files);
       DOM.pdfFileInput.value = '';
     });
 
@@ -338,13 +365,9 @@
     DOM.pdfDropzone.addEventListener('drop', async (e) => {
       e.preventDefault();
       DOM.pdfDropzone.classList.remove('drag-over');
-      const files = Array.from(e.dataTransfer.files).filter(f => f.name.endsWith('.pdf'));
-      for (const file of files) {
-        const formData = new FormData();
-        formData.append('file', file);
-        await fetch('/api/queue/upload', { method: 'POST', body: formData });
+      if (e.dataTransfer && e.dataTransfer.files) {
+        await handleUploadFiles(e.dataTransfer.files);
       }
-      await refreshQueue();
     });
   }
 

@@ -82,7 +82,6 @@ class PipelineBatchRunner:
 
         # Queue of items: [{"id": "1", "name": "1.pdf", "path": "in/1.pdf", "pages": 48, "status": "pending"}]
         self.queue: List[Dict[str, Any]] = []
-        self._load_existing_queue()
 
         # State tracking
         self.is_running = False
@@ -119,6 +118,9 @@ class PipelineBatchRunner:
             port=self.config.get("lm_port", "1234"),
         )
 
+        # Initial queue population and directory sync
+        self._load_existing_queue()
+
     def load_config(self) -> Dict[str, Any]:
         cfg = dict(DEFAULT_CONFIG)
         if self.config_path.is_file():
@@ -152,25 +154,54 @@ class PipelineBatchRunner:
 
     def _save_queue_state(self) -> None:
         try:
-            with self._lock:
-                # Save paths as relative so the folder can be moved anywhere
-                clean_queue = []
-                for q in self.queue:
-                    q_copy = dict(q)
-                    fname = Path(q_copy.get("path", "")).name
-                    q_copy["path"] = f"in/{fname}"
-                    clean_queue.append(q_copy)
-                data = {
-                    "queue": clean_queue,
-                    "last_saved": datetime.now().isoformat()
-                }
+            # Save paths as relative (in/filename.pdf) so the folder is fully portable
+            clean_queue = []
+            for q in self.queue:
+                q_copy = dict(q)
+                fname = Path(q_copy.get("path", "")).name
+                q_copy["path"] = f"in/{fname}"
+                clean_queue.append(q_copy)
+            data = {
+                "queue": clean_queue,
+                "last_saved": datetime.now().isoformat()
+            }
             QUEUE_STATE_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         except Exception:
             pass
 
+    def _sync_with_in_dir(self) -> None:
+        """Dynamically synchronizes queue and queue_state.json with physical files in `in/` directory."""
+        if not self.input_dir.is_dir():
+            self.input_dir.mkdir(parents=True, exist_ok=True)
+
+        disk_files = {p.name: p for p in sorted(self.input_dir.glob("*.pdf"))}
+        changed = False
+
+        # 1. Prune items from queue if their physical file no longer exists in `in/` (only for pending or error items)
+        new_queue = []
+        for q in self.queue:
+            fname = Path(q.get("path", "")).name
+            if fname not in disk_files and q.get("status") in ("pending", "error"):
+                changed = True
+                continue
+            new_queue.append(q)
+        self.queue = new_queue
+
+        # 2. Add any newly appeared PDF files in `in/`
+        existing_names = {Path(q.get("path", "")).name for q in self.queue}
+        for fname, pdf_path in disk_files.items():
+            if fname not in existing_names:
+                self._enqueue_file(str(pdf_path))
+                changed = True
+
+        if changed:
+            for i, q in enumerate(self.queue, 1):
+                q["id"] = str(i)
+            self.metrics["total_books"] = len(self.queue)
+            self._save_queue_state()
+
     def _load_existing_queue(self) -> None:
-        """Loads queue from queue_state.json and scans `in/` for any new files."""
-        loaded_paths = set()
+        """Loads queue from queue_state.json and synchronizes with `in/` folder."""
         if QUEUE_STATE_FILE.is_file():
             try:
                 state = json.loads(QUEUE_STATE_FILE.read_text(encoding="utf-8"))
@@ -190,22 +221,16 @@ class PipelineBatchRunner:
                         if chk:
                             item["status"] = chk.get("status", item.get("status", "pending"))
                         self.queue.append(item)
-                        loaded_paths.add(str(p.resolve()))
             except Exception:
                 pass
 
-        if self.input_dir.is_dir():
-            for pdf_path in sorted(self.input_dir.glob("*.pdf")):
-                if str(pdf_path.resolve()) not in loaded_paths:
-                    self._enqueue_file(str(pdf_path))
-
-        self._save_queue_state()
+        self._sync_with_in_dir()
 
     def _enqueue_file(self, path_str: str) -> None:
         p = Path(path_str).resolve()
         if not p.is_file() or p.suffix.lower() != ".pdf":
             return
-        if any(item["path"] == str(p) for item in self.queue):
+        if any(Path(item.get("path", "")).name == p.name for item in self.queue):
             return
 
         pages_count = 0
@@ -215,7 +240,7 @@ class PipelineBatchRunner:
         except Exception:
             pages_count = 0
 
-        # Check existing checkpoint
+        # Check existing checkpoint without creating empty directories
         book_title = p.stem
         chk = self._read_checkpoint(book_title)
         status = "completed" if chk and chk.get("status") == "completed" else "pending"
@@ -224,7 +249,7 @@ class PipelineBatchRunner:
             {
                 "id": str(len(self.queue) + 1),
                 "name": p.name,
-                "path": str(p),
+                "path": f"in/{p.name}",
                 "pages": pages_count,
                 "status": status,
                 "progress_pct": 100.0 if status == "completed" else 0.0,
@@ -237,6 +262,9 @@ class PipelineBatchRunner:
             if not p.is_file() or p.suffix.lower() != ".pdf":
                 return False
             self._enqueue_file(str(p))
+            for i, q in enumerate(self.queue, 1):
+                q["id"] = str(i)
+            self.metrics["total_books"] = len(self.queue)
             self._save_queue_state()
             return True
 
@@ -245,9 +273,10 @@ class PipelineBatchRunner:
             idx = next((i for i, item in enumerate(self.queue) if item["id"] == item_id), None)
             if idx is not None:
                 self.queue.pop(idx)
-                # Re-index
                 for i, q in enumerate(self.queue, 1):
                     q["id"] = str(i)
+                self.metrics["total_books"] = len(self.queue)
+                self._save_queue_state()
                 return True
             return False
 
@@ -255,16 +284,18 @@ class PipelineBatchRunner:
         with self._lock:
             if not self.is_running:
                 self.queue.clear()
+            self.metrics["total_books"] = len(self.queue)
             self._save_queue_state()
 
     def get_queue(self) -> List[Dict[str, Any]]:
         with self._lock:
+            self._sync_with_in_dir()
             return [dict(q) for q in self.queue]
 
     def get_metrics(self) -> Dict[str, Any]:
         with self._lock:
             m = dict(self.metrics)
-            # Update live VRAM
+            m["total_books"] = len(self.queue)
             if torch.cuda.is_available():
                 try:
                     m["vram_allocated_mb"] = round(torch.cuda.memory_allocated(0) / (1024 * 1024), 1)
@@ -280,7 +311,7 @@ class PipelineBatchRunner:
         return d
 
     def _read_checkpoint(self, book_title: str) -> Optional[Dict[str, Any]]:
-        chk_file = self._get_book_dir(book_title) / "checkpoint.json"
+        chk_file = self.output_root / book_title / "checkpoint.json"
         if chk_file.is_file():
             try:
                 return json.loads(chk_file.read_text(encoding="utf-8"))
@@ -354,6 +385,8 @@ class PipelineBatchRunner:
                     continue
 
                 pdf_path = Path(item["path"])
+                if not pdf_path.is_absolute():
+                    pdf_path = (ROOT_DIR / pdf_path).resolve()
                 book_title = pdf_path.stem
                 item["status"] = "processing"
 

@@ -13,6 +13,16 @@ import time
 from pathlib import Path
 import bottle
 import webview
+from socketserver import ThreadingMixIn
+from wsgiref.simple_server import make_server, WSGIServer
+
+class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
+    daemon_threads = True
+
+class ThreadedWSGIAdapter(bottle.ServerAdapter):
+    def run(self, handler):
+        server = make_server(self.host, self.port, handler, server_class=ThreadingWSGIServer)
+        server.serve_forever()
 
 ROOT_DIR = Path(__file__).parent.resolve()
 if str(ROOT_DIR) not in sys.path:
@@ -152,7 +162,12 @@ def create_app(worker: PipelineWorker, runner: PipelineBatchRunner) -> bottle.Bo
 
             in_dir = ROOT_DIR / "in"
             in_dir.mkdir(exist_ok=True)
-            save_path = in_dir / upload.raw_filename
+            raw_name = getattr(upload, 'raw_filename', None) or getattr(upload, 'filename', '') or 'document.pdf'
+            safe_name = Path(raw_name).name
+            if not safe_name.lower().endswith('.pdf'):
+                return json.dumps({"status": "error", "message": "Поддерживаются только .pdf файлы"}, ensure_ascii=False)
+
+            save_path = in_dir / safe_name
             upload.save(str(save_path), overwrite=True)
 
             runner.add_pdf(str(save_path))
@@ -248,7 +263,7 @@ def main():
     app = create_app(worker, runner)
 
     server_thread = threading.Thread(
-        target=lambda: bottle.run(app, host='127.0.0.1', port=port, quiet=True),
+        target=lambda: bottle.run(app, host='127.0.0.1', port=port, quiet=True, server=ThreadedWSGIAdapter),
         daemon=True
     )
     server_thread.start()
