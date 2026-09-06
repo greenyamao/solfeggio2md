@@ -14,14 +14,19 @@ from pathlib import Path
 import bottle
 import webview
 from socketserver import ThreadingMixIn
-from wsgiref.simple_server import make_server, WSGIServer
+from wsgiref.simple_server import make_server, WSGIServer, WSGIRequestHandler
 
 class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
     daemon_threads = True
 
+class QuietHandler(WSGIRequestHandler):
+    def log_message(self, format, *args):
+        # Silence periodic polling logs to prevent terminal spam
+        pass
+
 class ThreadedWSGIAdapter(bottle.ServerAdapter):
     def run(self, handler):
-        server = make_server(self.host, self.port, handler, server_class=ThreadingWSGIServer)
+        server = make_server(self.host, self.port, handler, server_class=ThreadingWSGIServer, handler_class=QuietHandler)
         server.serve_forever()
 
 ROOT_DIR = Path(__file__).parent.resolve()

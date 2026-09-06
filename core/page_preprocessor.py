@@ -156,9 +156,10 @@ class PagePreprocessor:
 def normalize_staff_crop(crop_bgr: np.ndarray) -> Tuple[np.ndarray, float, float]:
     """
     High-precision music staff crop normalization:
-    1. Detects local staff-line rotational tilt (degrees).
-    2. Detects non-linear arching/spine curvature (bend delta in pixels).
-    3. Straightens and dewarps the staff lines using subpixel coordinate remap.
+    1. Determines precise rotational tilt angle using 2D-DFT (2D Discrete Fourier Transform).
+    2. Performs high-quality rotational deskew with border padding so no notes are clipped.
+    3. Analyzes genuine 5-line staff straightness across vertical slices (immune to notes/beams).
+    4. Applies subpixel dewarping ONLY when true multi-line physical spine arching (>= 3.5 px) is present.
     
     Returns:
         (normalized_crop_bgr, tilt_angle_degrees, bend_delta_pixels)
@@ -167,62 +168,131 @@ def normalize_staff_crop(crop_bgr: np.ndarray) -> Tuple[np.ndarray, float, float
     if h_orig < 20 or w_orig < 50:
         return crop_bgr, 0.0, 0.0
 
-    # Add vertical headroom padding so arched staff lines don't get clipped
-    pad_v = max(12, int(h_orig * 0.25))
-    padded = cv2.copyMakeBorder(crop_bgr, pad_v, pad_v, 0, 0, cv2.BORDER_CONSTANT, value=(255, 255, 255))
-    h, w = padded.shape[:2]
+    gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
 
-    gray = cv2.cvtColor(padded, cv2.COLOR_BGR2GRAY)
-    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    # 1. 2D-DFT Rotational Deskew Angle
+    try:
+        from jdeskew.estimator import get_angle
+        raw_angle = float(get_angle(gray))
+        if abs(raw_angle) > 40.0:
+            tilt_deg = 0.0
+        else:
+            tilt_deg = raw_angle
+    except Exception:
+        tilt_deg = 0.0
 
-    k_len = max(15, w // 35)
+    # 2. Rotate to exact horizontal orientation
+    angle_rad = abs(np.radians(tilt_deg))
+    pad_rot = int(np.ceil(w_orig * np.sin(angle_rad) / 2.0)) + 2 if abs(tilt_deg) >= 0.1 else 0
+
+    if pad_rot > 0:
+        padded_rot = cv2.copyMakeBorder(crop_bgr, pad_rot, pad_rot, 0, 0, cv2.BORDER_CONSTANT, value=(255, 255, 255))
+    else:
+        padded_rot = crop_bgr
+
+    h_rot, w_rot = padded_rot.shape[:2]
+    if abs(tilt_deg) >= 0.1:
+        center = (w_rot / 2.0, h_rot / 2.0)
+        M = cv2.getRotationMatrix2D(center, tilt_deg, 1.0)
+        deskewed = cv2.warpAffine(
+            padded_rot, M, (w_rot, h_rot),
+            flags=cv2.INTER_CUBIC,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(255, 255, 255)
+        )
+    else:
+        deskewed = padded_rot
+
+    # 3. Detect 5-line staff line structures across slices to measure curvature
+    gray_deskewed = cv2.cvtColor(deskewed, cv2.COLOR_BGR2GRAY)
+    _, binary = cv2.threshold(gray_deskewed, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    k_len = max(20, w_rot // 25)
     horiz_k = cv2.getStructuringElement(cv2.MORPH_RECT, (k_len, 1))
-    staff_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, horiz_k)
+    lines_only = cv2.morphologyEx(binary, cv2.MORPH_OPEN, horiz_k)
 
-    num_cols = min(25, max(8, w // 40))
-    win_w = w / num_cols
-    xs, ys = [], []
-    for i in range(num_cols):
-        x1 = int(i * win_w)
-        x2 = int((i + 1) * win_w)
-        slice_img = staff_lines[:, x1:x2]
-        proj = np.sum(slice_img, axis=1)
-        if np.sum(proj) > 0:
-            com_y = float(np.average(np.arange(h), weights=proj))
-            ys.append(com_y)
-            xs.append((x1 + x2) / 2.0)
+    num_slices = min(15, max(7, w_rot // 45))
+    slice_xs = np.linspace(w_rot * 0.10, w_rot * 0.90, num_slices)
+    col_hw = max(4, int(w_rot * 0.02))
 
-    if len(ys) < 5:
-        return crop_bgr, 0.0, 0.0
+    sample_x = []
+    sample_y = []
 
-    # Quadratic curve fit: y = a*x^2 + b*x + c
-    poly = np.polyfit(xs, ys, 2)
-    curve_y = np.polyval(poly, np.arange(w))
-    bend_delta = float(np.max(curve_y) - np.min(curve_y))
+    for sx in slice_xs:
+        x1 = max(0, int(sx - col_hw))
+        x2 = min(w_rot, int(sx + col_hw))
+        sl = lines_only[:, x1:x2]
+        proj = np.sum(sl, axis=1)
 
-    # Center slope gives the overall rotational tilt
-    center_x = w / 2.0
-    slope = 2 * poly[0] * center_x + poly[1]
-    tilt_deg = float(np.degrees(np.arctan(slope)))
+        peaks = []
+        for y in range(1, h_rot - 1):
+            if proj[y] > (x2 - x1) * 255 * 0.35 and proj[y] >= proj[y-1] and proj[y] >= proj[y+1]:
+                peaks.append(y)
 
-    # If already virtually straight, return original with measured metrics
-    if bend_delta < 2.0 and abs(tilt_deg) < 0.25:
-        return crop_bgr, tilt_deg, bend_delta
+        filtered = []
+        for p in peaks:
+            if not filtered or p - filtered[-1] > 3:
+                filtered.append(p)
+            elif proj[p] > proj[filtered[-1]]:
+                filtered[-1] = p
 
-    target_y = h / 2.0
-    shift_y = curve_y - target_y
+        # 5-line staff pattern: 5 equidistant peaks with spacing S in [5, 25] px
+        if len(filtered) >= 5:
+            for i in range(len(filtered) - 4):
+                grp = filtered[i:i+5]
+                diffs = np.diff(grp)
+                mean_s = np.mean(diffs)
+                if 5 <= mean_s <= 25 and np.max(np.abs(diffs - mean_s)) <= 3.0:
+                    sample_x.append(float(sx))
+                    sample_y.append(float(np.mean(grp)))
 
-    map_x = np.tile(np.arange(w, dtype=np.float32), (h, 1))
-    map_y = np.empty((h, w), dtype=np.float32)
-    for y in range(h):
-        map_y[y, :] = np.float32(y + shift_y)
+    bend_delta = 0.0
+    if len(sample_x) >= 6:
+        sx_arr = np.array(sample_x)
+        sy_arr = np.array(sample_y)
 
-    dewarped = cv2.remap(
-        padded,
-        map_x,
-        map_y,
-        interpolation=cv2.INTER_CUBIC,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=(255, 255, 255)
-    )
-    return dewarped, tilt_deg, bend_delta
+        # Separate grand staff staves cleanly by image vertical midpoint
+        mid_y = h_rot / 2.0
+        upper_mask = sy_arr < mid_y
+        lower_mask = sy_arr >= mid_y
+
+        if np.sum(upper_mask) >= 5:
+            fit_x, fit_y = sx_arr[upper_mask], sy_arr[upper_mask]
+        elif np.sum(lower_mask) >= 5:
+            fit_x, fit_y = sx_arr[lower_mask], sy_arr[lower_mask]
+        else:
+            fit_x, fit_y = sx_arr, sy_arr
+
+        if len(fit_x) >= 5:
+            poly = np.polyfit(fit_x, fit_y, 2)
+            xs_all = np.arange(w_rot)
+            curve_y = np.polyval(poly, xs_all)
+            chord = np.linspace(curve_y[0], curve_y[-1], w_rot)
+            bend_delta = float(np.max(np.abs(curve_y - chord)))
+
+            # Only dewarp if genuine physical curvature is >= 3.5 px
+            if bend_delta >= 3.5:
+                pad_warp = max(12, int(bend_delta * 1.5))
+                padded_warp = cv2.copyMakeBorder(deskewed, pad_warp, pad_warp, 0, 0, cv2.BORDER_CONSTANT, value=(255, 255, 255))
+                h_pw, w_pw = padded_warp.shape[:2]
+
+                poly_pw = np.polyfit(fit_x, fit_y + pad_warp, 2)
+                curve_pw = np.polyval(poly_pw, np.arange(w_pw))
+                target_y = float(np.mean(curve_pw))
+                shift_y = curve_pw - target_y
+
+                map_x = np.tile(np.arange(w_pw, dtype=np.float32), (h_pw, 1))
+                map_y = np.empty((h_pw, w_pw), dtype=np.float32)
+                for y in range(h_pw):
+                    map_y[y, :] = np.float32(y + shift_y)
+
+                deskewed = cv2.remap(
+                    padded_warp,
+                    map_x,
+                    map_y,
+                    interpolation=cv2.INTER_CUBIC,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=(255, 255, 255)
+                )
+
+    return deskewed, round(tilt_deg, 1), round(bend_delta, 1)
