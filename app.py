@@ -14,6 +14,7 @@ import numpy as np
 import pymupdf as fitz
 import streamlit as st
 import torch
+from music21.abcFormat import translate
 
 torch.set_float32_matmul_precision("high")
 if torch.cuda.is_available():
@@ -311,8 +312,13 @@ def transcribe_crop(model, crop_bgr, device, progress_callback=None, max_tokens=
         
         score = music21.converter.parse(raw_bekern, format='humdrum')
         score.makeNotation(inPlace=True)
-        abc = music21.converter.subConverters.ConverterABC().subdataABC(score)
-        return abc.strip()
+
+        # Официальный экспорт music21 через временный файл
+        tmp_path = Path(score.write('abc'))
+        abc = tmp_path.read_text(encoding='utf-8').strip()
+        tmp_path.unlink(missing_ok=True)
+
+        return abc
     except Exception as exc:
         return f"% Ошибка нотации: {exc}"
 
