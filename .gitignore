@@ -19,3 +19,6 @@ weights/*.pth
 weights/*.safetensors
 weights/*.bin
 
+
+# Queue state
+queue_state.json

@@ -31,6 +31,7 @@ from core.layout_detector import LayoutDetector
 
 
 DEFAULT_CONFIG_FILE = ROOT_DIR / "config.json"
+QUEUE_STATE_FILE = ROOT_DIR / "queue_state.json"
 DEFAULT_CONFIG = {
     "lm_host": "127.0.0.1",
     "lm_port": "1234",
@@ -66,9 +67,16 @@ class PipelineBatchRunner:
     def __init__(self, config_path: Optional[Path] = None):
         self.config_path = config_path or DEFAULT_CONFIG_FILE
         self.config = self.load_config()
-        self.output_root = Path(self.config.get("output_dir", str(ROOT_DIR / "output")))
+        cfg_out = self.config.get("output_dir", "output")
+        p_out = Path(cfg_out)
+        if not p_out.is_absolute():
+            self.output_root = (ROOT_DIR / p_out).resolve()
+        else:
+            if not p_out.exists() or "Users" in str(p_out):
+                self.output_root = (ROOT_DIR / "output").resolve()
+            else:
+                self.output_root = p_out
         self.output_root.mkdir(parents=True, exist_ok=True)
-
         self.input_dir = ROOT_DIR / "in"
         self.input_dir.mkdir(parents=True, exist_ok=True)
 
@@ -127,16 +135,71 @@ class PipelineBatchRunner:
             self.config_path.write_text(
                 json.dumps(self.config, indent=2, ensure_ascii=False), encoding="utf-8"
             )
-            self.output_root = Path(self.config.get("output_dir", str(ROOT_DIR / "output")))
+            cfg_out = self.config.get("output_dir", "output")
+            p_out = Path(cfg_out)
+            if not p_out.is_absolute():
+                self.output_root = (ROOT_DIR / p_out).resolve()
+            else:
+                if not p_out.exists() or "Users" in str(p_out):
+                    self.output_root = (ROOT_DIR / "output").resolve()
+                else:
+                    self.output_root = p_out
             self.output_root.mkdir(parents=True, exist_ok=True)
+            self.input_dir = ROOT_DIR / "in"
+            self.input_dir.mkdir(parents=True, exist_ok=True)
             self.lm_client.host = self.config.get("lm_host", "127.0.0.1")
             self.lm_client.port = str(self.config.get("lm_port", "1234"))
 
+    def _save_queue_state(self) -> None:
+        try:
+            with self._lock:
+                # Save paths as relative so the folder can be moved anywhere
+                clean_queue = []
+                for q in self.queue:
+                    q_copy = dict(q)
+                    fname = Path(q_copy.get("path", "")).name
+                    q_copy["path"] = f"in/{fname}"
+                    clean_queue.append(q_copy)
+                data = {
+                    "queue": clean_queue,
+                    "last_saved": datetime.now().isoformat()
+                }
+            QUEUE_STATE_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+
     def _load_existing_queue(self) -> None:
-        """Populates queue from `in/` directory if files exist."""
+        """Loads queue from queue_state.json and scans `in/` for any new files."""
+        loaded_paths = set()
+        if QUEUE_STATE_FILE.is_file():
+            try:
+                state = json.loads(QUEUE_STATE_FILE.read_text(encoding="utf-8"))
+                for item in state.get("queue", []):
+                    raw_p = item.get("path", "")
+                    p = Path(raw_p)
+                    if not p.is_absolute():
+                        p = (ROOT_DIR / p).resolve()
+                    if not p.is_file():
+                        p_fallback = (self.input_dir / Path(raw_p).name).resolve()
+                        if p_fallback.is_file():
+                            p = p_fallback
+                    if p.is_file():
+                        item["path"] = f"in/{p.name}"
+                        book_title = p.stem
+                        chk = self._read_checkpoint(book_title)
+                        if chk:
+                            item["status"] = chk.get("status", item.get("status", "pending"))
+                        self.queue.append(item)
+                        loaded_paths.add(str(p.resolve()))
+            except Exception:
+                pass
+
         if self.input_dir.is_dir():
             for pdf_path in sorted(self.input_dir.glob("*.pdf")):
-                self._enqueue_file(str(pdf_path))
+                if str(pdf_path.resolve()) not in loaded_paths:
+                    self._enqueue_file(str(pdf_path))
+
+        self._save_queue_state()
 
     def _enqueue_file(self, path_str: str) -> None:
         p = Path(path_str).resolve()
@@ -174,6 +237,7 @@ class PipelineBatchRunner:
             if not p.is_file() or p.suffix.lower() != ".pdf":
                 return False
             self._enqueue_file(str(p))
+            self._save_queue_state()
             return True
 
     def remove_pdf(self, item_id: str) -> bool:
@@ -191,6 +255,7 @@ class PipelineBatchRunner:
         with self._lock:
             if not self.is_running:
                 self.queue.clear()
+            self._save_queue_state()
 
     def get_queue(self) -> List[Dict[str, Any]]:
         with self._lock:
@@ -423,13 +488,17 @@ class PipelineBatchRunner:
             total_pages = len(doc)
             chk["phases"]["slicing"]["total_pages"] = total_pages
 
-            for p_idx in range(1, total_pages + 1):
+            pages_done = chk["phases"]["slicing"].get("pages_done", 0)
+            # 1-page overlap on resume to guarantee no corrupted half-written files
+            start_page = max(1, pages_done) if (pages_done > 0 and not overwrite) else 1
+
+            for p_idx in range(start_page, total_pages + 1):
                 if self._stop_event.is_set():
                     return False
                 self._check_pause()
 
                 mask_file = masked_dir / f"page_{p_idx:04d}_masked.png"
-                if mask_file.is_file() and not overwrite:
+                if p_idx < start_page and mask_file.is_file() and not overwrite:
                     continue
 
                 page = doc[p_idx - 1]
@@ -487,13 +556,18 @@ class PipelineBatchRunner:
             device = "cuda" if torch.cuda.is_available() else "cpu"
             self.omr_engine = OMREngine(device=device)
 
-        for c_idx, crop_file in enumerate(crop_files, start=1):
+        crops_done = chk["phases"]["omr"].get("crops_done", 0)
+        # 1-crop overlap on resume to re-verify last crop in case it was interrupted
+        start_idx = max(1, crops_done) if (crops_done > 0 and not overwrite) else 1
+
+        for c_idx in range(start_idx, total_crops + 1):
             if self._stop_event.is_set():
                 return False
             self._check_pause()
 
+            crop_file = crop_files[c_idx - 1]
             abc_file = crops_dir / f"{crop_file.stem}.abc"
-            if abc_file.is_file() and not overwrite:
+            if c_idx < start_idx and abc_file.is_file() and not overwrite:
                 continue
 
             crop_bgr = cv2.imread(str(crop_file))
@@ -558,16 +632,21 @@ class PipelineBatchRunner:
 
         system_prompt = self.config.get("system_prompt", DEFAULT_CONFIG["system_prompt"])
 
-        for m_idx, mask_file in enumerate(mask_files, start=1):
+        pages_done = chk["phases"]["vlm"].get("pages_done", 0)
+        # 1-page overlap on resume to re-verify last page in case it was interrupted
+        start_idx = max(1, pages_done) if (pages_done > 0 and not overwrite) else 1
+
+        for m_idx in range(start_idx, total_masks + 1):
             if self._stop_event.is_set():
                 return False
             self._check_pause()
 
+            mask_file = mask_files[m_idx - 1]
             p_num_str = re.search(r"page_(\d+)_masked", mask_file.stem)
             p_num = p_num_str.group(1) if p_num_str else f"{m_idx:04d}"
             raw_md_file = raw_md_dir / f"page_{p_num}_raw.md"
 
-            if raw_md_file.is_file() and not overwrite:
+            if m_idx < start_idx and raw_md_file.is_file() and not overwrite:
                 continue
 
             try:

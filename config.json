@@ -4,7 +4,7 @@
   "lm_model": "qwen/qwen3.5-9b",
   "lm_temperature": 0.1,
   "lm_max_tokens": 8192,
-  "output_dir": "C:\\Users\\greenbox\\Desktop\\pdf_to_md_music\\output",
+  "output_dir": "output",
   "dpi": 200,
   "delay": 0.5,
   "smt_max_tokens": 512,

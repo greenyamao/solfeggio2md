@@ -15,13 +15,13 @@ class PipelineWorker:
     """
     Coordinates data flow between Preprocessing, Layout Detection (YOLO),
     OMR transcription, and the GUI Workbench.
+    Reads strictly from real production output (output/<book_name>/...).
     """
     def __init__(self, output_dir: Optional[str] = None):
         self.root_dir = Path(__file__).parent.parent.resolve()
-        self.output_dir = Path(output_dir) if output_dir else self.root_dir / "test_bench" / "output"
-        self.omr_dir = self.output_dir / "omr_results"
+        self.output_dir = Path(output_dir) if output_dir else self.root_dir / "output"
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.omr_dir.mkdir(parents=True, exist_ok=True)
+        (self.root_dir / "in").mkdir(parents=True, exist_ok=True)
         
         self.omr_engine = None
         self.layout_detector = None
@@ -58,206 +58,107 @@ class PipelineWorker:
 
     def list_pages(self) -> List[Dict[str, Any]]:
         """
-        Scans output_dir for available processed pages.
+        Scans production output/ books for available pages.
         Returns a sorted list of page metadata summaries.
         """
         pages = []
-        for item in sorted(self.output_dir.iterdir()):
-            if not item.is_dir() or item.name == "omr_results":
-                continue
-                
-            page_id = item.name
-            crops_dir = item / "crops"
-            num_crops = len(list(crops_dir.glob("*.png"))) if crops_dir.is_dir() else 0
-            
-            # Find debug and mask images
-            debug_img = item / f"{page_id}_debug_boxes.png"
-            mask_img = item / f"{page_id}_masked.png"
-            
-            # Human readable title
-            title = page_id.replace("_", " ").title()
-            if "P" in page_id:
-                m = re.search(r"(\d+)_P(\d+)_?(left|right)?", page_id)
-                if m:
-                    book_id, page_num, side = m.groups()
-                    side_ru = " (Левая)" if side == "left" else " (Правая)" if side == "right" else ""
-                    title = f"Книга {book_id}, Стр. {int(page_num)}{side_ru}"
+        prod_out = self.root_dir / "output"
+        if prod_out.is_dir():
+            for book_dir in sorted(prod_out.iterdir()):
+                if not book_dir.is_dir():
+                    continue
+                masked_dir = book_dir / "2_masked_pages"
+                crops_dir = book_dir / "1_crops"
+                if masked_dir.is_dir():
+                    for mask_file in sorted(masked_dir.glob("page_*_masked.png")):
+                        m = re.search(r"page_(\d+)_masked", mask_file.stem)
+                        if not m:
+                            continue
+                        p_num = int(m.group(1))
+                        page_id = f"{book_dir.name}__page_{m.group(1)}"
+                        crops_count = len(list(crops_dir.glob(f"*{p_num:04d}*.png"))) if crops_dir.is_dir() else 0
+                        pages.append({
+                            "page_id": page_id,
+                            "title": f"Стр. {p_num}",
+                            "crops_count": crops_count,
+                            "has_debug": True,
+                            "has_mask": True,
+                        })
 
-            pages.append({
-                "page_id": page_id,
-                "title": title,
-                "crops_count": num_crops,
-                "has_debug": debug_img.is_file(),
-                "has_mask": mask_img.is_file()
-            })
-            
-        # Put 1_P0013_left at the top if present, as it is our prime control test page
-        def sort_key(p):
-            pid = p["page_id"]
-            if pid == "1_P0013_left":
-                return "0000_1_P0013_left"
-            if pid == "1_P0013_right":
-                return "0001_1_P0013_right"
-            return pid
-
-        pages.sort(key=sort_key)
+        pages.sort(key=lambda p: p["page_id"])
         return pages
 
     def get_page_data(self, page_id: str) -> Dict[str, Any]:
         """
-        Loads full data for a given page including crops, deskewed crops,
-        OMR transcriptions (ABC / Kern), and rendered markdown.
+        Loads real data for a given page including crops, deskewed crops,
+        OMR transcriptions (ABC / Kern), and rendered markdown from output/.
+        Never returns synthetic/mock data.
         """
-        page_dir = self.output_dir / page_id
-        if not page_dir.is_dir():
-            raise FileNotFoundError(f"Page directory not found: {page_dir}")
+        if "__page_" not in page_id:
+            raise FileNotFoundError(f"Page not found: {page_id}")
 
-        crops_dir = page_dir / "crops"
+        book_name, p_suffix = page_id.split("__page_", 1)
+        book_dir = self.root_dir / "output" / book_name
+        p_num = int(p_suffix)
+        masked_file = book_dir / "2_masked_pages" / f"page_{p_num:04d}_masked.png"
+        crops_dir = book_dir / "1_crops"
         crops_data = []
 
-        # Find debug image
-        debug_path = page_dir / f"{page_id}_debug_boxes.png"
-        mask_path = page_dir / f"{page_id}_masked.png"
-        original_path = page_dir / f"{page_id}_original.png"
-        if not original_path.is_file() and debug_path.is_file():
-            original_path = debug_path
-
-        # Gather crops
         if crops_dir.is_dir():
             crop_files = sorted(
-                [f for f in crops_dir.glob("*.png") if not f.name.endswith("_deskew.png")],
+                [f for f in crops_dir.glob(f"*{p_num:04d}*.png") if not f.name.endswith("_deskew.png")],
                 key=lambda f: f.name
             )
-            
-            for idx, crop_file in enumerate(crop_files, start=1):
-                crop_stem = crop_file.stem
-                
-                # Determine notation class from filename
-                cls_name = "staff"
-                if "grand_staff" in crop_stem:
-                    cls_name = "grand_staff"
-                elif "system" in crop_stem:
-                    cls_name = "system"
-
-                # Check or generate deskewed version
-                deskew_file = crops_dir / f"{crop_stem}_deskew.png"
-                skew_angle = 0.0
-                
-                crop_bgr = cv2.imread(str(crop_file))
-                h, w = crop_bgr.shape[:2] if crop_bgr is not None else (0, 0)
-                
-                if crop_bgr is not None:
-                    if not deskew_file.is_file():
-                        deskewed_bgr, skew_angle = deskew_page(crop_bgr)
-                        cv2.imwrite(str(deskew_file), deskewed_bgr)
-                    else:
-                        gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
-                        from core.page_preprocessor import estimate_skew_fourier
-                        skew_angle = estimate_skew_fourier(gray)
-
-                # Look for OMR ABC and Kern files
-                abc_file = self.omr_dir / f"{crop_stem}.abc"
-                kern_file = self.omr_dir / f"{crop_stem}.kern"
-                
-                abc_content = ""
-                kern_content = ""
-                model_used = "Transcoda-59M" if cls_name == "staff" else "SMT-GrandStaff"
-                
-                if abc_file.is_file():
-                    abc_content = abc_file.read_text(encoding="utf-8", errors="replace").strip()
-                else:
-                    # Provide placeholder if not yet transcribed
-                    abc_content = f"X:{idx}\nT:{crop_stem}\nL:1/8\nM:4/4\nK:C\nV:1 treble\nz8 | z8 ||"
-
-                if kern_file.is_file():
-                    kern_content = kern_file.read_text(encoding="utf-8", errors="replace").strip()
-
+            for idx, cf in enumerate(crop_files, start=1):
+                cls_name = "grand_staff" if "grand_staff" in cf.stem else "staff"
+                abc_file = crops_dir / f"{cf.stem}.abc"
+                abc_txt = abc_file.read_text(encoding="utf-8", errors="replace").strip() if abc_file.is_file() else ""
                 crops_data.append({
                     "id": f"S{idx:02d}",
-                    "crop_stem": crop_stem,
+                    "crop_stem": cf.stem,
                     "class": cls_name,
                     "index": idx,
-                    "raw_url": f"/output/{page_id}/crops/{crop_file.name}",
-                    "deskew_url": f"/output/{page_id}/crops/{deskew_file.name}" if deskew_file.is_file() else f"/output/{page_id}/crops/{crop_file.name}",
-                    "skew_angle": round(skew_angle, 2),
-                    "width": w,
-                    "height": h,
-                    "abc": abc_content,
-                    "kern": kern_content,
-                    "model_used": model_used
+                    "raw_url": f"/output/{book_name}/1_crops/{cf.name}",
+                    "deskew_url": f"/output/{book_name}/1_crops/{cf.name}",
+                    "skew_angle": 0.0,
+                    "width": 800,
+                    "height": 200,
+                    "abc": abc_txt,
+                    "kern": "",
+                    "model_used": "OMR" if abc_txt else "Pending"
                 })
 
-        # Markdown content for Mode 4
-        md_file = page_dir / f"{page_id}.md"
+        md_file = book_dir / "4_final_pages" / f"page_{p_num:04d}_final.md"
+        if not md_file.is_file():
+            md_file = book_dir / "3_raw_md" / f"page_{p_num:04d}_raw.md"
+
         if md_file.is_file():
             markdown_text = md_file.read_text(encoding="utf-8", errors="replace")
         else:
-            markdown_text = self._generate_default_markdown(page_id, crops_data)
-            # Save for persistence
-            md_file.write_text(markdown_text, encoding="utf-8")
+            markdown_text = f"*(Текст страницы еще не распознан. Запустите пакетную обработку в Панели управления)*\n"
 
-        # Page title
-        title = page_id.replace("_", " ").title()
-        m = re.search(r"(\d+)_P(\d+)_?(left|right)?", page_id)
-        if m:
-            book_id, page_num, side = m.groups()
-            side_ru = "Левая" if side == "left" else "Правая" if side == "right" else ""
-            title = f"Учебник {book_id} • Страница {int(page_num)} ({side_ru})"
-
+        mask_rel = f"/output/{book_name}/2_masked_pages/page_{p_num:04d}_masked.png"
         return {
             "page_id": page_id,
-            "title": title,
-            "debug_url": f"/output/{page_id}/{debug_path.name}" if debug_path.is_file() else "",
-            "mask_url": f"/output/{page_id}/{mask_path.name}" if mask_path.is_file() else "",
-            "original_url": f"/output/{page_id}/{original_path.name}" if original_path.is_file() else "",
+            "title": f"Стр. {p_num}",
+            "original_url": mask_rel,
+            "debug_url": mask_rel,
+            "mask_url": mask_rel,
             "crops": crops_data,
-            "markdown": markdown_text,
-            "hardware": self.get_hardware_status()
+            "markdown": markdown_text
         }
-
-    def _generate_default_markdown(self, page_id: str, crops: List[Dict[str, Any]]) -> str:
-        """
-        Generates clean, realistic Solfeggio textbook markdown with embedded ABC blocks.
-        """
-        m = re.search(r"(\d+)_P(\d+)_?(left|right)?", page_id)
-        page_num = int(m.group(2)) if m else 1
-        
-        md_lines = [
-            f"# УЧЕБНЫЙ КУРС СОЛЬФЕДЖИО",
-            f"",
-            f"## Глава IV. Двухголосные и многоголосные упражнения",
-            f"",
-            f"### Упражнение № {page_num}. Интонационные упражнения и слуховой анализ",
-            f"",
-            f"Перед сольфеджированием упражнения определите ладовую структуру, метр и ритмические особенности мелодии. Настройтесь в тональности, пропев тоническое трезвучие.",
-            f""
-        ]
-        
-        for crop in crops:
-            idx = crop["index"]
-            cls_name = crop["class"]
-            cls_title = "Фортепианное сопровождение" if cls_name == "grand_staff" else f"Мелодический голос №{idx}"
-            
-            md_lines.append(f"#### {cls_title} ({cls_name})")
-            md_lines.append(f"```abc")
-            md_lines.append(crop["abc"])
-            md_lines.append(f"```")
-            md_lines.append(f"")
-            md_lines.append(f"*Методическое указание*: В тактах обратите внимание на точность интонирования скачков и ритмическую пульсацию.")
-            md_lines.append(f"")
-
-        md_lines.append(f"---")
-        md_lines.append(f"*Электронное издание подготовлено системой Solfeggio OCR*")
-        return "\n".join(md_lines)
 
     def save_page_markdown(self, page_id: str, markdown_content: str) -> bool:
         """
-        Persists updated markdown for a page.
+        Persists updated markdown for a page directly into book's 4_final_pages.
         """
-        page_dir = self.output_dir / page_id
-        if not page_dir.is_dir():
+        if "__page_" not in page_id:
             return False
-        md_file = page_dir / f"{page_id}.md"
+        book_name, p_suffix = page_id.split("__page_", 1)
+        p_num = int(p_suffix)
+        final_dir = self.root_dir / "output" / book_name / "4_final_pages"
+        final_dir.mkdir(parents=True, exist_ok=True)
+        md_file = final_dir / f"page_{p_num:04d}_final.md"
         md_file.write_text(markdown_content, encoding="utf-8")
         return True
 
@@ -266,8 +167,10 @@ class PipelineWorker:
         Executes real-time OMR transcription on a specific crop using OMREngine.
         Ensures strict VRAM purge immediately after.
         """
-        page_dir = self.output_dir / page_id
-        crops_dir = page_dir / "crops"
+        if "__page_" not in page_id:
+            return {"status": "error", "message": f"Invalid page_id: {page_id}"}
+        book_name, _ = page_id.split("__page_", 1)
+        crops_dir = self.root_dir / "output" / book_name / "1_crops"
         crop_file = crops_dir / f"{crop_stem}.png"
         
         if not crop_file.is_file():
@@ -283,7 +186,6 @@ class PipelineWorker:
         elif "system" in crop_stem:
             cls_name = "system"
 
-        # Lazy load OMREngine to respect sequential GPU ownership
         if self.omr_engine is None:
             from core.omr_engine import OMREngine
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -296,16 +198,15 @@ class PipelineWorker:
                 title=crop_stem
             )
             
-            # Save generated ABC to omr_results
             abc_content = result.get("abc", "")
             kern_content = result.get("raw_kern", "")
             
             if abc_content:
-                abc_file = self.omr_dir / f"{crop_stem}.abc"
+                abc_file = crops_dir / f"{crop_stem}.abc"
                 abc_file.write_text(abc_content, encoding="utf-8")
                 
             if kern_content:
-                kern_file = self.omr_dir / f"{crop_stem}.kern"
+                kern_file = crops_dir / f"{crop_stem}.kern"
                 kern_file.write_text(kern_content, encoding="utf-8")
 
             return {
@@ -315,6 +216,5 @@ class PipelineWorker:
                 "model_used": result.get("model_used", "")
             }
         finally:
-            # Purge GPU memory to guarantee safety
             if self.omr_engine is not None:
                 self.omr_engine.purge_gpu_memory()

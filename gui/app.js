@@ -64,6 +64,7 @@
     btnNextPage: document.getElementById('btn-next-page'),
     pageSelect: document.getElementById('page-select'),
     pageCounter: document.getElementById('page-counter'),
+    btnRefreshPages: document.getElementById('btn-refresh-pages'),
     modeBtns: document.querySelectorAll('.btn-mode'),
 
     // Workbench Panels
@@ -166,6 +167,7 @@
       DOM.wsWorkbench.classList.add('active');
       DOM.wsDashboard.classList.remove('active');
       DOM.workbenchSubmodes.style.display = 'flex';
+      loadWorkbenchPages(true);
       renderActiveWorkbenchMode();
     }
   }
@@ -254,6 +256,14 @@
 
       const elapsed = formatSeconds(data.elapsed_seconds);
       DOM.hudTimeMetric.textContent = `Прошло: ${elapsed}`;
+
+      // Auto-refresh workbench pages if in workbench view and pipeline is running
+      if (state.activeWorkspace === 'workbench' && (data.is_running || state.pages.length === 0)) {
+        if (!state._lastPagesCheck || (Date.now() - state._lastPagesCheck > 3000)) {
+          state._lastPagesCheck = Date.now();
+          loadWorkbenchPages(true);
+        }
+      }
 
       // Update Buttons
       DOM.btnPipelineStart.disabled = data.is_running && !data.is_paused;
@@ -420,10 +430,15 @@
   // ========================================================================
   // Visual Inspection Workbench (4 Modes)
   // ========================================================================
-  async function loadWorkbenchPages() {
+  async function loadWorkbenchPages(preserveCurrent = true) {
     try {
       const data = await api('/api/pages');
-      state.pages = data.pages || [];
+      const newPages = data.pages || [];
+      const prevSelectedId = (preserveCurrent && state.pages[state.currentPageIndex]) 
+        ? state.pages[state.currentPageIndex].page_id 
+        : (DOM.pageSelect ? DOM.pageSelect.value : null);
+
+      state.pages = newPages;
 
       DOM.pageSelect.innerHTML = '';
       state.pages.forEach((p, idx) => {
@@ -433,10 +448,19 @@
         DOM.pageSelect.appendChild(opt);
       });
 
-      if (state.pages.length > 0) {
-        state.currentPageIndex = 0;
-        await selectWorkbenchPage(state.pages[0].page_id);
+      if (state.pages.length === 0) {
+        DOM.pageCounter.textContent = '0 / 0';
+        state.pageData = null;
+        renderActiveWorkbenchMode();
+        return;
       }
+
+      let targetId = state.pages[0].page_id;
+      if (prevSelectedId && state.pages.some(p => p.page_id === prevSelectedId)) {
+        targetId = prevSelectedId;
+      }
+
+      await selectWorkbenchPage(targetId);
     } catch (err) {
       console.warn('Load pages error:', err);
     }
@@ -705,6 +729,10 @@
         selectWorkbenchPage(state.pages[state.currentPageIndex].page_id);
       }
     });
+
+    if (DOM.btnRefreshPages) {
+      DOM.btnRefreshPages.addEventListener('click', () => loadWorkbenchPages(true));
+    }
 
     DOM.btnNextPage.addEventListener('click', () => {
       if (state.currentPageIndex < state.pages.length - 1) {

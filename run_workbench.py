@@ -34,9 +34,13 @@ def find_available_port(start_port: int = 18492) -> int:
 def create_app(worker: PipelineWorker, runner: PipelineBatchRunner) -> bottle.Bottle:
     app = bottle.Bottle()
     gui_dir = ROOT_DIR / "gui"
-    test_bench_output = ROOT_DIR / "test_bench" / "output"
     production_output = ROOT_DIR / "output"
+    in_dir = ROOT_DIR / "in"
 
+    # Auto-create all required directories if missing
+    in_dir.mkdir(parents=True, exist_ok=True)
+    production_output.mkdir(parents=True, exist_ok=True)
+    
     # ---------------- Static Asset Serving ---------------- #
     @app.route('/')
     def index():
@@ -48,9 +52,6 @@ def create_app(worker: PipelineWorker, runner: PipelineBatchRunner) -> bottle.Bo
 
     @app.route('/output/<filepath:path>')
     def serve_output(filepath):
-        # Check test_bench output first, then production output
-        if (test_bench_output / filepath).is_file():
-            return bottle.static_file(filepath, root=str(test_bench_output))
         return bottle.static_file(filepath, root=str(production_output))
 
     # ---------------- Inspection Workbench APIs ---------------- #
@@ -118,12 +119,22 @@ def create_app(worker: PipelineWorker, runner: PipelineBatchRunner) -> bottle.Bo
 
             p = Path(path_str)
             added_count = 0
+            in_dir = ROOT_DIR / "in"
+            in_dir.mkdir(exist_ok=True)
             if p.is_dir():
                 for sub_pdf in sorted(p.glob("*.pdf")):
-                    if runner.add_pdf(str(sub_pdf)):
+                    dest = in_dir / sub_pdf.name
+                    if sub_pdf.resolve() != dest.resolve():
+                        import shutil
+                        shutil.copy2(str(sub_pdf), str(dest))
+                    if runner.add_pdf(str(dest)):
                         added_count += 1
             elif p.is_file() and p.suffix.lower() == ".pdf":
-                if runner.add_pdf(str(p)):
+                dest = in_dir / p.name
+                if p.resolve() != dest.resolve():
+                    import shutil
+                    shutil.copy2(str(p), str(dest))
+                if runner.add_pdf(str(dest)):
                     added_count += 1
 
             return json.dumps({"status": "success", "added": added_count, "queue": runner.get_queue()}, ensure_ascii=False)
@@ -139,9 +150,9 @@ def create_app(worker: PipelineWorker, runner: PipelineBatchRunner) -> bottle.Bo
             if not upload:
                 return json.dumps({"status": "error", "message": "Файл не получен"}, ensure_ascii=False)
 
-            temp_dir = ROOT_DIR / ".queue_temp"
-            temp_dir.mkdir(exist_ok=True)
-            save_path = temp_dir / upload.raw_filename
+            in_dir = ROOT_DIR / "in"
+            in_dir.mkdir(exist_ok=True)
+            save_path = in_dir / upload.raw_filename
             upload.save(str(save_path), overwrite=True)
 
             runner.add_pdf(str(save_path))
