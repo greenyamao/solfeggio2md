@@ -164,10 +164,10 @@ class PipelineWorker:
                 if cf_bgr is not None:
                     h_c, w_c = cf_bgr.shape[:2]
                     if not deskew_file.is_file():
-                        dewarped_bgr, tilt_deg, bend_px = normalize_staff_crop(cf_bgr)
+                        dewarped_bgr, tilt_deg, bend_px = normalize_staff_crop(cf_bgr, notation_class=cls_name)
                         cv2.imwrite(str(deskew_file), dewarped_bgr)
                     else:
-                        _, tilt_deg, bend_px = normalize_staff_crop(cf_bgr)
+                        _, tilt_deg, bend_px = normalize_staff_crop(cf_bgr, notation_class=cls_name)
                 else:
                     h_c, w_c, tilt_deg, bend_px = 60, 1000, 0.0, 0.0
 

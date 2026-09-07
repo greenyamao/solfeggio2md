@@ -3,6 +3,8 @@ from typing import List, Dict, Any, Tuple, Optional
 import cv2
 import numpy as np
 
+from core.page_preprocessor import estimate_staff_spacing
+
 
 class LayoutDetector:
     """
@@ -33,14 +35,22 @@ class LayoutDetector:
             self.model = YOLO(str(self.weights_path))
             self.names = self.model.names
 
-    def detect(self, img_bgr: np.ndarray, imgsz: int = 1024) -> List[Dict[str, Any]]:
+    def detect(self, img_bgr: np.ndarray, imgsz: Optional[int] = None) -> List[Dict[str, Any]]:
         """
-        Runs layout detection on an image.
+        Runs layout detection on an image with automatic scale adaptation.
         Returns a list of structured detection dictionaries.
         """
         self._ensure_loaded()
         img_h, img_w = img_bgr.shape[:2]
-        
+
+        # Scale-adaptive YOLO inference size:
+        # Preserves fine 1-px staff lines across different page resolutions (150 - 400 DPI)
+        if imgsz is None:
+            max_dim = max(img_h, img_w)
+            target_sz = int(np.ceil(max_dim / 32.0) * 32)
+            max_cap = 1920 if self.device == "cuda" else 1280
+            imgsz = min(max_cap, max(1024, target_sz))
+
         # Inference with Ultralytics YOLO
         results = self.model.predict(
             source=img_bgr,
@@ -49,7 +59,7 @@ class LayoutDetector:
             device=self.device,
             verbose=False
         )
-        
+
         raw_detections = []
         if len(results) > 0 and results[0].boxes is not None:
             boxes = results[0].boxes
@@ -58,22 +68,20 @@ class LayoutDetector:
                 conf = float(box.conf[0].cpu().numpy())
                 cls_id = int(box.cls[0].cpu().numpy())
                 cls_name = self.names.get(cls_id, str(cls_id))
-                
+
                 raw_detections.append({
                     "class": cls_name,
                     "confidence": conf,
                     "box": [int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])],  # x1, y1, x2, y2
                 })
-        
+
         # Filter and prioritize detections:
         # If a single 'staff' is physically inside an identified 'grand_staff',
         # suppress the child single 'staff' to avoid double-cropping.
-        # Group raw detections by canonical class
-        # OLA v2 classes: 0: system_measures, 1: stave_measures, 2: staves, 3: systems, 4: grand_staff
         raw_grand = []
         raw_staves = []
         raw_systems = []
-        
+
         for d in raw_detections:
             cls_name = d["class"].lower().replace(" ", "_")
             if cls_name in ("grand_staff", "grandstaff"):
@@ -111,7 +119,6 @@ class LayoutDetector:
             x2 = min(b1[2], b2[2])
             if x2 > x1:
                 return x2 - x1  # positive overlap
-            # gap: distance between right of one and left of the other
             if b1[2] <= b2[0]:
                 return -(b2[0] - b1[2])
             else:
@@ -120,15 +127,17 @@ class LayoutDetector:
         def merge_boxes(b1, b2):
             return [min(b1[0], b2[0]), min(b1[1], b2[1]), max(b1[2], b2[2]), max(b1[3], b2[3])]
 
-        def heal_collinear_segments(detections_list, v_overlap_thresh=0.65, max_gap_px=25):
+        def heal_collinear_segments(detections_list, v_overlap_thresh=0.60, max_gap_px=None):
             """
             Merges horizontally broken or overlapping segments of the same staff/grand_staff line.
+            max_gap_px adapts to image width automatically.
             """
             if not detections_list:
                 return []
-            
+            if max_gap_px is None:
+                max_gap_px = max(25, int(img_w * 0.025))
+
             merged = []
-            # Sort by confidence descending
             sorted_dets = sorted(detections_list, key=lambda x: x["confidence"], reverse=True)
             used = [False] * len(sorted_dets)
 
@@ -146,7 +155,6 @@ class LayoutDetector:
                     v_ratio = vertical_overlap_ratio(cur_box, other_box)
                     h_rel = horizontal_overlap_or_gap(cur_box, other_box)
 
-                    # If on the same horizontal staff band and overlapping horizontally or adjacent
                     if v_ratio >= v_overlap_thresh and h_rel >= -max_gap_px:
                         cur_box = merge_boxes(cur_box, other_box)
                         cur_conf = max(cur_conf, sorted_dets[j]["confidence"])
@@ -162,14 +170,12 @@ class LayoutDetector:
 
         # 1. Process grand_staff (highest priority: piano 2-staff systems)
         accepted_grand = heal_collinear_segments(raw_grand)
-        # Standardize class name
         for g in accepted_grand:
             g["class"] = "grand_staff"
 
         # 2. Process staves: remove any staff that falls inside a grand_staff
         staves_outside_grand = []
         for s in raw_staves:
-            # Check if vertically inside any grand_staff
             inside_grand = False
             for g in accepted_grand:
                 v_ratio = vertical_overlap_ratio(s["box"], g["box"])
@@ -185,25 +191,21 @@ class LayoutDetector:
             s["class"] = "staff"
 
         # 3. Process systems:
-        # In OLA, systems often duplicates single staves (1 staff = 1 system) or overlaps grand_staff.
-        # We only keep a system if it is NOT covered by grand_staff and NOT covered by accepted_staves.
-        # If it matches a single staff (height is staff-sized), we ensure it is represented as a staff.
+        # Disambiguate between multi-staff ensemble scores and single-staff melodies
         accepted_systems = []
         for sys_det in raw_systems:
-            # Check grand_staff collision
             if any(vertical_overlap_ratio(sys_det["box"], g["box"]) > 0.60 and horizontal_overlap_or_gap(sys_det["box"], g["box"]) > 0 for g in accepted_grand):
                 continue
-            # Check staff collision
             collides_with_staff = False
             for st in accepted_staves:
                 if vertical_overlap_ratio(sys_det["box"], st["box"]) > 0.60 and horizontal_overlap_or_gap(sys_det["box"], st["box"]) > 0:
                     collides_with_staff = True
                     break
             if not collides_with_staff:
-                # System is a multi-staff ensemble/choir or an unclassified staff
                 sys_h = sys_det["box"][3] - sys_det["box"][1]
-                # If height is small (< 85 px at 200 dpi), it's likely an isolated single staff
-                if sys_h < 85:
+                sys_w = sys_det["box"][2] - sys_det["box"][0]
+                # Scale-adaptive single-staff identification:
+                if sys_h < int(img_h * 0.06) or (sys_w / max(1, sys_h)) >= 6.5:
                     accepted_staves.append({
                         "class": "staff",
                         "confidence": sys_det["confidence"],
@@ -237,21 +239,17 @@ class LayoutDetector:
             bw = x2 - x1
             bh = y2 - y1
 
-            # Staff spacing S estimate (distance between 2 adjacent staff lines)
-            if cls_name == "grand_staff":
-                s_est = max(8, min(18, bh // 10))
-            else:
-                s_est = max(8, min(18, bh // 4))
+            # Estimate staff space S for this specific candidate (fully scale-adaptive)
+            cand_crop = img_bgr[y1:y2, x1:x2]
+            s_est, _ = estimate_staff_spacing(cand_crop, cls_name)
 
-            # Horizontal expansion:
-            # Grand staff needs room for accolade/brace on the left (at least 38 px)
-            # Single staff needs room for clef and key signature (at least 32 px)
+            # Horizontal expansion proportional to staff space
             if cls_name == "grand_staff":
-                pad_l = max(38, int(bw * 0.05) + 20)
-                pad_r = max(25, int(bw * 0.03) + 15)
+                pad_l = max(int(s_est * 4.5), int(bw * 0.04))
+                pad_r = max(int(s_est * 2.5), int(bw * 0.02))
             else:
-                pad_l = max(32, int(bw * 0.04) + 15)
-                pad_r = max(25, int(bw * 0.03) + 15)
+                pad_l = max(int(s_est * 3.5), int(bw * 0.03))
+                pad_r = max(int(s_est * 2.5), int(bw * 0.02))
 
             px1 = max(0, x1 - pad_l)
             px2 = min(img_w, x2 + pad_r)
@@ -263,16 +261,17 @@ class LayoutDetector:
 
             inside_ink = np.sum(gray[y1:y2, px1:px2] < ink_thresh, axis=1)
             median_inside_ink = float(np.median(inside_ink)) if len(inside_ink) > 0 else 100.0
-            noise_thresh = max(3, int(median_inside_ink * 0.03))
+            noise_thresh = max(2, int(median_inside_ink * 0.02))
 
             # Upward expansion limit: don't cross midpoint to previous candidate
             prev_y2 = selected_candidates[idx_cand - 1]["box"][3] if idx_cand > 0 else None
             max_up = int(s_est * 5.0)
             if prev_y2 is not None and prev_y2 < y1:
-                avail_up = max(8, (y1 - prev_y2) // 2)
+                avail_up = max(int(s_est * 0.6), (y1 - prev_y2) // 2)
                 max_up = min(max_up, avail_up)
             max_up = min(max_up, y1)
 
+            zero_run_thresh = max(3, int(s_est * 0.75))
             zero_run_up = 0
             best_up = 0
             for dy in range(1, max_up + 1):
@@ -284,13 +283,13 @@ class LayoutDetector:
                     zero_run_up = 0
                 else:
                     zero_run_up += 1
-                    if zero_run_up >= 8:
+                    if zero_run_up >= zero_run_thresh:
                         break
 
             # Place top margin safely in whitespace
-            pad_t = max(int(s_est * 1.5), best_up + min(int(s_est * 1.0), 10))
+            pad_t = max(int(s_est * 1.8), best_up + int(s_est * 0.8))
             if prev_y2 is not None and prev_y2 < y1:
-                pad_t = min(pad_t, max(6, y1 - prev_y2 - 6))
+                pad_t = min(pad_t, max(int(s_est * 0.5), y1 - prev_y2 - int(s_est * 0.5)))
             pad_t = min(pad_t, y1)
             py1 = y1 - pad_t
 
@@ -298,7 +297,7 @@ class LayoutDetector:
             next_y1 = selected_candidates[idx_cand + 1]["box"][1] if idx_cand + 1 < num_cands else None
             max_down = int(s_est * 5.0)
             if next_y1 is not None and next_y1 > y2:
-                avail_down = max(8, (next_y1 - y2) // 2)
+                avail_down = max(int(s_est * 0.6), (next_y1 - y2) // 2)
                 max_down = min(max_down, avail_down)
             max_down = min(max_down, img_h - y2)
 
@@ -313,12 +312,12 @@ class LayoutDetector:
                     zero_run_down = 0
                 else:
                     zero_run_down += 1
-                    if zero_run_down >= 8:
+                    if zero_run_down >= zero_run_thresh:
                         break
 
-            pad_b = max(int(s_est * 1.6), best_down + min(int(s_est * 1.0), 10))
+            pad_b = max(int(s_est * 1.8), best_down + int(s_est * 0.8))
             if next_y1 is not None and next_y1 > y2:
-                pad_b = min(pad_b, max(6, next_y1 - y2 - 6))
+                pad_b = min(pad_b, max(int(s_est * 0.5), next_y1 - y2 - int(s_est * 0.5)))
             pad_b = min(pad_b, img_h - y2)
             py2 = y2 + pad_b
 

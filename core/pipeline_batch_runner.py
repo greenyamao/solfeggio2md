@@ -645,7 +645,9 @@ class PipelineBatchRunner:
                     cv2.imwrite(str(crops_dir / crop_name), crop["crop_img"])
 
                     # Normalize and dewarp staff for OMR
-                    dewarped_bgr, _, _ = normalize_staff_crop(crop["crop_img"])
+                    dewarped_bgr, _, _ = normalize_staff_crop(
+                        crop["crop_img"], notation_class=crop.get("class", "staff")
+                    )
                     deskew_name = f"{crop['stub_id']}_deskew.png"
                     cv2.imwrite(str(crops_dir / deskew_name), dewarped_bgr)
 

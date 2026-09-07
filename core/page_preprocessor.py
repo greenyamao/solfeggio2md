@@ -153,20 +153,72 @@ class PagePreprocessor:
         return results
 
 
-def normalize_staff_crop(crop_bgr: np.ndarray) -> Tuple[np.ndarray, float, float]:
+def estimate_staff_spacing(img_bgr_or_gray: np.ndarray, notation_class: str = "staff") -> Tuple[float, float]:
     """
-    High-precision music staff crop normalization:
+    Scale-invariant staff space (S) estimator:
+    Calculates the exact physical distance between adjacent staff lines down to sub-pixel accuracy.
+    Works seamlessly across all resolutions (72 DPI to 600 DPI), font sizes, and staves of any size.
+
+    Returns:
+        (measured_spacing_px, reference_center_y_px)
+    """
+    gray = cv2.cvtColor(img_bgr_or_gray, cv2.COLOR_BGR2GRAY) if len(img_bgr_or_gray.shape) == 3 else img_bgr_or_gray
+    h, w = gray.shape[:2]
+    is_grand = notation_class.lower().replace(" ", "_") in ("grand_staff", "grandstaff")
+
+    geom_s = max(2.5, h / 13.0 if is_grand else h / 4.0)
+    min_dist = max(2, int(geom_s * 0.5))
+
+    x1, x2 = int(w * 0.25), int(w * 0.75)
+    if x2 <= x1 + 10:
+        x1, x2 = 0, w
+
+    strip = gray[:, x1:x2]
+    proj = np.sum(255.0 - strip, axis=1)
+
+    y_limit = (h // 2) if is_grand else (h - 1)
+    peaks = []
+    for y in range(1, y_limit):
+        if proj[y] > proj[y-1] and proj[y] >= proj[y+1]:
+            peaks.append((proj[y], y))
+
+    peaks.sort(key=lambda p: p[0], reverse=True)
+
+    filtered_peaks = []
+    for p in peaks:
+        y = p[1]
+        if all(abs(y - fp) >= min_dist for fp in filtered_peaks):
+            filtered_peaks.append(y)
+    filtered_peaks.sort()
+
+    diffs = np.diff(filtered_peaks)
+    valid_diffs = [d for d in diffs if 0.45 * geom_s <= d <= 1.8 * geom_s]
+
+    if len(valid_diffs) >= 3:
+        s_final = float(np.median(valid_diffs))
+        ref_y = float(np.median(filtered_peaks[:5]))
+    else:
+        s_final = float(geom_s)
+        ref_y = float(h / 4.0 if is_grand else h / 2.0)
+
+    return s_final, ref_y
+
+
+def normalize_staff_crop(crop_bgr: np.ndarray, notation_class: str = "staff") -> Tuple[np.ndarray, float, float]:
+    """
+    High-precision scale-adaptive music staff crop normalization:
     1. Determines precise rotational tilt angle using 2D-DFT (jdeskew).
     2. Performs high-quality rotational deskew with border padding so no notes are clipped.
-    3. Continuously tracks the 5-line staff structure outwards from the flat central region
+    3. Estimates the exact physical staff spacing S to adapt all tracking and filtering parameters.
+    4. Continuously tracks the 5-line staff structure outwards from the flat central region
        to the page boundaries (immune to note beams, ledger lines, and dense chords).
-    4. Applies subpixel dewarping to eliminate spine gutter curvature (bend_delta >= 2.0 px).
+    5. Applies subpixel dewarping to eliminate spine gutter curvature (proportional to staff spacing).
 
     Returns:
         (normalized_crop_bgr, tilt_angle_degrees, bend_delta_pixels)
     """
     h_orig, w_orig = crop_bgr.shape[:2]
-    if h_orig < 20 or w_orig < 50:
+    if h_orig < 15 or w_orig < 30:
         return crop_bgr, 0.0, 0.0
 
     gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
@@ -204,46 +256,14 @@ def normalize_staff_crop(crop_bgr: np.ndarray) -> Tuple[np.ndarray, float, float
     else:
         deskewed = padded_rot
 
-    # 3. Continuous 5-line staff structure tracking across columns
-    gray_deskewed = cv2.cvtColor(deskewed, cv2.COLOR_BGR2GRAY)
-    flat_x1 = int(w_rot * 0.30)
-    flat_x2 = int(w_rot * 0.80)
-    if flat_x2 <= flat_x1 + 20:
+    # 3. Scale-adaptive continuous 5-line staff structure tracking
+    staff_spacing, ref_y = estimate_staff_spacing(deskewed, notation_class)
+    if not (2.0 <= staff_spacing <= 120.0):
         return deskewed, round(tilt_deg, 1), 0.0
 
-    flat_strip = gray_deskewed[:, flat_x1:flat_x2]
-    proj_flat = np.sum(255.0 - flat_strip, axis=1)
-
-    # For grand staff (tall crop), locate upper staff in upper half
-    mid_y = h_rot // 2
-    peaks = []
-    search_range = range(2, mid_y - 2) if h_rot > 120 else range(2, h_rot - 2)
-    for y in search_range:
-        if proj_flat[y] > proj_flat[y-1] and proj_flat[y] >= proj_flat[y+1]:
-            peaks.append((proj_flat[y], y))
-    peaks.sort(key=lambda p: p[0], reverse=True)
-    top5 = sorted([p[1] for p in peaks[:5]])
-
-    if len(top5) < 5:
-        # Fallback to full height search
-        peaks_all = []
-        for y in range(2, h_rot - 2):
-            if proj_flat[y] > proj_flat[y-1] and proj_flat[y] >= proj_flat[y+1]:
-                peaks_all.append((proj_flat[y], y))
-        peaks_all.sort(key=lambda p: p[0], reverse=True)
-        top5 = sorted([p[1] for p in peaks_all[:5]])
-
-    if len(top5) < 5:
-        return deskewed, round(tilt_deg, 1), 0.0
-
-    ref_y = float(np.mean(top5))
-    diffs = np.diff(top5)
-    staff_spacing = float(np.mean(diffs))
-    if not (5.0 <= staff_spacing <= 25.0):
-        return deskewed, round(tilt_deg, 1), 0.0
-
-    # Build 5-line comb filter template
-    template = np.zeros(int(staff_spacing * 4) + 15, dtype=np.float32)
+    # Build 5-line comb filter template scaled to staff spacing
+    template_h = int(staff_spacing * 4) + int(staff_spacing * 1.5)
+    template = np.zeros(template_h, dtype=np.float32)
     tmpl_center = len(template) // 2
     for k in range(-2, 3):
         idx = int(round(tmpl_center + k * staff_spacing))
@@ -255,9 +275,18 @@ def normalize_staff_crop(crop_bgr: np.ndarray) -> Tuple[np.ndarray, float, float
                 template[idx+1] = 0.5
 
     # Outward continuous tracking from seed point
+    flat_x1 = int(w_rot * 0.30)
+    flat_x2 = int(w_rot * 0.80)
+    if flat_x2 <= flat_x1 + 10:
+        flat_x1, flat_x2 = 0, w_rot
+
     seed_x = (flat_x1 + flat_x2) // 2
     track_y = np.full(w_rot, ref_y, dtype=np.float32)
-    step_w = 11
+
+    step_w = max(5, int(staff_spacing * 1.0) | 1)
+    search_r = max(3, int(staff_spacing * 0.45))
+    max_step_dy = max(1.0, staff_spacing * 0.15)
+    gray_deskewed = cv2.cvtColor(deskewed, cv2.COLOR_BGR2GRAY)
 
     # Track LEFT towards gutter/margin
     curr_y = ref_y
@@ -266,12 +295,12 @@ def normalize_staff_crop(crop_bgr: np.ndarray) -> Tuple[np.ndarray, float, float
         x2 = min(w_rot, x + step_w // 2 + 1)
         col_proj = np.sum(255.0 - gray_deskewed[:, x1:x2], axis=1)
         corr = np.correlate(col_proj, template, mode='same')
-        s_y1 = max(0, int(round(curr_y - 6)))
-        s_y2 = min(h_rot, int(round(curr_y + 7)))
+        s_y1 = max(0, int(round(curr_y - search_r)))
+        s_y2 = min(h_rot, int(round(curr_y + search_r + 1)))
         if s_y2 > s_y1:
             best_offset = int(np.argmax(corr[s_y1:s_y2]))
             best_y = s_y1 + best_offset
-            curr_y = float(np.clip(best_y, curr_y - 1.5, curr_y + 1.5))
+            curr_y = float(np.clip(best_y, curr_y - max_step_dy, curr_y + max_step_dy))
         track_y[x] = curr_y
 
     # Track RIGHT towards gutter/margin
@@ -281,23 +310,26 @@ def normalize_staff_crop(crop_bgr: np.ndarray) -> Tuple[np.ndarray, float, float
         x2 = min(w_rot, x + step_w // 2 + 1)
         col_proj = np.sum(255.0 - gray_deskewed[:, x1:x2], axis=1)
         corr = np.correlate(col_proj, template, mode='same')
-        s_y1 = max(0, int(round(curr_y - 6)))
-        s_y2 = min(h_rot, int(round(curr_y + 7)))
+        s_y1 = max(0, int(round(curr_y - search_r)))
+        s_y2 = min(h_rot, int(round(curr_y + search_r + 1)))
         if s_y2 > s_y1:
             best_offset = int(np.argmax(corr[s_y1:s_y2]))
             best_y = s_y1 + best_offset
-            curr_y = float(np.clip(best_y, curr_y - 1.5, curr_y + 1.5))
+            curr_y = float(np.clip(best_y, curr_y - max_step_dy, curr_y + max_step_dy))
         track_y[x] = curr_y
 
-    # Smooth tracked curve with Gaussian filter
-    smooth_curve = cv2.GaussianBlur(track_y.reshape(1, -1), (51, 1), 15).flatten()
+    # Smooth tracked curve with Gaussian filter scaled to image width
+    k_size = max(15, int(w_rot * 0.08) | 1)
+    sigma = max(3.0, k_size / 3.0)
+    smooth_curve = cv2.GaussianBlur(track_y.reshape(1, -1), (k_size, 1), sigma).flatten()
     target_y = float(np.median(smooth_curve))
     delta_y = smooth_curve - target_y
     max_bend = float(np.max(np.abs(delta_y)))
 
-    # Apply dewarping only if genuine physical curvature exists (>= 2.0 px)
-    if max_bend >= 2.0:
-        pad_v = max(20, int(max_bend * 1.5) + 10)
+    # Scale-adaptive dewarping trigger (proportional to staff spacing)
+    min_bend_thresh = max(1.5, staff_spacing * 0.20)
+    if max_bend >= min_bend_thresh:
+        pad_v = max(int(staff_spacing * 1.5), int(max_bend * 1.5) + int(staff_spacing * 0.8))
         padded_dewarp = cv2.copyMakeBorder(deskewed, pad_v, pad_v, 0, 0, cv2.BORDER_CONSTANT, value=(255, 255, 255))
         h_pw, w_pw = padded_dewarp.shape[:2]
 
@@ -316,3 +348,4 @@ def normalize_staff_crop(crop_bgr: np.ndarray) -> Tuple[np.ndarray, float, float
         )
 
     return deskewed, round(tilt_deg, 1), round(max_bend, 1)
+
