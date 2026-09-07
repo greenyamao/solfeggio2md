@@ -268,6 +268,7 @@ def main():
     p_crop = subparsers.add_parser("crop", help="Inspect normalization of a specific staff crop")
     p_crop.add_argument("--page", type=int, required=True, help="Book page number")
     p_crop.add_argument("--staff", type=int, default=1, help="1-based staff block index on page (default: 1)")
+    p_crop.add_argument("--sr", action="store_true", help="Apply Real-CUGAN 2x super-resolution and stroke restoration")
     p_crop.add_argument("--render", action="store_true", help="Save before/after comparison to scratch/")
     p_crop.add_argument("--book", type=str, help="Optional PDF path")
 
@@ -335,6 +336,13 @@ def main():
 
         t0 = time.perf_counter()
         norm_crop, tilt, bend = normalize_staff_crop(crop, notation_class=b["cls"])
+        sr_applied = False
+        if getattr(args, "sr", False):
+            from core.score_enhancer import ScoreEnhancer
+            enhancer = ScoreEnhancer(device=device, enable_cugan=True)
+            norm_crop = enhancer.enhance_crop(norm_crop, run_sr=True)
+            enhancer.purge_gpu_memory()
+            sr_applied = True
         dt_ms = (time.perf_counter() - t0) * 1000
 
         render_msg = ""
@@ -352,6 +360,8 @@ def main():
             render_msg = f" | Img: {out_p}"
 
         action = "straightened" if bend >= 1.0 else "clean (unchanged)"
+        if sr_applied:
+            action += " + Real-CUGAN 2x SR"
         print(f"P{args.page:04d} #{args.staff} {b['cls']} [{crop.shape[1]}x{crop.shape[0]}px]: "
               f"tilt={tilt:+.1f}° bend={bend:.1f}px -> {action} in {dt_ms:.1f}ms{render_msg}")
 

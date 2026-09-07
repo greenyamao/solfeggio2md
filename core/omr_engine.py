@@ -22,6 +22,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from core.abc_bridge import ABCBridge
+from core.score_enhancer import ScoreEnhancer
 
 
 class OMREngine:
@@ -29,17 +30,22 @@ class OMREngine:
         self,
         device: str = "cpu",
         transcoda_repo: str = "btrkeks/transcoda-59M-zeroshot-v1",
-        smt_repo: str = "antoniorv6/smt-grandstaff"
+        smt_repo: str = "antoniorv6/smt-grandstaff",
+        enable_score_enhancer: bool = True,
+        enable_cugan: bool = True,
     ):
         self.device = device
         self.transcoda_repo = transcoda_repo
         self.smt_repo = smt_repo
+        self.enable_score_enhancer = enable_score_enhancer
+        self.enable_cugan = enable_cugan
         
         self.transcoda_model = None
         self.transcoda_tokenizer = None
         self.smt_model = None
         
         self.bridge = ABCBridge()
+        self.enhancer = ScoreEnhancer(device=self.device, enable_cugan=self.enable_cugan)
 
     def _ensure_transcoda_loaded(self):
         if self.transcoda_model is None:
@@ -142,11 +148,21 @@ class OMREngine:
 
         try:
             self._ensure_transcoda_loaded()
-            pixel_values, image_sizes = self._collate_crops_batch(crops_bgr)
 
-            # Adaptive token limit bounded by widest crop in the batch
+            # Record original widths for music density token bounding
             widest_crop_px = max(c.shape[1] for c in crops_bgr) if crops_bgr else 1000
             effective_max_tokens = min(max_tokens, max(96, int(widest_crop_px * 0.45)))
+
+            # Neural stroke restoration & GPU background division
+            if self.enable_score_enhancer and self.enhancer is not None:
+                processed_crops = [
+                    self.enhancer.enhance_crop(c, run_sr=self.enable_cugan)
+                    for c in crops_bgr
+                ]
+            else:
+                processed_crops = crops_bgr
+
+            pixel_values, image_sizes = self._collate_crops_batch(processed_crops)
 
             with torch.inference_mode():
                 eos_ids = getattr(self, "transcoda_eos_token_ids", [2, 212, 236, 155, 156])
@@ -314,6 +330,8 @@ class OMREngine:
         if self.smt_model is not None:
             del self.smt_model
             self.smt_model = None
+        if getattr(self, "enhancer", None) is not None:
+            self.enhancer.purge_gpu_memory()
             
         gc.collect()
         if torch.cuda.is_available():

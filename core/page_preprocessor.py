@@ -204,12 +204,17 @@ def estimate_staff_spacing(img_bgr_or_gray: np.ndarray, notation_class: str = "s
     return s_final, ref_y
 
 
-def normalize_staff_crop(crop_bgr: np.ndarray, notation_class: str = "staff") -> Tuple[np.ndarray, float, float]:
+def normalize_staff_crop(
+    crop_bgr: np.ndarray,
+    notation_class: str = "staff",
+    enhance_background: bool = False
+) -> Tuple[np.ndarray, float, float]:
     """
     High-precision, non-destructive music staff crop normalization:
     1. Determines precise rotational tilt angle using 2D-DFT (jdeskew).
     2. Performs high-quality rotational deskew with border padding so no notes or ledger lines are clipped.
     3. Preserves authentic staff geometry without artificial undulating warping (spaghetti distortion).
+    4. Optional GPU background division to flatten illumination and eliminate verso bleed-through.
 
     Returns:
         (normalized_crop_bgr, tilt_angle_degrees, bend_delta_pixels)
@@ -298,6 +303,14 @@ def normalize_staff_crop(crop_bgr: np.ndarray, notation_class: str = "staff") ->
                         borderMode=cv2.BORDER_CONSTANT,
                         borderValue=(255, 255, 255)
                     )
+        except Exception:
+            pass
+
+    # 4. Optional GPU background division
+    if enhance_background:
+        try:
+            from core.score_enhancer import ScoreEnhancer
+            deskewed = ScoreEnhancer.gpu_background_division(deskewed, kernel_size=31)
         except Exception:
             pass
 

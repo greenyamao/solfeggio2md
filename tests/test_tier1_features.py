@@ -205,6 +205,27 @@ class TestTier1FeatureCoverage(unittest.TestCase):
         self.assertIsNone(engine.transcoda_tokenizer)
         self.assertIsNone(engine.smt_model)
 
+    def test_f2_06_score_enhancer_background_division_contract(self):
+        """F2: Verify ScoreEnhancer.gpu_background_division flattens uneven paper lighting and returns identical shape uint8."""
+        from core.score_enhancer import ScoreEnhancer
+        crop = np.full((60, 200, 3), 180, dtype=np.uint8)
+        for c in range(200):
+            crop[:, c] = np.clip(160 + int(c * 0.3), 0, 255)
+        crop[30, :] = 30
+
+        enhanced = ScoreEnhancer.gpu_background_division(crop, kernel_size=31, device="cpu")
+        self.assertEqual(enhanced.shape, crop.shape)
+        self.assertEqual(enhanced.dtype, np.uint8)
+        self.assertGreater(float(np.mean(enhanced[10:20, :])), float(np.mean(crop[10:20, :])))
+
+    def test_f2_07_score_enhancer_purge_gpu_memory(self):
+        """F2: Verify ScoreEnhancer purge_gpu_memory safely unloads weights and resets handles."""
+        from core.score_enhancer import ScoreEnhancer
+        enhancer = ScoreEnhancer(device="cpu", enable_cugan=False)
+        enhancer.cugan_model = "mock_cugan"
+        enhancer.purge_gpu_memory()
+        self.assertIsNone(enhancer.cugan_model)
+
     # =========================================================================
     # F3: OMR Dynamic Collation & Mini-Batching (>=5 tests)
     # =========================================================================

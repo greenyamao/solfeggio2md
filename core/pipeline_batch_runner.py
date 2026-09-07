@@ -52,6 +52,8 @@ DEFAULT_CONFIG = {
     "smt_model": "antoniorv6/smt-grandstaff",
     "overwrite": False,
     "smt_device": "cuda" if torch.cuda.is_available() else "cpu",
+    "enable_score_enhancer": True,
+    "enable_cugan_sr": True,
     "skip_vlm": True,
     "skip_front_matter": True,
     "skip_back_matter": True,
@@ -760,7 +762,11 @@ class PipelineBatchRunner:
             from core.omr_engine import OMREngine
 
             device = "cuda" if torch.cuda.is_available() else "cpu"
-            self.omr_engine = OMREngine(device=device)
+            self.omr_engine = OMREngine(
+                device=device,
+                enable_score_enhancer=self.config.get("enable_score_enhancer", True),
+                enable_cugan=self.config.get("enable_cugan_sr", True)
+            )
 
         pending_crops = []
         for crop_file in crop_files:
