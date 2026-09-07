@@ -286,7 +286,7 @@ def normalize_staff_crop(crop_bgr: np.ndarray, notation_class: str = "staff") ->
                 line_ys = np.where(init_profile > 0.15)[0]
                 diffs = [line_ys[i] - line_ys[i - 1] for i in range(1, len(line_ys)) if line_ys[i] - line_ys[i - 1] > 3]
                 s_spacing = float(np.median(diffs)) if len(diffs) else 8.0
-                max_phys_shift = max(2.5, min(4.5, s_spacing * 0.45))
+                max_phys_shift = max(3.5, min(14.0, s_spacing * 1.5))
 
                 shifts = np.zeros(w_d, dtype=np.float32)
                 prev_d = 0.0

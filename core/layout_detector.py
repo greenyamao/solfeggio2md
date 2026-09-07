@@ -319,6 +319,47 @@ class LayoutDetector:
         return merged
 
     @classmethod
+    def has_continuous_vertical_connector(cls, gray: np.ndarray, s1: Dict[str, Any], s2: Dict[str, Any], staff_s: float) -> bool:
+        """
+        Determines if two adjacent staves are physically joined on the left
+        by a continuous vertical bracket, curly brace, or primary system barline.
+        Scale-invariant and immune to isolated exercise numbers, clefs, or margin text.
+        """
+        v_gap = s2["y_top"] - s1["y_bot"]
+        if v_gap <= 0:
+            return True
+
+        min_x = min(s1["x_left"], s2["x_left"])
+        max_x = max(s1["x_left"], s2["x_left"])
+        x_start = max(0, int(min_x - staff_s * 2.5))
+        x_end = min(gray.shape[1], int(max_x + staff_s * 1.5))
+        if x_end <= x_start:
+            return False
+
+        y_start = max(0, s1["y_bot"] - int(staff_s * 0.5))
+        y_end = min(gray.shape[0], s2["y_top"] + int(staff_s * 0.5))
+
+        strip = gray[y_start:y_end, x_start:x_end]
+        if strip.size == 0:
+            return False
+
+        bg = float(np.percentile(strip, 88))
+        bin_dark = (strip < bg - 35).astype(np.uint8)
+
+        k_h = max(5, int(staff_s * 1.0))
+        vert_k = cv2.getStructuringElement(cv2.MORPH_RECT, (1, k_h))
+        vert_lines = cv2.morphologyEx(bin_dark, cv2.MORPH_OPEN, vert_k)
+
+        inner_y_start = s1["y_bot"] - y_start
+        inner_y_end = s2["y_top"] - y_start
+        if inner_y_end <= inner_y_start:
+            return True
+
+        inner_lines = vert_lines[inner_y_start:inner_y_end, :]
+        row_coverage = float(np.mean(np.sum(inner_lines > 0, axis=1) > 0))
+        return row_coverage >= 0.65
+
+    @classmethod
     def extract_physical_5line_staves(cls, gray: np.ndarray) -> Tuple[List[Dict[str, Any]], float]:
         """
         DPI-invariant, font-invariant physical 5-line music staff extractor.
@@ -329,6 +370,7 @@ class LayoutDetector:
         bg_val = float(np.percentile(gray, 92))
         bin_inv = (gray < bg_val - 35).astype(np.uint8) * 255
 
+        # Coarse pass: determine staff line vertical centers and spacing S across page
         k_len = max(35, int(img_w * 0.12))
         k = cv2.getStructuringElement(cv2.MORPH_RECT, (k_len, 1))
         lines = cv2.morphologyEx(bin_inv, cv2.MORPH_OPEN, k)
@@ -361,6 +403,11 @@ class LayoutDetector:
             return [], 10.0
         staff_s = float(np.median(plausible))
 
+        # Fine pass: use localized kernel to trace curved/bent staff ends near gutter and margins
+        k_len_fine = max(20, min(35, int(staff_s * 2.5)))
+        k_fine = cv2.getStructuringElement(cv2.MORPH_RECT, (k_len_fine, 1))
+        lines_fine = cv2.morphologyEx(bin_inv, cv2.MORPH_OPEN, k_fine)
+
         staves = []
         i = 0
         while i <= len(line_centers) - 5:
@@ -369,9 +416,11 @@ class LayoutDetector:
             if all(abs(d - staff_s) <= max(2.5, staff_s * 0.40) for d in g_diffs):
                 yt = int(grp[0])
                 yb = int(grp[-1])
-                strip = lines[max(0, yt-2):min(img_h, yb+3), :]
+                strip = lines_fine[max(0, yt - 2):min(img_h, yb + 3), :]
                 col_s = np.sum(strip > 0, axis=0)
-                act_cols = np.where(col_s > 0)[0]
+                act_cols = np.where(col_s >= 2)[0]
+                if len(act_cols) == 0:
+                    act_cols = np.where(col_s > 0)[0]
                 if len(act_cols) > 0:
                     xl = int(act_cols[0])
                     xr = int(act_cols[-1])
@@ -415,25 +464,24 @@ class LayoutDetector:
                 prev_s = cur[-1]
                 cand_s = phys_staves[next_idx]
 
-                x_left = max(prev_s["x_left"], cand_s["x_left"])
-                x_right = min(prev_s["x_right"], cand_s["x_right"])
-                w_prev = prev_s["x_right"] - prev_s["x_left"]
-                w_cand = cand_s["x_right"] - cand_s["x_left"]
-                h_overlap = (x_right - x_left) / float(min(w_prev, w_cand)) if x_right > x_left else 0.0
+                inter = max(0, min(prev_s["x_right"], cand_s["x_right"]) - max(prev_s["x_left"], cand_s["x_left"]))
+                union = max(prev_s["x_right"], cand_s["x_right"]) - min(prev_s["x_left"], cand_s["x_left"])
+                h_iou = inter / float(max(1, union))
                 v_gap = cand_s["y_top"] - prev_s["y_bot"]
 
-                # Check if staves are connected by a vertical brace / bracket / barline on the left
-                left_x = min(prev_s["x_left"], cand_s["x_left"])
-                brace_strip = gray[prev_s["y_bot"]:cand_s["y_top"], max(0, left_x - 12):left_x + 12]
-                bg_strip = float(np.percentile(brace_strip, 90)) if brace_strip.size > 0 else 255.0
-                has_left_connector = np.sum(brace_strip < bg_strip - 40) > int(v_gap * 0.35)
+                has_connector = self.has_continuous_vertical_connector(gray, prev_s, cand_s, staff_s)
 
-                is_same_system = (
-                    h_overlap >= 0.65 and 0 <= v_gap <= int(staff_s * 14.0) and
-                    (v_gap <= int(staff_s * 7.5) or has_left_connector)
-                )
+                can_merge = False
+                if len(cur) == 1:
+                    if (h_iou >= 0.55 or has_connector) and 0 <= v_gap <= int(staff_s * 8.5):
+                        if has_connector or v_gap <= int(staff_s * 6.5):
+                            can_merge = True
+                elif len(cur) >= 2:
+                    # Joining 3rd+ staff strictly requires continuous left system connector
+                    if has_connector and 0 <= v_gap <= int(staff_s * 10.0) and h_iou >= 0.50:
+                        can_merge = True
 
-                if is_same_system:
+                if can_merge:
                     cur.append(cand_s)
                     skip_idx.add(next_idx)
                     next_idx += 1
