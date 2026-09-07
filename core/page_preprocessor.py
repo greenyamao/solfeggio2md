@@ -202,13 +202,10 @@ def estimate_staff_spacing(img_bgr_or_gray: np.ndarray, notation_class: str = "s
 
 def normalize_staff_crop(crop_bgr: np.ndarray, notation_class: str = "staff") -> Tuple[np.ndarray, float, float]:
     """
-    High-precision scale-adaptive music staff crop normalization:
+    High-precision, non-destructive music staff crop normalization:
     1. Determines precise rotational tilt angle using 2D-DFT (jdeskew).
-    2. Performs high-quality rotational deskew with border padding so no notes are clipped.
-    3. Estimates the exact physical staff spacing S to adapt all tracking and filtering parameters.
-    4. Continuously tracks the 5-line staff structure outwards from the flat central region
-       to the page boundaries (immune to note beams, ledger lines, and dense chords).
-    5. Applies subpixel dewarping to eliminate spine gutter curvature (proportional to staff spacing).
+    2. Performs high-quality rotational deskew with border padding so no notes or ledger lines are clipped.
+    3. Preserves authentic staff geometry without artificial undulating warping (spaghetti distortion).
 
     Returns:
         (normalized_crop_bgr, tilt_angle_degrees, bend_delta_pixels)
@@ -223,14 +220,14 @@ def normalize_staff_crop(crop_bgr: np.ndarray, notation_class: str = "staff") ->
     try:
         from jdeskew.estimator import get_angle
         raw_angle = float(get_angle(gray))
-        if abs(raw_angle) > 40.0:
+        if abs(raw_angle) > 35.0:
             tilt_deg = 0.0
         else:
             tilt_deg = raw_angle
     except Exception:
         tilt_deg = 0.0
 
-    # 2. Rotate to exact horizontal orientation with margin padding
+    # 2. Rotate to exact horizontal orientation with margin padding to prevent clipping
     angle_rad = abs(np.radians(tilt_deg))
     pad_rot = int(np.ceil(w_orig * np.sin(angle_rad) / 2.0)) + 4 if abs(tilt_deg) >= 0.1 else 0
 
@@ -252,96 +249,6 @@ def normalize_staff_crop(crop_bgr: np.ndarray, notation_class: str = "staff") ->
     else:
         deskewed = padded_rot
 
-    # 3. Scale-adaptive continuous 5-line staff structure tracking
-    staff_spacing, ref_y = estimate_staff_spacing(deskewed, notation_class)
-    if not (2.0 <= staff_spacing <= 120.0):
-        return deskewed, round(tilt_deg, 1), 0.0
+    return deskewed, round(tilt_deg, 1), 0.0
 
-    # Build 5-line comb filter template scaled to staff spacing
-    template_h = int(staff_spacing * 4) + int(staff_spacing * 1.5)
-    template = np.zeros(template_h, dtype=np.float32)
-    tmpl_center = len(template) // 2
-    for k in range(-2, 3):
-        idx = int(round(tmpl_center + k * staff_spacing))
-        if 0 <= idx < len(template):
-            template[idx] = 1.0
-            if idx > 0:
-                template[idx-1] = 0.5
-            if idx + 1 < len(template):
-                template[idx+1] = 0.5
-
-    # Outward continuous tracking from seed point
-    flat_x1 = int(w_rot * 0.30)
-    flat_x2 = int(w_rot * 0.80)
-    if flat_x2 <= flat_x1 + 10:
-        flat_x1, flat_x2 = 0, w_rot
-
-    seed_x = (flat_x1 + flat_x2) // 2
-    track_y = np.full(w_rot, ref_y, dtype=np.float32)
-
-    step_w = max(5, int(staff_spacing * 1.0) | 1)
-    search_r = max(3, int(staff_spacing * 0.45))
-    max_step_dy = max(1.0, staff_spacing * 0.15)
-    gray_deskewed = cv2.cvtColor(deskewed, cv2.COLOR_BGR2GRAY)
-
-    # Track LEFT towards gutter/margin
-    curr_y = ref_y
-    for x in range(seed_x, -1, -1):
-        x1 = max(0, x - step_w // 2)
-        x2 = min(w_rot, x + step_w // 2 + 1)
-        col_proj = np.sum(255.0 - gray_deskewed[:, x1:x2], axis=1)
-        corr = np.correlate(col_proj, template, mode='same')
-        s_y1 = max(0, int(round(curr_y - search_r)))
-        s_y2 = min(h_rot, int(round(curr_y + search_r + 1)))
-        if s_y2 > s_y1:
-            best_offset = int(np.argmax(corr[s_y1:s_y2]))
-            best_y = s_y1 + best_offset
-            curr_y = float(np.clip(best_y, curr_y - max_step_dy, curr_y + max_step_dy))
-        track_y[x] = curr_y
-
-    # Track RIGHT towards gutter/margin
-    curr_y = ref_y
-    for x in range(seed_x, w_rot):
-        x1 = max(0, x - step_w // 2)
-        x2 = min(w_rot, x + step_w // 2 + 1)
-        col_proj = np.sum(255.0 - gray_deskewed[:, x1:x2], axis=1)
-        corr = np.correlate(col_proj, template, mode='same')
-        s_y1 = max(0, int(round(curr_y - search_r)))
-        s_y2 = min(h_rot, int(round(curr_y + search_r + 1)))
-        if s_y2 > s_y1:
-            best_offset = int(np.argmax(corr[s_y1:s_y2]))
-            best_y = s_y1 + best_offset
-            curr_y = float(np.clip(best_y, curr_y - max_step_dy, curr_y + max_step_dy))
-        track_y[x] = curr_y
-
-    # Smooth tracked curve with Gaussian filter scaled to image width
-    k_size = max(15, int(w_rot * 0.08) | 1)
-    sigma = max(3.0, k_size / 3.0)
-    smooth_curve = cv2.GaussianBlur(track_y.reshape(1, -1), (k_size, 1), sigma).flatten()
-    target_y = float(np.median(smooth_curve))
-    delta_y = smooth_curve - target_y
-    max_bend = float(np.max(np.abs(delta_y)))
-
-    # Scale-adaptive dewarping trigger (proportional to staff spacing)
-    min_bend_thresh = max(1.5, staff_spacing * 0.20)
-    if max_bend >= min_bend_thresh:
-        pad_v = max(int(staff_spacing * 1.5), int(max_bend * 1.5) + int(staff_spacing * 0.8))
-        padded_dewarp = cv2.copyMakeBorder(deskewed, pad_v, pad_v, 0, 0, cv2.BORDER_CONSTANT, value=(255, 255, 255))
-        h_pw, w_pw = padded_dewarp.shape[:2]
-
-        map_x = np.tile(np.arange(w_pw, dtype=np.float32), (h_pw, 1))
-        map_y = np.empty((h_pw, w_pw), dtype=np.float32)
-        for y in range(h_pw):
-            map_y[y, :] = np.float32(y + delta_y)
-
-        deskewed = cv2.remap(
-            padded_dewarp,
-            map_x,
-            map_y,
-            interpolation=cv2.INTER_CUBIC,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=(255, 255, 255)
-        )
-
-    return deskewed, round(tilt_deg, 1), round(max_bend, 1)
 
