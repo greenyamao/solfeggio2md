@@ -24,7 +24,7 @@
     selectedCropIndex: 0,
     activeCodeTab: 'abc',
     isRawMarkdownView: false,
-    showYoloDebugMode1: false
+    showYoloDebugMode1: true
   };
 
   // DOM Elements Cache
@@ -88,6 +88,7 @@
     stavesSubbar2: document.getElementById('staves-subbar-2'),
     normRawImg: document.getElementById('norm-raw-img'),
     normDeskewImg: document.getElementById('norm-deskew-img'),
+    normDeskewTitle: document.getElementById('norm-deskew-title'),
     normAngleBadge: document.getElementById('norm-angle-badge'),
     normRawDim: document.getElementById('norm-raw-dim'),
     toggleGuidelines: document.getElementById('toggle-guidelines'),
@@ -551,12 +552,12 @@
       DOM.scanDebugImg.src = d.debug_url || d.original_url || '';
       if (DOM.mode1LeftTitle) DOM.mode1LeftTitle.textContent = `Разметка YOLO OLA v2.0 (${d.title})`;
       if (DOM.btnToggleScanMode) {
-        DOM.btnToggleScanMode.textContent = 'Исходный лист';
+        DOM.btnToggleScanMode.textContent = 'Исходный скан';
         DOM.btnToggleScanMode.style.borderColor = 'var(--accent-primary)';
       }
     } else {
       DOM.scanDebugImg.src = d.original_url || d.debug_url || '';
-      if (DOM.mode1LeftTitle) DOM.mode1LeftTitle.textContent = 'Исходный скан листа PDF';
+      if (DOM.mode1LeftTitle) DOM.mode1LeftTitle.textContent = `Исходный скан (${d.title})`;
       if (DOM.btnToggleScanMode) {
         DOM.btnToggleScanMode.textContent = 'Разметка YOLO';
         DOM.btnToggleScanMode.style.borderColor = 'rgba(255,255,255,0.12)';
@@ -608,11 +609,12 @@
     DOM.normDeskewImg.src = activeCrop.deskew_url;
     const bendInfo = activeCrop.bend_delta ? ` • Прогиб: ${activeCrop.bend_delta} px` : '';
     DOM.normAngleBadge.textContent = `Поворот: ${activeCrop.skew_angle > 0 ? '+' : ''}${activeCrop.skew_angle}°${bendInfo}`;
+    if (DOM.normDeskewTitle) DOM.normDeskewTitle.textContent = 'Выровненный стан (1D Profile + 2D-DFT)';
     DOM.normRawDim.textContent = `${activeCrop.width} × ${activeCrop.height} px`;
     DOM.normStaffId.textContent = `#${activeCrop.index} (${activeCrop.id})`;
     DOM.normStaffClass.textContent = activeCrop.class;
     DOM.normStaffRes.textContent = `${activeCrop.width} × ${activeCrop.height} px`;
-    if (activeCrop.bend_delta > 2.5) {
+    if (activeCrop.bend_delta >= 0.5) {
       DOM.normStaffStatus.textContent = `Устранён прогиб (${activeCrop.bend_delta} px) + доворот (${activeCrop.skew_angle}°)`;
     } else if (Math.abs(activeCrop.skew_angle) >= 0.25) {
       DOM.normStaffStatus.textContent = `Устранён поворот (${activeCrop.skew_angle}°)`;

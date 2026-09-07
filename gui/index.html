@@ -232,11 +232,11 @@
             <div class="split-column">
               <div class="panel-header">
                 <div class="panel-title-group">
-                  <span id="mode1-left-title" class="panel-title">Исходный скан листа PDF</span>
+                  <span id="mode1-left-title" class="panel-title">Разметка YOLO OLA v2.0</span>
                   <span id="badge-spread-info" class="badge badge-grand" style="display: none;">Разворот</span>
                   <span id="badge-staves-count" class="badge badge-staff">0 станов</span>
                 </div>
-                <button id="btn-toggle-scan-mode" class="btn-xs" style="cursor: pointer; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); color: var(--text-secondary); border-radius: 4px; padding: 2px 8px; font-size: 11px; transition: all 0.2s;" title="Переключить между исходным листом PDF и разметкой YOLO">Разметка YOLO</button>
+                <button id="btn-toggle-scan-mode" class="btn-xs" style="cursor: pointer; background: rgba(255,255,255,0.06); border: 1px solid var(--accent-primary); color: var(--text-secondary); border-radius: 4px; padding: 2px 8px; font-size: 11px; transition: all 0.2s;" title="Переключить между разметкой YOLO и исходным сканом PDF">Исходный скан</button>
               </div>
               <div class="panel-canvas">
                 <img id="scan-debug-img" class="fit-image" alt="Исходный скан" src="" />
@@ -248,7 +248,7 @@
                   <span id="mode1-right-title" class="panel-title">Маскированная страница для VLM</span>
                   <span class="badge badge-mask">&lt;!-- MUSIC_STUB_ID --&gt;</span>
                 </div>
-                <span class="text-secondary" style="font-size: 11px;">Белые плашки</span>
+                <span class="panel-subtitle">Очищенные текстовые блоки</span>
               </div>
               <div class="panel-canvas">
                 <img id="scan-mask-img" class="fit-image" alt="Маскированная страница" src="" />
@@ -267,6 +267,7 @@
                   <span class="panel-title">Исходная вырезка со скана</span>
                   <span id="norm-raw-dim" class="badge badge-staff">--x-- px</span>
                 </div>
+                <span class="panel-subtitle">Оригинальный фрагмент до нормализации</span>
               </div>
               <div class="panel-canvas">
                 <img id="norm-raw-img" class="fit-image" alt="Исходная вырезка" src="" />
@@ -275,8 +276,8 @@
             <div class="split-column">
               <div class="panel-header">
                 <div class="panel-title-group">
-                  <span class="panel-title">Выровненный стан (jdeskew 2D-DFT)</span>
-                  <span id="norm-angle-badge" class="badge badge-grand">Угол: 0.00°</span>
+                  <span id="norm-deskew-title" class="panel-title">Выровненный стан (1D Profile + 2D-DFT)</span>
+                  <span id="norm-angle-badge" class="badge badge-grand">Поворот: 0°</span>
                 </div>
                 <label class="toggle-group">
                   <input type="checkbox" id="toggle-guidelines" checked>

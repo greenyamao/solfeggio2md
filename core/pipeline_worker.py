@@ -263,21 +263,21 @@ class PipelineWorker:
                 cf_bgr = cv2.imread(str(cf))
                 if cf_bgr is not None:
                     h_c, w_c = cf_bgr.shape[:2]
-                    if not deskew_file.is_file():
-                        dewarped_bgr, tilt_deg, bend_px = normalize_staff_crop(cf_bgr, notation_class=cls_name)
-                        cv2.imwrite(str(deskew_file), dewarped_bgr)
-                    else:
-                        tilt_deg, bend_px = 0.0, 0.0
+                    dewarped_bgr, tilt_deg, bend_px = normalize_staff_crop(cf_bgr, notation_class=cls_name)
+                    cv2.imwrite(str(deskew_file), dewarped_bgr)
                 else:
                     h_c, w_c, tilt_deg, bend_px = 60, 1000, 0.0, 0.0
+
+                raw_ts = int(cf.stat().st_mtime) if cf.is_file() else 0
+                deskew_ts = int(deskew_file.stat().st_mtime) if deskew_file.is_file() else 0
 
                 crops_data.append({
                     "id": f"S{idx:02d}",
                     "crop_stem": cf.stem,
                     "class": cls_name,
                     "index": idx,
-                    "raw_url": f"/output/{book_name}/1_crops/{cf.name}",
-                    "deskew_url": f"/output/{book_name}/1_crops/{cf.stem}_deskew.png",
+                    "raw_url": f"/output/{book_name}/1_crops/{cf.name}?t={raw_ts}",
+                    "deskew_url": f"/output/{book_name}/1_crops/{cf.stem}_deskew.png?t={deskew_ts}",
                     "skew_angle": round(tilt_deg, 1),
                     "bend_delta": round(bend_px, 1),
                     "width": w_c,
@@ -296,10 +296,17 @@ class PipelineWorker:
         else:
             markdown_text = f"*(Текст страницы еще не распознан. Запустите пакетную обработку в Панели управления)*\n"
 
+        if not debug_file.is_file():
+            self._generate_debug_page(book_name, p_num, debug_file)
+
         sheet_info = self._get_sheet_info_for_page(book_name, p_num)
 
         mask_rel = f"/output/{book_name}/2_masked_pages/page_{p_num:04d}_masked.png"
-        debug_rel = f"/output/{book_name}/2_masked_pages/page_{p_num:04d}_debug.png" if debug_file.is_file() else mask_rel
+        if debug_file.is_file():
+            debug_ts = int(debug_file.stat().st_mtime)
+            debug_rel = f"/output/{book_name}/2_masked_pages/page_{p_num:04d}_debug.png?t={debug_ts}"
+        else:
+            debug_rel = mask_rel
 
         return {
             "page_id": page_id,

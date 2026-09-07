@@ -258,64 +258,87 @@ def normalize_staff_crop(crop_bgr: np.ndarray, notation_class: str = "staff") ->
     else:
         deskewed = padded_rot
 
-    # 3. 1D Vertical Dewarping for curved staff tips (book binding/spine curl)
+    # 3. 1D Continuous Profile Straightening: aligns every vertical 1-px column to horizontal reference
     bend_delta = 0.0
     h_d, w_d = deskewed.shape[:2]
-    if w_d >= 180 and h_d >= 25:
+    if w_d >= 160 and h_d >= 25:
         try:
             d_gray = cv2.cvtColor(deskewed, cv2.COLOR_BGR2GRAY)
-            k_line = cv2.getStructuringElement(cv2.MORPH_RECT, (12, 1))
             bg_val = float(np.percentile(d_gray, 90))
-            bin_inv = (d_gray < bg_val - 35).astype(np.uint8) * 255
-            lines_only = cv2.morphologyEx(bin_inv, cv2.MORPH_OPEN, k_line)
+            bin_inv = (d_gray < bg_val - 35).astype(np.float32)
 
-            strip_w = 16
-            num_strips = w_d // strip_w
-            strip_centers = []
-            strip_y_cms = []
+            # Isolate horizontal staff line segments (erase note stems, text, accidentals)
+            k_len = max(15, min(40, int(w_d * 0.04)))
+            k_line = cv2.getStructuringElement(cv2.MORPH_RECT, (k_len, 1))
+            lines_mask = cv2.morphologyEx(bin_inv, cv2.MORPH_OPEN, k_line)
 
-            for s in range(num_strips):
-                x_start = s * strip_w
-                x_end = x_start + strip_w
-                strip_mask = lines_only[:, x_start:x_end]
-                y_indices, _ = np.where(strip_mask > 0)
-                if len(y_indices) >= strip_w:
-                    strip_centers.append(x_start + strip_w / 2.0)
-                    strip_y_cms.append(float(np.mean(y_indices)))
+            sums = np.sum(lines_mask, axis=0)
+            has_lines = np.where(sums >= 4.0)[0]
+            if len(has_lines) >= 20:
+                x_first = int(has_lines[0])
+                x_last = int(has_lines[-1])
 
-            if len(strip_centers) >= 6:
-                strip_centers = np.array(strip_centers, dtype=np.float32)
-                strip_y_cms = np.array(strip_y_cms, dtype=np.float32)
+                ref_x_start = min(x_first + 5, max(x_first, x_last - 45))
+                ref_x_end = min(x_last, ref_x_start + 40)
+                init_profile = np.mean(lines_mask[:, ref_x_start:ref_x_end], axis=1)
 
-                mid_mask = (strip_centers >= 0.25 * w_d) & (strip_centers <= 0.75 * w_d)
-                if np.sum(mid_mask) >= 3:
-                    y_base = float(np.median(strip_y_cms[mid_mask]))
+                shifts = np.zeros(w_d, dtype=np.float32)
+                search_range = 18
+
+                for x in range(x_first, x_last + 1):
+                    col = lines_mask[:, x]
+                    if sums[x] < 2.0:
+                        shifts[x] = shifts[x - 1] if x > x_first else 0.0
+                        continue
+
+                    corrs = [
+                        np.sum(col[d:] * init_profile[:-d]) if d > 0 else (
+                            np.sum(col[:d] * init_profile[-d:]) if d < 0 else np.sum(col * init_profile)
+                        )
+                        for d in range(-search_range, search_range + 1)
+                    ]
+                    best_idx = int(np.argmax(corrs))
+                    best_d = float(best_idx - search_range)
+                    # Sub-pixel parabolic peak refinement
+                    if 0 < best_idx < len(corrs) - 1:
+                        y0, y1, y2 = corrs[best_idx - 1], corrs[best_idx], corrs[best_idx + 1]
+                        denom = 2.0 * (2.0 * y1 - y0 - y2)
+                        if denom > 1e-4:
+                            best_d += float(y0 - y2) / denom
+                    shifts[x] = best_d
+
+                # Pad margins with edge shifts so margins don't shear
+                if x_first > 0:
+                    shifts[:x_first] = shifts[x_first]
+                if x_last < w_d - 1:
+                    shifts[x_last + 1:] = shifts[x_last]
+
+                # Smooth displacement curve: median filter (removes localized spikes) + Gaussian filter
+                k_med = min(41, len(shifts) if len(shifts) % 2 == 1 else len(shifts) - 1)
+                if k_med >= 5:
+                    padded = np.pad(shifts, k_med // 2, mode='edge')
+                    med_shifts = np.array([np.median(padded[i:i + k_med]) for i in range(w_d)], dtype=np.float32)
                 else:
-                    y_base = float(np.median(strip_y_cms))
+                    med_shifts = shifts
 
-                raw_dy = strip_y_cms - y_base
-                raw_dy = np.clip(raw_dy, -22.0, 22.0)
-
-                window_sz = min(5, len(raw_dy) if len(raw_dy) % 2 == 1 else len(raw_dy) - 1)
-                if window_sz >= 3:
-                    kernel_weights = np.ones(window_sz) / window_sz
-                    smooth_dy = np.convolve(raw_dy, kernel_weights, mode='same')
+                k_gauss = min(51, len(shifts) if len(shifts) % 2 == 1 else len(shifts) - 1)
+                if k_gauss >= 5:
+                    kernel_g = cv2.getGaussianKernel(k_gauss, 12.0).flatten()
+                    smooth_dy = np.convolve(med_shifts, kernel_g, mode='same').astype(np.float32)
                 else:
-                    smooth_dy = raw_dy
+                    smooth_dy = med_shifts
 
                 max_bend = float(np.max(np.abs(smooth_dy)))
-                if 2.5 <= max_bend <= 20.0:
+                if max_bend >= 0.5:
                     bend_delta = max_bend
-                    full_x = np.arange(w_d, dtype=np.float32)
-                    interp_dy = np.interp(full_x, strip_centers, smooth_dy)
-
-                    grid_x = np.tile(full_x, (h_d, 1))
-                    grid_y = np.tile(np.arange(h_d, dtype=np.float32)[:, None], (1, w_d)) + interp_dy[None, :]
+                    # Shift each vertical 1-pixel slice by smooth_dy(x) to lock lines strictly horizontal
+                    grid_x = np.tile(np.arange(w_d, dtype=np.float32), (h_d, 1)).astype(np.float32)
+                    grid_y = (np.tile(np.arange(h_d, dtype=np.float32)[:, None], (1, w_d)) + smooth_dy[None, :]).astype(np.float32)
 
                     deskewed = cv2.remap(
                         deskewed,
-                        grid_x.astype(np.float32),
-                        grid_y.astype(np.float32),
+                        grid_x,
+                        grid_y,
                         interpolation=cv2.INTER_CUBIC,
                         borderMode=cv2.BORDER_CONSTANT,
                         borderValue=(255, 255, 255)
