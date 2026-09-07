@@ -949,6 +949,19 @@ class PipelineBatchRunner:
                 except Exception as ex:
                     thread_errors.append(ex)
                 finally:
+                    # Immediately unload LayoutDetector (YOLO) from GPU memory to free ~2.0 GB VRAM for OMR
+                    if self.layout_detector is not None:
+                        try:
+                            if hasattr(self.layout_detector, "purge_gpu_memory"):
+                                self.layout_detector.purge_gpu_memory()
+                        except Exception:
+                            pass
+                        self.layout_detector = None
+                    if torch.cuda.is_available():
+                        try:
+                            torch.cuda.empty_cache()
+                        except Exception:
+                            pass
                     producer_done.set()
                     omr_queue.put(None)  # Sentinel to wake consumer
 
@@ -956,6 +969,7 @@ class PipelineBatchRunner:
             def _consumer_omr() -> None:
                 try:
                     batch_size = 6
+                    batch_counter = 0
                     while not self._stop_event.is_set() and not thread_errors:
                         self._check_pause()
 
@@ -969,24 +983,28 @@ class PipelineBatchRunner:
 
                         if item is None:
                             # Producer reached EOF, sentinel received
-                            # Drain any remaining items in queue
+                            # Drain any remaining items in safe chunks of batch_size (never unbounded!)
+                            drain_items = []
                             while not omr_queue.empty():
                                 try:
                                     rem = omr_queue.get_nowait()
                                     if rem is not None:
-                                        batch.append(rem)
+                                        drain_items.append(rem)
                                 except queue.Empty:
                                     break
-                            if batch:
-                                saved = self._transcribe_crops_batch_files(crops_dir, batch)
-                                with stats_lock:
-                                    stats["crops_done"] += saved
-                                    cd = stats["crops_done"]
-                                    tc = max(1, stats["crops_cut"])
-                                chk["phases"]["omr"]["crops_done"] = cd
-                                self._write_checkpoint(pdf_path.stem, chk)
-                                pct_p2 = round((cd / tc) * 100.0, 1)
-                                self._update_phase_progress("phase2", pct_p2, cd, tc, "running", f"Стан {cd}/{tc} (финал)")
+                            for b_start in range(0, len(drain_items), batch_size):
+                                sub_batch = drain_items[b_start : b_start + batch_size]
+                                if sub_batch:
+                                    saved = self._transcribe_crops_batch_files(crops_dir, sub_batch)
+                                    with stats_lock:
+                                        stats["crops_done"] += saved
+                                        cd = stats["crops_done"]
+                                        tc = max(1, stats["crops_cut"])
+                                    chk["phases"]["omr"]["crops_done"] = cd
+                                    self._write_checkpoint(pdf_path.stem, chk)
+                                    pct_p2 = round((cd / tc) * 100.0, 1)
+                                    omr_detail = f"Стан {cd}/{tc} (пачка {len(sub_batch)})"
+                                    self._update_phase_progress("phase2", pct_p2, cd, tc, "running", omr_detail)
                             break
 
                         batch.append(item)
@@ -1003,6 +1021,13 @@ class PipelineBatchRunner:
 
                         if batch:
                             saved = self._transcribe_crops_batch_files(crops_dir, batch)
+                            batch_counter += 1
+                            if batch_counter % 8 == 0 and torch.cuda.is_available():
+                                try:
+                                    torch.cuda.empty_cache()
+                                except Exception:
+                                    pass
+
                             with stats_lock:
                                 stats["crops_done"] += saved
                                 cd = stats["crops_done"]

@@ -5,20 +5,29 @@ coupled with Willem Vree's xml2abc for pristine multi-voice ABC generation.
 """
 
 from pathlib import Path
+import logging
 import re
 from typing import Optional, Tuple
 import music21
 import verovio
 from abc_xml_converter import convert_xml2abc
 
+# Silence verbose music21 terminal warnings (e.g. unknown clef types, unterminated spines)
+logging.getLogger("music21").setLevel(logging.ERROR)
+
 
 class ABCBridge:
     def __init__(self):
+        try:
+            verovio.enableLog(verovio.LOG_OFF)
+        except Exception:
+            pass
         self._tk = verovio.toolkit()
 
     def normalize_humdrum(self, raw_kern: str) -> str:
         """
-        Ensures Humdrum text has valid spines and headers (**kern, *-).
+        Ensures Humdrum text has valid spines, headers (**kern), and balanced column counts.
+        Tracks active spine splits (*^) and merges (*v), padding missing fields to prevent Verovio C++ crashes.
         """
         text = raw_kern.strip()
         if not text:
@@ -42,26 +51,53 @@ class ABCBridge:
             header = "\t".join(["**kern"] * first_cols)
             lines = [header] + lines
 
-        # Check terminating *-
-        if not lines[-1].startswith("*-"):
-            last_cols = len(lines[-1].split("\t"))
-            terminator = "\t".join(["*-"] * last_cols)
-            lines.append(terminator)
-        else:
-            if len(lines) >= 2:
-                preceding_cols = len(lines[-2].split("\t"))
-                current_term_cols = len(lines[-1].split("\t"))
-                if current_term_cols != preceding_cols:
-                    lines[-1] = "\t".join(["*-"] * preceding_cols)
+        # Dynamically track active spine count and pad/truncate inconsistent records
+        active_spines = len(lines[0].split("\t"))
+        fixed_lines = []
 
-        return "\n".join(lines)
+        for line in lines:
+            tokens = line.split("\t")
+
+            # Check for spine manipulation lines
+            if all(t.startswith("*") for t in tokens):
+                if any(t == "*^" or t == "*v" for t in tokens):
+                    next_count = 0
+                    for t in tokens:
+                        if t == "*^":
+                            next_count += 2
+                        elif t == "*v":
+                            next_count += 1
+                        else:
+                            next_count += 1
+                    active_spines = max(1, next_count)
+                    fixed_lines.append(line)
+                    continue
+
+            # Ensure data lines, barlines, interpretations match active spine count
+            if len(tokens) < active_spines:
+                pad_val = "*-" if tokens[0].startswith("*-") else "."
+                tokens = tokens + [pad_val] * (active_spines - len(tokens))
+            elif len(tokens) > active_spines:
+                tokens = tokens[:active_spines]
+
+            fixed_lines.append("\t".join(tokens))
+
+        # Check terminating *-
+        if not fixed_lines[-1].startswith("*-"):
+            terminator = "\t".join(["*-"] * active_spines)
+            fixed_lines.append(terminator)
+
+        return "\n".join(fixed_lines)
 
     def validate_with_verovio(self, kern_text: str) -> bool:
         """
         Uses Verovio toolkit to validate whether the Humdrum syntax is well-formed.
         """
+        if not kern_text or kern_text.startswith("% [OMR"):
+            return False
         try:
-            return bool(self._tk.loadData(kern_text))
+            norm = self.normalize_humdrum(kern_text)
+            return bool(self._tk.loadData(norm))
         except Exception:
             return False
 
@@ -70,23 +106,28 @@ class ABCBridge:
         Renders musical score to SVG using Verovio C++ engine.
         Uses tight excerpt options so the staff fills the viewport rather than an empty A4 page.
         """
-        normalized = self.normalize_humdrum(kern_text)
-        options = {
-            "pageWidth": 1200,
-            "pageHeight": 220,
-            "pageMarginTop": 10,
-            "pageMarginBottom": 10,
-            "pageMarginLeft": 15,
-            "pageMarginRight": 15,
-            "scale": scale,
-            "adjustPageHeight": True,
-            "breaks": "none",
-            "header": "none",
-            "footer": "none"
-        }
-        self._tk.setOptions(options)
-        if self._tk.loadData(normalized):
-            return self._tk.renderToSVG(1)
+        if not kern_text or kern_text.startswith("% [OMR"):
+            return ""
+        try:
+            normalized = self.normalize_humdrum(kern_text)
+            options = {
+                "pageWidth": 1200,
+                "pageHeight": 220,
+                "pageMarginTop": 10,
+                "pageMarginBottom": 10,
+                "pageMarginLeft": 15,
+                "pageMarginRight": 15,
+                "scale": scale,
+                "adjustPageHeight": True,
+                "breaks": "none",
+                "header": "none",
+                "footer": "none"
+            }
+            self._tk.setOptions(options)
+            if self._tk.loadData(normalized):
+                return self._tk.renderToSVG(1)
+        except Exception:
+            return ""
         return ""
 
     def kern_to_abc(self, raw_kern: str, title: Optional[str] = None) -> str:

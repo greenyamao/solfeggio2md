@@ -100,6 +100,14 @@ def enable_windows_high_performance() -> bool:
         # 6. Hybrid CPU Optimization: Bind to P-cores and prevent E-core thrashing
         configure_cpu_core_affinity(prefer_p_cores=True)
 
+        # 7. VRAM Headroom Protection: Reserve at least 28% GPU memory for Windows DWM and Edge WebView2
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.set_per_process_memory_fraction(0.72)
+        except Exception:
+            pass
+
         return True
 
     except Exception as e:
