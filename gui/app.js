@@ -616,17 +616,19 @@
     DOM.normDeskewImg.src = activeCrop.deskew_url;
     const bendInfo = activeCrop.bend_delta ? ` • Прогиб: ${activeCrop.bend_delta} px` : '';
     DOM.normAngleBadge.textContent = `Поворот: ${activeCrop.skew_angle > 0 ? '+' : ''}${activeCrop.skew_angle}°${bendInfo}`;
-    if (DOM.normDeskewTitle) DOM.normDeskewTitle.textContent = 'Выровненный стан (1D Profile + 2D-DFT)';
+    if (DOM.normDeskewTitle) DOM.normDeskewTitle.textContent = 'Выпрямленный + Real-CUGAN 2x SR';
     DOM.normRawDim.textContent = `${activeCrop.width} × ${activeCrop.height} px`;
     DOM.normStaffId.textContent = `#${activeCrop.index} (${activeCrop.id})`;
     DOM.normStaffClass.textContent = activeCrop.class;
-    DOM.normStaffRes.textContent = `${activeCrop.width} × ${activeCrop.height} px`;
+    const srW = activeCrop.sr_width || (activeCrop.width * 2);
+    const srH = activeCrop.sr_height || (activeCrop.height * 2);
+    DOM.normStaffRes.textContent = `${activeCrop.width}×${activeCrop.height} ➔ ${srW}×${srH} px (2x SR)`;
     if (activeCrop.bend_delta >= 0.5) {
-      DOM.normStaffStatus.textContent = `Устранён прогиб (${activeCrop.bend_delta} px) + доворот (${activeCrop.skew_angle}°)`;
+      DOM.normStaffStatus.textContent = `Выпрямлен (${activeCrop.bend_delta} px) + Real-CUGAN 2x SR`;
     } else if (Math.abs(activeCrop.skew_angle) >= 0.25) {
-      DOM.normStaffStatus.textContent = `Устранён поворот (${activeCrop.skew_angle}°)`;
+      DOM.normStaffStatus.textContent = `Доворот (${activeCrop.skew_angle}°) + Real-CUGAN 2x SR`;
     } else {
-      DOM.normStaffStatus.textContent = 'Идеально горизонтально';
+      DOM.normStaffStatus.textContent = 'Горизонтально + Real-CUGAN 2x SR';
     }
   }
 

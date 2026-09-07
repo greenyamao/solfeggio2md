@@ -282,10 +282,20 @@ class PipelineWorker:
                 cf_bgr = cv2.imread(str(cf))
                 if cf_bgr is not None:
                     h_c, w_c = cf_bgr.shape[:2]
-                    dewarped_bgr, tilt_deg, bend_px = normalize_staff_crop(cf_bgr, notation_class=cls_name)
-                    cv2.imwrite(str(deskew_file), dewarped_bgr)
+                    # Check if deskew_file already exists and is already 2x super-resolved
+                    d_img = cv2.imread(str(deskew_file)) if deskew_file.is_file() else None
+                    if d_img is not None and d_img.shape[1] >= int(w_c * 1.5):
+                        dewarped_bgr = d_img
+                        tilt_deg = 0.0
+                        bend_px = 0.0
+                    else:
+                        dewarped_bgr, tilt_deg, bend_px = normalize_staff_crop(
+                            cf_bgr, notation_class=cls_name, enhance_sr=True
+                        )
+                        cv2.imwrite(str(deskew_file), dewarped_bgr)
+                    sr_h, sr_w = dewarped_bgr.shape[:2]
                 else:
-                    h_c, w_c, tilt_deg, bend_px = 60, 1000, 0.0, 0.0
+                    h_c, w_c, sr_h, sr_w, tilt_deg, bend_px = 60, 1000, 120, 2000, 0.0, 0.0
 
                 raw_ts = int(cf.stat().st_mtime) if cf.is_file() else 0
                 deskew_ts = int(deskew_file.stat().st_mtime) if deskew_file.is_file() else 0
@@ -301,6 +311,8 @@ class PipelineWorker:
                     "bend_delta": round(bend_px, 1),
                     "width": w_c,
                     "height": h_c,
+                    "sr_width": sr_w,
+                    "sr_height": sr_h,
                     "abc": abc_txt,
                     "kern": kern_txt,
                     "model_used": "OMR" if abc_txt else "Pending"

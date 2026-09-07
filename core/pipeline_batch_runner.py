@@ -708,12 +708,14 @@ class PipelineBatchRunner:
                         if not crop_path.is_file() or overwrite:
                             cv2.imwrite(str(crop_path), crop["crop_img"])
 
-                        # Normalize and dewarp staff for OMR (skip if already on disk)
+                        # Normalize, dewarp, and 2x super-resolve staff for OMR (skip if already on disk)
                         deskew_name = f"{crop['stub_id']}_deskew.png"
                         deskew_path = crops_dir / deskew_name
                         if not deskew_path.is_file() or overwrite:
                             dewarped_bgr, _, _ = normalize_staff_crop(
-                                crop["crop_img"], notation_class=crop.get("class", "staff")
+                                crop["crop_img"],
+                                notation_class=crop.get("class", "staff"),
+                                enhance_sr=self.config.get("enable_cugan_sr", True)
                             )
                             cv2.imwrite(str(deskew_path), dewarped_bgr)
 

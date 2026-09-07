@@ -153,12 +153,14 @@ class OMREngine:
             widest_crop_px = max(c.shape[1] for c in crops_bgr) if crops_bgr else 1000
             effective_max_tokens = min(max_tokens, max(96, int(widest_crop_px * 0.45)))
 
-            # Neural stroke restoration & GPU background division
+            # Neural stroke restoration & GPU background division (avoiding double-SR if already 2x)
             if self.enable_score_enhancer and self.enhancer is not None:
-                processed_crops = [
-                    self.enhancer.enhance_crop(c, run_sr=self.enable_cugan)
-                    for c in crops_bgr
-                ]
+                processed_crops = []
+                for c in crops_bgr:
+                    already_sr = c.shape[1] >= 1600
+                    processed_crops.append(
+                        self.enhancer.enhance_crop(c, run_sr=(self.enable_cugan and not already_sr))
+                    )
             else:
                 processed_crops = crops_bgr
 

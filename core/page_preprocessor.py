@@ -207,7 +207,8 @@ def estimate_staff_spacing(img_bgr_or_gray: np.ndarray, notation_class: str = "s
 def normalize_staff_crop(
     crop_bgr: np.ndarray,
     notation_class: str = "staff",
-    enhance_background: bool = False
+    enhance_background: bool = False,
+    enhance_sr: bool = False
 ) -> Tuple[np.ndarray, float, float]:
     """
     High-precision, non-destructive music staff crop normalization:
@@ -306,8 +307,17 @@ def normalize_staff_crop(
         except Exception:
             pass
 
-    # 4. Optional GPU background division
-    if enhance_background:
+    # 4. Optional GPU background division and/or Real-CUGAN 2x Super-Resolution
+    if enhance_sr:
+        try:
+            import torch
+            from core.score_enhancer import ScoreEnhancer
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            enhancer = ScoreEnhancer(device=device, enable_cugan=True)
+            deskewed = enhancer.enhance_crop(deskewed, run_sr=True)
+        except Exception:
+            pass
+    elif enhance_background:
         try:
             from core.score_enhancer import ScoreEnhancer
             deskewed = ScoreEnhancer.gpu_background_division(deskewed, kernel_size=31)
