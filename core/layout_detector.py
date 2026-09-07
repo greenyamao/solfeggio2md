@@ -1,7 +1,9 @@
+import gc
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
 import cv2
 import numpy as np
+import torch
 
 from core.page_preprocessor import estimate_staff_spacing
 
@@ -106,6 +108,136 @@ class LayoutDetector:
             self.model = YOLO(str(self.weights_path))
             self.names = self.model.names
 
+            # 1-step GPU warmup pass when running on CUDA to prime CUDA runtime,
+            # cuDNN kernels, Tensor Cores, and the PyTorch caching allocator
+            is_cuda = (self.device == "cuda" or "cuda" in str(self.device).lower())
+            if is_cuda and torch.cuda.is_available():
+                dummy_img = np.zeros((640, 640, 3), dtype=np.uint8)
+                self.model.predict(
+                    source=dummy_img,
+                    conf=self.conf_threshold,
+                    imgsz=640,
+                    device=self.device,
+                    half=True,
+                    verbose=False
+                )
+
+    def purge_gpu_memory(self) -> None:
+        """
+        Explicitly releases LayoutDetector (YOLO OLA v2.0) GPU memory resources:
+        1. Deletes model reference and sets self.model to None.
+        2. Triggers full Python garbage collection.
+        3. Synchronizes CUDA operations, flushes PyTorch CUDA caching allocator,
+           and collects CUDA IPC memory handles.
+        Idempotent: safe to call multiple times or when model is already unloaded.
+        """
+        if self.model is not None:
+            del self.model
+            self.model = None
+
+        gc.collect()
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.synchronize()
+            except Exception:
+                pass
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            try:
+                torch.cuda.ipc_collect()
+            except Exception:
+                pass
+
+    @staticmethod
+    def box_iou(b1: List[int], b2: List[int]) -> float:
+        x1 = max(b1[0], b2[0])
+        y1 = max(b1[1], b2[1])
+        x2 = min(b1[2], b2[2])
+        y2 = min(b1[3], b2[3])
+        if x2 <= x1 or y2 <= y1:
+            return 0.0
+        inter = (x2 - x1) * (y2 - y1)
+        area1 = (b1[2] - b1[0]) * (b1[3] - b1[1])
+        area2 = (b2[2] - b2[0]) * (b2[3] - b2[1])
+        return inter / float(area1 + area2 - inter)
+
+    @staticmethod
+    def vertical_overlap_ratio(b1: List[int], b2: List[int]) -> float:
+        """Fraction of the smaller box's height that is vertically overlapped."""
+        y1 = max(b1[1], b2[1])
+        y2 = min(b1[3], b2[3])
+        if y2 <= y1:
+            return 0.0
+        h1 = b1[3] - b1[1]
+        h2 = b2[3] - b2[1]
+        return (y2 - y1) / float(max(1, min(h1, h2)))
+
+    @staticmethod
+    def horizontal_overlap_or_gap(b1: List[int], b2: List[int]) -> int:
+        """Returns positive value for overlap, negative value for gap."""
+        x1 = max(b1[0], b2[0])
+        x2 = min(b1[2], b2[2])
+        if x2 > x1:
+            return x2 - x1  # positive overlap
+        if b1[2] <= b2[0]:
+            return -(b2[0] - b1[2])
+        else:
+            return -(b1[0] - b2[2])
+
+    @staticmethod
+    def merge_boxes(b1: List[int], b2: List[int]) -> List[int]:
+        return [min(b1[0], b2[0]), min(b1[1], b2[1]), max(b1[2], b2[2]), max(b1[3], b2[3])]
+
+    @classmethod
+    def heal_collinear_segments(
+        cls,
+        detections_list: List[Dict[str, Any]],
+        v_overlap_thresh: float = 0.60,
+        max_gap_px: Optional[int] = None,
+        img_w: int = 1000
+    ) -> List[Dict[str, Any]]:
+        """
+        Merges horizontally broken or overlapping segments of the same staff/grand_staff line.
+        max_gap_px adapts to image width automatically.
+        """
+        if not detections_list:
+            return []
+        if max_gap_px is None:
+            max_gap_px = max(25, int(img_w * 0.025))
+
+        merged = []
+        sorted_dets = sorted(detections_list, key=lambda x: x["confidence"], reverse=True)
+        used = [False] * len(sorted_dets)
+
+        for i in range(len(sorted_dets)):
+            if used[i]:
+                continue
+            cur_box = list(sorted_dets[i]["box"])
+            cur_conf = sorted_dets[i]["confidence"]
+            cur_cls = sorted_dets[i]["class"]
+
+            for j in range(i + 1, len(sorted_dets)):
+                if used[j]:
+                    continue
+                other_box = sorted_dets[j]["box"]
+                v_ratio = cls.vertical_overlap_ratio(cur_box, other_box)
+                h_rel = cls.horizontal_overlap_or_gap(cur_box, other_box)
+
+                if v_ratio >= v_overlap_thresh and h_rel >= -max_gap_px:
+                    cur_box = cls.merge_boxes(cur_box, other_box)
+                    cur_conf = max(cur_conf, sorted_dets[j]["confidence"])
+                    used[j] = True
+
+            used[i] = True
+            merged.append({
+                "class": cur_cls,
+                "confidence": cur_conf,
+                "box": cur_box
+            })
+        return merged
+
     def detect(self, img_bgr: np.ndarray, imgsz: Optional[int] = None) -> List[Dict[str, Any]]:
         """
         Runs layout detection on an image with automatic scale adaptation.
@@ -116,18 +248,20 @@ class LayoutDetector:
 
         # Scale-adaptive YOLO inference size:
         # Preserves fine 1-px staff lines across different page resolutions (150 - 400 DPI)
+        is_cuda = (self.device == "cuda" or "cuda" in str(self.device).lower())
         if imgsz is None:
             max_dim = max(img_h, img_w)
             target_sz = int(np.ceil(max_dim / 32.0) * 32)
-            max_cap = 1920 if self.device == "cuda" else 1280
+            max_cap = 1920 if is_cuda else 1280
             imgsz = min(max_cap, max(1024, target_sz))
 
-        # Inference with Ultralytics YOLO
+        # Inference with Ultralytics YOLO (FP16 enabled on CUDA, disabled on CPU)
         results = self.model.predict(
             source=img_bgr,
             conf=self.conf_threshold,
             imgsz=imgsz,
             device=self.device,
+            half=is_cuda,
             verbose=False
         )
 
@@ -162,82 +296,11 @@ class LayoutDetector:
             elif cls_name in ("systems", "system"):
                 raw_systems.append(d)
 
-        def box_iou(b1, b2):
-            x1 = max(b1[0], b2[0])
-            y1 = max(b1[1], b2[1])
-            x2 = min(b1[2], b2[2])
-            y2 = min(b1[3], b2[3])
-            if x2 <= x1 or y2 <= y1:
-                return 0.0
-            inter = (x2 - x1) * (y2 - y1)
-            area1 = (b1[2] - b1[0]) * (b1[3] - b1[1])
-            area2 = (b2[2] - b2[0]) * (b2[3] - b2[1])
-            return inter / float(area1 + area2 - inter)
-
-        def vertical_overlap_ratio(b1, b2):
-            """Fraction of the smaller box's height that is vertically overlapped."""
-            y1 = max(b1[1], b2[1])
-            y2 = min(b1[3], b2[3])
-            if y2 <= y1:
-                return 0.0
-            h1 = b1[3] - b1[1]
-            h2 = b2[3] - b2[1]
-            return (y2 - y1) / float(max(1, min(h1, h2)))
-
-        def horizontal_overlap_or_gap(b1, b2):
-            """Returns positive value for overlap, negative value for gap."""
-            x1 = max(b1[0], b2[0])
-            x2 = min(b1[2], b2[2])
-            if x2 > x1:
-                return x2 - x1  # positive overlap
-            if b1[2] <= b2[0]:
-                return -(b2[0] - b1[2])
-            else:
-                return -(b1[0] - b2[2])
-
-        def merge_boxes(b1, b2):
-            return [min(b1[0], b2[0]), min(b1[1], b2[1]), max(b1[2], b2[2]), max(b1[3], b2[3])]
-
-        def heal_collinear_segments(detections_list, v_overlap_thresh=0.60, max_gap_px=None):
-            """
-            Merges horizontally broken or overlapping segments of the same staff/grand_staff line.
-            max_gap_px adapts to image width automatically.
-            """
-            if not detections_list:
-                return []
-            if max_gap_px is None:
-                max_gap_px = max(25, int(img_w * 0.025))
-
-            merged = []
-            sorted_dets = sorted(detections_list, key=lambda x: x["confidence"], reverse=True)
-            used = [False] * len(sorted_dets)
-
-            for i in range(len(sorted_dets)):
-                if used[i]:
-                    continue
-                cur_box = list(sorted_dets[i]["box"])
-                cur_conf = sorted_dets[i]["confidence"]
-                cur_cls = sorted_dets[i]["class"]
-
-                for j in range(i + 1, len(sorted_dets)):
-                    if used[j]:
-                        continue
-                    other_box = sorted_dets[j]["box"]
-                    v_ratio = vertical_overlap_ratio(cur_box, other_box)
-                    h_rel = horizontal_overlap_or_gap(cur_box, other_box)
-
-                    if v_ratio >= v_overlap_thresh and h_rel >= -max_gap_px:
-                        cur_box = merge_boxes(cur_box, other_box)
-                        cur_conf = max(cur_conf, sorted_dets[j]["confidence"])
-                        used[j] = True
-
-                used[i] = True
-                merged.append({
-                    "class": cur_cls,
-                    "confidence": cur_conf,
-                    "box": cur_box
-                })
-            return merged
+        box_iou = self.box_iou
+        vertical_overlap_ratio = self.vertical_overlap_ratio
+        horizontal_overlap_or_gap = self.horizontal_overlap_or_gap
+        merge_boxes = self.merge_boxes
+        heal_collinear_segments = lambda dets, **kw: self.heal_collinear_segments(dets, img_w=img_w, **kw)
 
         # 1. Process grand_staff (highest priority: piano 2-staff systems)
         accepted_grand = heal_collinear_segments(raw_grand)
