@@ -376,10 +376,12 @@ def _extract_vrlc_staff_skeleton(gray: np.ndarray, is_grand: bool = False) -> Tu
             best_grp = unique_y[:5]
             for i in range(len(unique_y) - 4):
                 cand = unique_y[i:i+5]
-                err = float(np.mean(np.abs(np.diff(cand) - staff_s)))
-                if err < best_err:
-                    best_err = err
-                    best_grp = cand
+                diffs_c = np.diff(cand)
+                if np.max(diffs_c) - np.min(diffs_c) <= 3:
+                    err = float(np.mean(np.abs(diffs_c - staff_s)))
+                    if err < best_err:
+                        best_err = err
+                        best_grp = cand
             target_lines = best_grp
         else:
             mid_y = h / 2.0
@@ -392,59 +394,80 @@ def _get_staff_column_displacements(
     skel: np.ndarray, target_lines: List[int], staff_s: int
 ) -> Tuple[np.ndarray, np.ndarray, int, int]:
     """
-    Continuous 5-line outward tracking from crop center to detect physical paper curl.
-    Tracks each staff line continuously column-by-column in a local +- r_step window,
-    avoiding static band-mask clipping on large gutter curls (>10 px).
+    Coupled multi-line outward tracking from crop center to detect physical paper curl.
+    Tracks all 5 (or 10) staff lines simultaneously as a rigid sheet of paper,
+    preventing individual lines from jumping onto isolated brackets, note beams, or text.
     """
     h, w = skel.shape[:2]
     x_mid = w // 2
-    r_step = max(3, int(round(staff_s * 0.45)))
 
-    line_tracks = [np.full(w, np.nan, dtype=np.float32) for _ in range(len(target_lines))]
-    hits = np.zeros((len(target_lines), w), dtype=bool)
-
-    for i, y_init in enumerate(target_lines):
-        # Track left: x_mid -> 0
-        cur_y = float(y_init)
-        for x in range(x_mid, -1, -1):
-            y_min = max(0, int(round(cur_y - r_step)))
-            y_max = min(h, int(round(cur_y + r_step + 1)))
-            pts = np.where(skel[y_min:y_max, x] > 0)[0]
-            if len(pts) > 0:
-                cur_y = y_min + float(np.mean(pts))
-                hits[i, x] = True
-            line_tracks[i][x] = cur_y
-
-        # Track right: x_mid -> w
-        cur_y = float(y_init)
-        for x in range(x_mid, w):
-            y_min = max(0, int(round(cur_y - r_step)))
-            y_max = min(h, int(round(cur_y + r_step + 1)))
-            pts = np.where(skel[y_min:y_max, x] > 0)[0]
-            if len(pts) > 0:
-                cur_y = y_min + float(np.mean(pts))
-                hits[i, x] = True
-            line_tracks[i][x] = cur_y
-
-    raw_shifts = np.zeros(w, dtype=np.float32)
+    # Detect authentic staff line column span from multi-line ink presence
+    has_staff_ink = np.zeros(w, dtype=bool)
+    band = max(2, int(round(staff_s * 0.35)))
     for x in range(w):
-        diffs = [line_tracks[i][x] - target_lines[i] for i in range(len(target_lines))]
-        raw_shifts[x] = float(np.median(diffs))
+        cnt = sum(np.any(skel[max(0, yl - band):min(h, yl + band + 1), x] > 0) for yl in target_lines)
+        if cnt >= max(2, len(target_lines) // 3):
+            has_staff_ink[x] = True
 
-    # Detect authentic staff line column span from ink hits
-    staff_cols = np.where(np.sum(hits, axis=0) >= 1)[0]
-    x_first = int(staff_cols[0]) if len(staff_cols) > 0 else 0
-    x_last = int(staff_cols[-1]) if len(staff_cols) > 0 else w - 1
+    staff_cols = np.where(has_staff_ink)[0]
+    if len(staff_cols) < 50:
+        return np.arange(w, dtype=np.float32), np.zeros(w, dtype=np.float32), 0, w - 1
+
+    x_first = int(staff_cols[0])
+    x_last = int(staff_cols[-1])
+
+    comb_dy = np.zeros(w, dtype=np.float32)
+
+    # Track right: x_mid -> x_last
+    cur_dy = 0.0
+    for x in range(x_mid, x_last + 1):
+        best_dy = cur_dy
+        best_score = -1.0
+        for d in np.linspace(-1.5, 1.5, 7):
+            cand_dy = cur_dy + d
+            score = 0.0
+            for yl in target_lines:
+                y = int(round(yl + cand_dy))
+                if 0 <= y < h:
+                    score += float(skel[y, x])
+            if score > best_score:
+                best_score = score
+                best_dy = cand_dy
+        if best_score > 0:
+            cur_dy = 0.75 * cur_dy + 0.25 * best_dy
+        comb_dy[x] = cur_dy
+    comb_dy[x_last:] = comb_dy[x_last]
+
+    # Track left: x_mid -> x_first
+    cur_dy = 0.0
+    for x in range(x_mid, x_first - 1, -1):
+        best_dy = cur_dy
+        best_score = -1.0
+        for d in np.linspace(-1.5, 1.5, 7):
+            cand_dy = cur_dy + d
+            score = 0.0
+            for yl in target_lines:
+                y = int(round(yl + cand_dy))
+                if 0 <= y < h:
+                    score += float(skel[y, x])
+            if score > best_score:
+                best_score = score
+                best_dy = cand_dy
+        if best_score > 0:
+            cur_dy = 0.75 * cur_dy + 0.25 * best_dy
+        comb_dy[x] = cur_dy
+    comb_dy[:x_first] = comb_dy[x_first]
 
     xs = np.arange(w, dtype=np.float32)
-    ys = raw_shifts
+    ys = comb_dy
     return xs, ys, x_first, x_last
 
 
 def _robust_fit_curl(x_pts: np.ndarray, y_pts: np.ndarray, x_ref: float, L: float, is_left: bool) -> Tuple[float, float]:
     """
     Pure NumPy Iteratively Reweighted Least Squares (IRLS) Huber fit for curl amplitude A and hinge xc:
-    dy(x) = A * (1 - dist / xc)^2
+    dy(x) = A * (1 - dist / xc)^2.
+    Tests against the flat hypothesis (A = 0) to prevent warping already-flat staves.
     """
     if len(x_pts) < 15:
         return 0.0, float(L * 0.25)
@@ -457,7 +480,11 @@ def _robust_fit_curl(x_pts: np.ndarray, y_pts: np.ndarray, x_ref: float, L: floa
     dist = dist[valid_pts]
     y_act_all = y_pts[valid_pts]
 
-    best_loss = 1e9
+    # Baseline loss under flat hypothesis (A = 0)
+    res_flat = np.abs(y_act_all)
+    loss_flat = float(np.sum(np.where(res_flat < 1.5, 0.5 * res_flat**2, 1.5 * res_flat - 1.125)))
+
+    best_loss = loss_flat
     best_A = 0.0
     best_xc = float(L * 0.25)
 
@@ -479,7 +506,8 @@ def _robust_fit_curl(x_pts: np.ndarray, y_pts: np.ndarray, x_ref: float, L: floa
         res = np.abs(y_act - A * t_act)
         hub = np.where(res < 1.5, 0.5 * res**2, 1.5 * res - 1.125)
         loss = float(np.sum(hub))
-        if loss < best_loss:
+        # Physical curl must reduce residual error by at least 35% compared to flat line
+        if loss < best_loss * 0.65 and abs(A) >= 1.5:
             best_loss = loss
             best_A = A
             best_xc = float(xc)
@@ -497,6 +525,7 @@ def _fit_c1_paper_curl(
 ) -> Tuple[float, float, float, float, float, float, int, int]:
     """
     Fits two-sided C1 physical paper curl model relative to actual staff boundaries [x_first, x_last].
+    Applies single-gutter physical constraint to prevent warping free page margins.
     """
     if len(xs) < 50:
         return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, width - 1
@@ -533,6 +562,14 @@ def _fit_c1_paper_curl(
         A_R, xc_R = _robust_fit_curl(xs[right_mask], y_detrend[right_mask], x_ref=float(x_last), L=L, is_left=False)
     else:
         A_R, xc_R = 0.0, float(L * 0.25)
+
+    # 4. Single gutter physical dominance:
+    # A physical book page has a gutter on only ONE side.
+    if abs(A_L) >= 1.5 and abs(A_R) >= 1.5:
+        if abs(A_L) >= 1.5 * abs(A_R):
+            A_R = 0.0
+        elif abs(A_R) >= 1.5 * abs(A_L):
+            A_L = 0.0
 
     # Deadband threshold: if deflection is < 1.2 px, page paper is flat
     if abs(A_L) < 1.2:

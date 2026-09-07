@@ -529,35 +529,53 @@ class LayoutDetector:
         k_fine = cv2.getStructuringElement(cv2.MORPH_RECT, (k_len_fine, 1))
         lines_fine = cv2.morphologyEx(bin_inv, cv2.MORPH_OPEN, k_fine)
 
-        staves = []
-        i = 0
-        while i <= len(line_centers) - 5:
-            grp = line_centers[i:i+5]
-            g_diffs = np.diff(grp)
-            if all(abs(d - staff_s) <= max(2.5, staff_s * 0.40) for d in g_diffs):
-                yt = int(grp[0])
-                yb = int(grp[-1])
-                strip = lines_fine[max(0, yt - 2):min(img_h, yb + 3), :]
-                col_s = np.sum(strip > 0, axis=0)
-                act_cols = np.where(col_s >= 2)[0]
-                if len(act_cols) == 0:
-                    act_cols = np.where(col_s > 0)[0]
-                if len(act_cols) > 0:
-                    xl = int(act_cols[0])
-                    xr = int(act_cols[-1])
+        tol = max(2.5, staff_s * 0.35)
+        candidate_staves = []
+        for i, y0 in enumerate(line_centers):
+            matched = [y0]
+            err_sum = 0.0
+            for k_idx in range(1, 5):
+                exp_y = y0 + k_idx * staff_s
+                best_y = None
+                min_d = 999.0
+                for yj in line_centers:
+                    d = abs(yj - exp_y)
+                    if d <= tol and d < min_d:
+                        min_d = d
+                        best_y = yj
+                if best_y is not None:
+                    matched.append(best_y)
+                    err_sum += min_d
                 else:
-                    xl, xr = mx, img_w - mx
-                staves.append({
-                    "y_top": yt,
-                    "y_bot": yb,
-                    "x_left": xl,
-                    "x_right": xr,
-                    "s": staff_s
-                })
-                i += 5
-            else:
-                i += 1
+                    break
+            if len(matched) == 5:
+                candidate_staves.append((err_sum, matched))
 
+        candidate_staves.sort(key=lambda x: x[0])
+        staves = []
+        for err, grp in candidate_staves:
+            yt, yb = int(grp[0]), int(grp[-1])
+            if any(not (yb < s["y_top"] - 4 or yt > s["y_bot"] + 4) for s in staves):
+                continue
+            strip = lines_fine[max(0, yt - 2):min(img_h, yb + 3), :]
+            col_s = np.sum(strip > 0, axis=0)
+            act_cols = np.where(col_s >= 2)[0]
+            if len(act_cols) == 0:
+                act_cols = np.where(col_s > 0)[0]
+            if len(act_cols) > 0:
+                xl = int(act_cols[0])
+                xr = int(act_cols[-1])
+            else:
+                xl, xr = mx, img_w - mx
+            staves.append({
+                "y_top": yt,
+                "y_bot": yb,
+                "x_left": xl,
+                "x_right": xr,
+                "s": staff_s
+            })
+
+        staves.sort(key=lambda s: s["y_top"])
         return staves, staff_s
 
     def detect(self, img_bgr: np.ndarray, imgsz: Optional[int] = None) -> List[Dict[str, Any]]:
