@@ -213,36 +213,63 @@ class OMREngine:
         }
 
     @staticmethod
-    def _sanitize_runaway_kern(raw_kern: str, max_repeats: int = 5) -> str:
+    def _sanitize_runaway_kern(raw_kern: str, max_repeats: int = 3) -> str:
         """
-        Detects and truncates degenerative runaway loops in Humdrum **kern generation
-        where identical tokens repeat endlessly.
+        Detects and truncates degenerative runaway loops in Humdrum **kern generation:
+        1. Truncates after the first final double barline (==).
+        2. Detects and truncates identical repeating measure blocks.
+        3. Suppresses repeated identical lines.
         """
         if not raw_kern:
             return raw_kern
 
-        lines = raw_kern.splitlines()
-        if len(lines) <= max_repeats:
+        text = (
+            raw_kern.replace("<s>", " ")
+            .replace("</s>", "")
+            .replace("<t>", "\t")
+            .replace("<b>", "\n")
+        )
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not lines:
             return raw_kern
 
         sanitized = []
         repeat_count = 1
         prev_line = None
 
+        seen_measures = []
+        current_measure = []
+
         for line in lines:
-            stripped = line.strip()
-            # Ignore comments and spine decorators for repeat counting
-            if stripped.startswith("*") or stripped.startswith("!"):
+            # 1. Truncate at final double barline == (e.g. '==', '=4==', '=8==')
+            if "==" in line and not line.startswith("*") and not line.startswith("!"):
+                sanitized.append(line)
+                break
+
+            # 2. Measure tracking for cyclic loop detection
+            if line.startswith("=") and not line.startswith("=="):
+                if current_measure:
+                    m_tuple = tuple(current_measure)
+                    if len(seen_measures) >= 2 and seen_measures[-1] == m_tuple and seen_measures[-2] == m_tuple:
+                        break
+                    seen_measures.append(m_tuple)
+                    current_measure = []
+                current_measure.append(line)
+            elif current_measure:
+                current_measure.append(line)
+
+            # 3. Line-level repeat suppression
+            if line.startswith("*") or line.startswith("!"):
                 sanitized.append(line)
                 continue
 
-            if stripped == prev_line:
+            if line == prev_line:
                 repeat_count += 1
                 if repeat_count > max_repeats:
-                    continue  # suppress runaway line repeat
+                    continue
             else:
                 repeat_count = 1
-                prev_line = stripped
+                prev_line = line
 
             sanitized.append(line)
 

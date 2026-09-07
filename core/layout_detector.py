@@ -12,6 +12,7 @@ def is_valid_music_staff(crop_bgr: np.ndarray, cls_name: str, conf: float) -> bo
     """
     Physical verification that a candidate bounding box contains authentic parallel music staff lines.
     Rejects:
+    - Printed text headers / example labels (e.g. 'Example 26 BACH...')
     - Analysis brackets (|---|---|---|)
     - Slur / phrase arcs
     - Text underlines, footnote lines, and table borders
@@ -19,10 +20,11 @@ def is_valid_music_staff(crop_bgr: np.ndarray, cls_name: str, conf: float) -> bo
     """
     gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY) if len(crop_bgr.shape) == 3 else crop_bgr
     h, w = gray.shape
-    if h < 15 or w < 30:
-        return False
 
     is_grand = "grand" in cls_name.lower()
+    min_h = 60 if is_grand else 28
+    if h < min_h or w < 80:
+        return False
 
     # Dynamic binarization
     bg_val = float(np.percentile(gray, 90)) if gray.size > 0 else 250.0
@@ -30,13 +32,13 @@ def is_valid_music_staff(crop_bgr: np.ndarray, cls_name: str, conf: float) -> bo
     bin_inv = (gray < ink_thresh).astype(np.uint8) * 255
 
     # 1. Morphological horizontal line detection (minimum segment length 10% width)
-    kernel_len = max(15, min(60, int(w * 0.10)))
+    kernel_len = max(20, min(80, int(w * 0.10)))
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_len, 1))
     lines_img = cv2.morphologyEx(bin_inv, cv2.MORPH_OPEN, kernel)
 
     # Row projection of horizontal line segments
     proj = np.sum(lines_img > 0, axis=1)
-    min_row_coverage = max(15, int(w * 0.18))
+    min_row_coverage = max(20, int(w * 0.15))
     active_rows = np.where(proj >= min_row_coverage)[0]
 
     line_centers = []
@@ -48,7 +50,12 @@ def is_valid_music_staff(crop_bgr: np.ndarray, cls_name: str, conf: float) -> bo
 
     centers = [float(np.mean(grp)) for grp in line_centers]
 
-    # Method 2 fallback: if lines are faint or broken, check peak projection in central strip
+    # Real music staff MUST have continuous horizontal lines from Method 1
+    # Printed text characters do not form long continuous horizontal lines
+    if len(centers) < 2:
+        return False
+
+    # Method 2 fallback/supplement: if some lines are faint, check central strip
     if len(centers) < 3:
         x1, x2 = int(w * 0.25), int(w * 0.75)
         strip = gray[:, x1:x2]
@@ -71,7 +78,10 @@ def is_valid_music_staff(crop_bgr: np.ndarray, cls_name: str, conf: float) -> bo
 
     diffs = np.diff(centers)
     median_s = float(np.median(diffs))
-    if median_s < 3.0:
+
+    # At 200 DPI, authentic music staff line spacing is between 6.5px and 30px
+    # Font typography features (ascenders/baseline) are < 6px and get rejected
+    if median_s < 6.5 or median_s > 30.0:
         return False
 
     consistent_diffs = [d for d in diffs if 0.55 * median_s <= d <= 1.45 * median_s]

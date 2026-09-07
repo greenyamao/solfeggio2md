@@ -258,6 +258,71 @@ def normalize_staff_crop(crop_bgr: np.ndarray, notation_class: str = "staff") ->
     else:
         deskewed = padded_rot
 
-    return deskewed, round(tilt_deg, 1), 0.0
+    # 3. 1D Vertical Dewarping for curved staff tips (book binding/spine curl)
+    bend_delta = 0.0
+    h_d, w_d = deskewed.shape[:2]
+    if w_d >= 180 and h_d >= 25:
+        try:
+            d_gray = cv2.cvtColor(deskewed, cv2.COLOR_BGR2GRAY)
+            k_line = cv2.getStructuringElement(cv2.MORPH_RECT, (12, 1))
+            bg_val = float(np.percentile(d_gray, 90))
+            bin_inv = (d_gray < bg_val - 35).astype(np.uint8) * 255
+            lines_only = cv2.morphologyEx(bin_inv, cv2.MORPH_OPEN, k_line)
+
+            strip_w = 16
+            num_strips = w_d // strip_w
+            strip_centers = []
+            strip_y_cms = []
+
+            for s in range(num_strips):
+                x_start = s * strip_w
+                x_end = x_start + strip_w
+                strip_mask = lines_only[:, x_start:x_end]
+                y_indices, _ = np.where(strip_mask > 0)
+                if len(y_indices) >= strip_w:
+                    strip_centers.append(x_start + strip_w / 2.0)
+                    strip_y_cms.append(float(np.mean(y_indices)))
+
+            if len(strip_centers) >= 6:
+                strip_centers = np.array(strip_centers, dtype=np.float32)
+                strip_y_cms = np.array(strip_y_cms, dtype=np.float32)
+
+                mid_mask = (strip_centers >= 0.25 * w_d) & (strip_centers <= 0.75 * w_d)
+                if np.sum(mid_mask) >= 3:
+                    y_base = float(np.median(strip_y_cms[mid_mask]))
+                else:
+                    y_base = float(np.median(strip_y_cms))
+
+                raw_dy = strip_y_cms - y_base
+                raw_dy = np.clip(raw_dy, -22.0, 22.0)
+
+                window_sz = min(5, len(raw_dy) if len(raw_dy) % 2 == 1 else len(raw_dy) - 1)
+                if window_sz >= 3:
+                    kernel_weights = np.ones(window_sz) / window_sz
+                    smooth_dy = np.convolve(raw_dy, kernel_weights, mode='same')
+                else:
+                    smooth_dy = raw_dy
+
+                max_bend = float(np.max(np.abs(smooth_dy)))
+                if 2.5 <= max_bend <= 20.0:
+                    bend_delta = max_bend
+                    full_x = np.arange(w_d, dtype=np.float32)
+                    interp_dy = np.interp(full_x, strip_centers, smooth_dy)
+
+                    grid_x = np.tile(full_x, (h_d, 1))
+                    grid_y = np.tile(np.arange(h_d, dtype=np.float32)[:, None], (1, w_d)) + interp_dy[None, :]
+
+                    deskewed = cv2.remap(
+                        deskewed,
+                        grid_x.astype(np.float32),
+                        grid_y.astype(np.float32),
+                        interpolation=cv2.INTER_CUBIC,
+                        borderMode=cv2.BORDER_CONSTANT,
+                        borderValue=(255, 255, 255)
+                    )
+        except Exception:
+            pass
+
+    return deskewed, round(tilt_deg, 1), round(bend_delta, 1)
 
 

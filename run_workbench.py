@@ -229,6 +229,12 @@ def create_app(worker: PipelineWorker, runner: PipelineBatchRunner) -> bottle.Bo
         bottle.response.content_type = 'application/json; charset=utf-8'
         return json.dumps(runner.get_metrics(), ensure_ascii=False)
 
+    @app.route('/api/telemetry/process', method='GET')
+    def api_telemetry_process():
+        bottle.response.content_type = 'application/json; charset=utf-8'
+        from core.process_telemetry import get_process_telemetry
+        return json.dumps(get_process_telemetry(), ensure_ascii=False)
+
     # ---------------- Configuration & LM Studio Test ---------------- #
     @app.route('/api/config', method='GET')
     def api_config_get():

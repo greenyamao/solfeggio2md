@@ -38,16 +38,21 @@ class ABCBridge:
 
         # Check if header exists
         if not any(line.startswith("**") for line in lines):
-            spine_count = max(len(line.split("\t")) for line in lines)
-            header = "\t".join(["**kern"] * spine_count)
-            terminator = "\t".join(["*-"] * spine_count)
+            first_cols = len(lines[0].split("\t"))
+            header = "\t".join(["**kern"] * first_cols)
             lines = [header] + lines
-            if not lines[-1].startswith("*-"):
-                lines.append(terminator)
-        elif not lines[-1].startswith("*-"):
-            spine_count = max(len(line.split("\t")) for line in lines if not line.startswith("*"))
-            terminator = "\t".join(["*-"] * spine_count)
+
+        # Check terminating *-
+        if not lines[-1].startswith("*-"):
+            last_cols = len(lines[-1].split("\t"))
+            terminator = "\t".join(["*-"] * last_cols)
             lines.append(terminator)
+        else:
+            if len(lines) >= 2:
+                preceding_cols = len(lines[-2].split("\t"))
+                current_term_cols = len(lines[-1].split("\t"))
+                if current_term_cols != preceding_cols:
+                    lines[-1] = "\t".join(["*-"] * preceding_cols)
 
         return "\n".join(lines)
 

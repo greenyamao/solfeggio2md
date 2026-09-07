@@ -27,6 +27,7 @@ class PipelineWorker:
         self.omr_engine = None
         self.layout_detector = None
         self.preprocessor = None
+        self._sheet_mapping_cache: Dict[str, Dict[int, Dict[str, Any]]] = {}
 
     def get_hardware_status(self) -> Dict[str, Any]:
         """
@@ -99,8 +100,11 @@ class PipelineWorker:
         """
         Determines the source PDF sheet index, spread status, and URL for a given book page number.
         Accommodates both 2-page spreads (where sheet produces 2 book pages) and single pages.
-        Caches rendered sheet image to disk as sheet_{s_idx:04d}.png if not already present.
+        Uses in-memory cache to guarantee 0 ms lookup without re-opening PDF on every click.
         """
+        if book_name in self._sheet_mapping_cache and p_num in self._sheet_mapping_cache[book_name]:
+            return self._sheet_mapping_cache[book_name][p_num]
+
         book_dir = self.root_dir / "output" / book_name
         masked_dir = book_dir / "2_masked_pages"
         masked_dir.mkdir(parents=True, exist_ok=True)
@@ -126,58 +130,61 @@ class PipelineWorker:
                 }
 
         try:
+            if book_name not in self._sheet_mapping_cache:
+                self._sheet_mapping_cache[book_name] = {}
+
             with fitz.open(pdf_path) as doc:
                 total_sheets = len(doc)
-                target_s_idx = 0
-                is_spread = False
-                side = "single"
                 cur_bp = 1
-
                 for s_idx in range(total_sheets):
                     p = doc[s_idx]
                     w, h = p.rect.width, p.rect.height
                     sheet_is_spread = (1.22 <= (w / float(max(1.0, h))) <= 2.2 and h >= 300)
+                    sheet_file = masked_dir / f"sheet_{s_idx:04d}.png"
+                    sheet_url = f"/output/{book_name}/2_masked_pages/{sheet_file.name}"
                     if sheet_is_spread:
-                        if p_num == cur_bp:
-                            target_s_idx = s_idx
-                            is_spread = True
-                            side = "left"
-                            break
-                        elif p_num == cur_bp + 1:
-                            target_s_idx = s_idx
-                            is_spread = True
-                            side = "right"
-                            break
+                        self._sheet_mapping_cache[book_name][cur_bp] = {
+                            "sheet_idx": s_idx,
+                            "is_spread": True,
+                            "spread_side": "left",
+                            "sheet_url": sheet_url,
+                        }
+                        self._sheet_mapping_cache[book_name][cur_bp + 1] = {
+                            "sheet_idx": s_idx,
+                            "is_spread": True,
+                            "spread_side": "right",
+                            "sheet_url": sheet_url,
+                        }
                         cur_bp += 2
                     else:
-                        if p_num == cur_bp:
-                            target_s_idx = s_idx
-                            is_spread = False
-                            side = "single"
-                            break
+                        self._sheet_mapping_cache[book_name][cur_bp] = {
+                            "sheet_idx": s_idx,
+                            "is_spread": False,
+                            "spread_side": "single",
+                            "sheet_url": sheet_url,
+                        }
                         cur_bp += 1
 
-                sheet_file = masked_dir / f"sheet_{target_s_idx:04d}.png"
-                if not sheet_file.is_file():
-                    pix = doc[target_s_idx].get_pixmap(dpi=200, alpha=False)
-                    img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
-                    img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR if pix.n == 4 else cv2.COLOR_RGB2BGR)
-                    cv2.imwrite(str(sheet_file), img_bgr)
-
-                return {
-                    "sheet_idx": target_s_idx,
-                    "is_spread": is_spread,
-                    "spread_side": side,
-                    "sheet_url": f"/output/{book_name}/2_masked_pages/sheet_{target_s_idx:04d}.png",
-                }
+                target_info = self._sheet_mapping_cache[book_name].get(p_num)
+                if target_info:
+                    target_s_idx = target_info["sheet_idx"]
+                    target_file = masked_dir / f"sheet_{target_s_idx:04d}.png"
+                    if not target_file.is_file() and 0 <= target_s_idx < total_sheets:
+                        pix = doc[target_s_idx].get_pixmap(dpi=200, alpha=False)
+                        img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+                        img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR if pix.n == 4 else cv2.COLOR_RGB2BGR)
+                        cv2.imwrite(str(target_file), img_bgr)
+                    return target_info
         except Exception:
-            mask_file = masked_dir / f"page_{p_num:04d}_masked.png"
-            return {
-                "sheet_idx": max(0, p_num - 1),
-                "is_spread": False,
-                "spread_side": "single",
-                "sheet_url": f"/output/{book_name}/2_masked_pages/{mask_file.name}",
-            }
+            pass
+
+        mask_file = masked_dir / f"page_{p_num:04d}_masked.png"
+        return {
+            "sheet_idx": max(0, p_num - 1),
+            "is_spread": False,
+            "spread_side": "single",
+            "sheet_url": f"/output/{book_name}/2_masked_pages/{mask_file.name}",
+        }
 
     def _generate_debug_page(self, book_name: str, p_num: int, debug_file: Path) -> bool:
         """
@@ -238,10 +245,6 @@ class PipelineWorker:
         p_num = int(p_suffix)
         masked_file = book_dir / "2_masked_pages" / f"page_{p_num:04d}_masked.png"
         debug_file = book_dir / "2_masked_pages" / f"page_{p_num:04d}_debug.png"
-
-        # Generate debug image with YOLO bounding boxes if not yet on disk
-        if not debug_file.is_file():
-            self._generate_debug_page(book_name, p_num, debug_file)
 
         crops_dir = book_dir / "1_crops"
         crops_data = []

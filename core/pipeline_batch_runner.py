@@ -30,6 +30,7 @@ from core.page_preprocessor import PagePreprocessor, deskew_page, normalize_staf
 from core.layout_detector import LayoutDetector
 from core.book_section_filter import BookSectionFilter
 from core.windows_perf import enable_windows_high_performance
+from core.process_telemetry import get_process_telemetry
 
 
 DEFAULT_CONFIG_FILE = ROOT_DIR / "config.json"
@@ -97,6 +98,7 @@ class PipelineBatchRunner:
 
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        self._start_time: float = 0.0
 
         # Real-time HUD Metrics
         self.metrics: Dict[str, Any] = {
@@ -301,12 +303,24 @@ class PipelineBatchRunner:
         with self._lock:
             m = dict(self.metrics)
             m["total_books"] = len(self.queue)
-            if torch.cuda.is_available():
-                try:
-                    m["vram_allocated_mb"] = round(torch.cuda.memory_allocated(0) / (1024 * 1024), 1)
-                except Exception:
-                    pass
-            return m
+            if self.is_running and self._start_time > 0:
+                m["elapsed_seconds"] = round(time.time() - self._start_time, 1)
+
+        # Merge process-isolated telemetry (CPU, RAM RSS, VRAM, GPU compute)
+        try:
+            telemetry = get_process_telemetry()
+            m["process_telemetry"] = telemetry
+            m["cpu_percent"] = telemetry.get("cpu_percent", 0.0)
+            m["ram_rss_mb"] = telemetry.get("ram_rss_mb", 0.0)
+            m["vram_allocated_mb"] = telemetry.get("vram_allocated_mb", 0.0)
+            m["vram_reserved_mb"] = telemetry.get("vram_reserved_mb", 0.0)
+            m["gpu_compute_percent"] = telemetry.get("gpu_compute_percent", 0.0)
+            m["device_name"] = telemetry.get("device_name", "CPU")
+            m["runtime_mode"] = telemetry.get("runtime_mode", "CPU Mode")
+        except Exception:
+            pass
+
+        return m
 
     # ---------------- Checkpointing ---------------- #
 
@@ -376,7 +390,9 @@ class PipelineBatchRunner:
     # ---------------- Orchestration Loop ---------------- #
 
     def _run_loop(self) -> None:
-        start_time = time.time()
+        with self._lock:
+            self._start_time = time.time()
+        start_time = self._start_time
         active_items = [q for q in self.queue if q["status"] != "completed"]
         total_books = len(self.queue)
 

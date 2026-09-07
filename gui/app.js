@@ -268,11 +268,11 @@
         refreshQueue();
       }
 
-      // Auto-refresh workbench pages if in workbench view and pipeline is running
-      if (state.activeWorkspace === 'workbench' && (data.is_running || state.pages.length === 0)) {
-        if (!state._lastPagesCheck || (Date.now() - state._lastPagesCheck > 3000)) {
+      // Initial load of workbench pages if empty
+      if (state.activeWorkspace === 'workbench' && state.pages.length === 0) {
+        if (!state._lastPagesCheck || (Date.now() - state._lastPagesCheck > 2000)) {
           state._lastPagesCheck = Date.now();
-          loadWorkbenchPages(true);
+          loadWorkbenchPages(false);
         }
       }
 
@@ -297,14 +297,22 @@
         DOM.logConsoleBox.scrollTop = DOM.logConsoleBox.scrollHeight;
       }
 
-      // Update Status Bar
-      DOM.deviceNameText.textContent = `GPU VRAM: ${data.vram_allocated_mb} MB`;
-      if (data.vram_allocated_mb < 500) {
+      // Update Status Bar with Process-Isolated Telemetry
+      const telem = data.process_telemetry || {};
+      const cpuPct = telem.cpu_percent !== undefined ? telem.cpu_percent : (data.cpu_percent || 0);
+      const ramMb = telem.ram_rss_mb !== undefined ? telem.ram_rss_mb : (data.ram_rss_mb || 0);
+      const vramMb = telem.vram_allocated_mb !== undefined ? telem.vram_allocated_mb : (data.vram_allocated_mb || 0);
+      const devName = telem.device_name || data.device_name || 'CPU';
+      const mode = telem.runtime_mode || data.runtime_mode || 'CPU Mode';
+      const isCuda = telem.cuda_available || false;
+
+      DOM.deviceNameText.textContent = `[Процесс] CPU: ${cpuPct}% • RAM: ${ramMb} MB • ${devName}`;
+      if (vramMb < 500) {
         DOM.vramStatusPill.className = 'vram-pill vram-safe';
-        DOM.vramText.textContent = `VRAM: ${data.vram_allocated_mb} MB (Safe for VLM)`;
+        DOM.vramText.textContent = isCuda ? `VRAM: ${vramMb} MB (Safe for VLM)` : `VRAM: ${vramMb} MB (${mode})`;
       } else {
         DOM.vramStatusPill.className = 'vram-pill vram-busy';
-        DOM.vramText.textContent = `VRAM: ${data.vram_allocated_mb} MB (OMR в памяти)`;
+        DOM.vramText.textContent = `VRAM: ${vramMb} MB (OMR в памяти)`;
       }
     } catch (e) {
       // Offline/quiet
