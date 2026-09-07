@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 
 
 def detect_and_split_spread(img_bgr: np.ndarray, overlap_ratio: float = 0.005) -> List[Tuple[np.ndarray, str]]:
@@ -263,27 +263,35 @@ def normalize_staff_crop(crop_bgr: np.ndarray, notation_class: str = "staff") ->
     # Warps ONLY physical spine curl using a C1-smooth parametric model (zero wobble mathematically guaranteed).
     bend_delta = 0.0
     h_d, w_d = deskewed.shape[:2]
-    if w_d >= 160 and h_d >= 25:
+    if w_d >= 120 and h_d >= 20:
         try:
             d_gray = cv2.cvtColor(deskewed, cv2.COLOR_BGR2GRAY)
             is_grand = notation_class.lower().replace(" ", "_") in ("grand_staff", "grandstaff")
 
             skel, line_d, staff_s, target_lines = _extract_vrlc_staff_skeleton(d_gray, is_grand=is_grand)
-            xs, ys = _get_staff_column_displacements(skel, target_lines, staff_s)
+            xs, ys, x_first, x_last = _get_staff_column_displacements(skel, target_lines, staff_s)
 
             if len(xs) >= 50:
-                k_slope, b_intercept, A_L, xc_L, A_R, xc_R, x_first, x_last = _fit_c1_paper_curl(xs, ys, w_d)
+                k_slope, b_intercept, A_L, xc_L, A_R, xc_R, x_first, x_last = _fit_c1_paper_curl(
+                    xs, ys, w_d, x_first=x_first, x_last=x_last
+                )
                 smooth_dy = _build_c1_displacement_curve(w_d, k_slope, A_L, xc_L, A_R, xc_R, x_first, x_last)
 
                 max_bend = float(np.max(np.abs(smooth_dy)))
                 # Strict deadband protection: if deflection is < 1.0 px, staff is already flat (0ms, 0 interpolation loss)
                 if max_bend >= 1.0:
                     bend_delta = max_bend
+                    # Zero-clipping padding: pad top and bottom by max_bend + 2 before remap
+                    pad_dewarp = int(np.ceil(max_bend)) + 2
+                    padded_d = cv2.copyMakeBorder(
+                        deskewed, pad_dewarp, pad_dewarp, 0, 0,
+                        cv2.BORDER_CONSTANT, value=(255, 255, 255)
+                    )
                     grid_x = np.tile(np.arange(w_d, dtype=np.float32), (h_d, 1)).astype(np.float32)
-                    grid_y = (np.tile(np.arange(h_d, dtype=np.float32)[:, None], (1, w_d)) + smooth_dy[None, :]).astype(np.float32)
+                    grid_y = (np.tile(np.arange(h_d, dtype=np.float32)[:, None], (1, w_d)) + pad_dewarp + smooth_dy[None, :]).astype(np.float32)
 
                     deskewed = cv2.remap(
-                        deskewed,
+                        padded_d,
                         grid_x,
                         grid_y,
                         interpolation=cv2.INTER_CUBIC,
@@ -307,7 +315,7 @@ def _extract_vrlc_staff_skeleton(gray: np.ndarray, is_grand: bool = False) -> Tu
     bin_inv = (gray < bg_val - 35).astype(np.uint8)
 
     # 1. Estimate staff line thickness d and staff space s via fast sample columns
-    sample_cols = np.linspace(int(w * 0.15), int(w * 0.85), 40, dtype=int)
+    sample_cols = np.linspace(int(w * 0.15), int(w * 0.85), 30, dtype=int)
     sampled = bin_inv[:, sample_cols]
     padded = np.pad(sampled.astype(np.int32), ((1, 1), (0, 0)), mode="constant")
     diffs = np.diff(padded, axis=0)
@@ -337,12 +345,14 @@ def _extract_vrlc_staff_skeleton(gray: np.ndarray, is_grand: bool = False) -> Tu
     k_close = cv2.getStructuringElement(cv2.MORPH_RECT, (max(5, int(1.4 * staff_s)), 1))
     clean_skel = cv2.morphologyEx(thin_lines, cv2.MORPH_CLOSE, k_close)
 
-    # 4. Target lines identification from stable central span
-    x_c1, x_c2 = int(w * 0.25), int(w * 0.75)
-    central_proj = np.sum(clean_skel[:, x_c1:x_c2], axis=1)
+    # 4. Target lines identification from stable central slice (x_mid +- 25px)
+    # Using a narrow slice prevents tilt/curl from smearing the 5 peaks.
+    x_mid = w // 2
+    x_m1, x_m2 = max(0, x_mid - 25), min(w, x_mid + 25)
+    central_proj = np.sum(clean_skel[:, x_m1:x_m2], axis=1)
     peaks = []
     for y in range(1, h - 1):
-        if central_proj[y] > central_proj[y-1] and central_proj[y] >= central_proj[y+1] and central_proj[y] > (x_c2 - x_c1) * 0.15:
+        if central_proj[y] > central_proj[y-1] and central_proj[y] >= central_proj[y+1] and central_proj[y] > (x_m2 - x_m1) * 0.15:
             peaks.append((central_proj[y], y))
     peaks.sort(key=lambda p: p[0], reverse=True)
 
@@ -375,47 +385,60 @@ def _extract_vrlc_staff_skeleton(gray: np.ndarray, is_grand: bool = False) -> Tu
             mid_y = h / 2.0
             target_lines = [int(round(mid_y + (k - 2) * staff_s)) for k in range(5)]
 
-    # 5. Band-masking: purges isolated slurs, ties, and text underlines outside authentic lines
-    line_band_mask = np.zeros((h, w), dtype=np.uint8)
-    band_r = max(2, int(round(staff_s * 0.35)))
-    for yk in target_lines:
-        y_min = max(0, yk - band_r)
-        y_max = min(h, yk + band_r + 1)
-        line_band_mask[y_min:y_max, :] = 1
-
-    final_skel = clean_skel * line_band_mask
-    return final_skel, line_d, staff_s, target_lines
+    return clean_skel, line_d, staff_s, target_lines
 
 
-def _get_staff_column_displacements(skel: np.ndarray, target_lines: List[int], staff_s: int) -> Tuple[np.ndarray, np.ndarray]:
+def _get_staff_column_displacements(
+    skel: np.ndarray, target_lines: List[int], staff_s: int
+) -> Tuple[np.ndarray, np.ndarray, int, int]:
     """
-    Computes vertical displacement for each valid column relative to target reference lines.
-    Vectorized across columns.
+    Continuous 5-line outward tracking from crop center to detect physical paper curl.
+    Tracks each staff line continuously column-by-column in a local +- r_step window,
+    avoiding static band-mask clipping on large gutter curls (>10 px).
     """
-    h, w = skel.shape
-    band_r = max(2, int(round(staff_s * 0.35)))
+    h, w = skel.shape[:2]
+    x_mid = w // 2
+    r_step = max(3, int(round(staff_s * 0.45)))
 
-    line_diffs = np.full((len(target_lines), w), np.nan, dtype=np.float32)
-    for idx, y_ref in enumerate(target_lines):
-        y_min = max(0, y_ref - band_r)
-        y_max = min(h, y_ref + band_r + 1)
-        sub = skel[y_min:y_max, :]
-        col_sums = np.sum(sub, axis=0)
-        valid_cols = col_sums > 0
-        if np.any(valid_cols):
-            weights = np.arange(y_min, y_max, dtype=np.float32)[:, None]
-            y_cents = np.sum(sub[:, valid_cols] * weights, axis=0) / col_sums[valid_cols]
-            line_diffs[idx, valid_cols] = y_cents - y_ref
+    line_tracks = [np.full(w, np.nan, dtype=np.float32) for _ in range(len(target_lines))]
+    hits = np.zeros((len(target_lines), w), dtype=bool)
 
-    valid_count = np.sum(~np.isnan(line_diffs), axis=0)
-    col_mask = valid_count >= max(1, len(target_lines) // 3)
-    xs = np.where(col_mask)[0].astype(np.float32)
-    if len(xs) == 0:
-        return np.array([], dtype=np.float32), np.array([], dtype=np.float32)
+    for i, y_init in enumerate(target_lines):
+        # Track left: x_mid -> 0
+        cur_y = float(y_init)
+        for x in range(x_mid, -1, -1):
+            y_min = max(0, int(round(cur_y - r_step)))
+            y_max = min(h, int(round(cur_y + r_step + 1)))
+            pts = np.where(skel[y_min:y_max, x] > 0)[0]
+            if len(pts) > 0:
+                cur_y = y_min + float(np.mean(pts))
+                hits[i, x] = True
+            line_tracks[i][x] = cur_y
 
-    sub_diffs = line_diffs[:, col_mask]
-    ys = np.nanmedian(sub_diffs, axis=0).astype(np.float32)
-    return xs, ys
+        # Track right: x_mid -> w
+        cur_y = float(y_init)
+        for x in range(x_mid, w):
+            y_min = max(0, int(round(cur_y - r_step)))
+            y_max = min(h, int(round(cur_y + r_step + 1)))
+            pts = np.where(skel[y_min:y_max, x] > 0)[0]
+            if len(pts) > 0:
+                cur_y = y_min + float(np.mean(pts))
+                hits[i, x] = True
+            line_tracks[i][x] = cur_y
+
+    raw_shifts = np.zeros(w, dtype=np.float32)
+    for x in range(w):
+        diffs = [line_tracks[i][x] - target_lines[i] for i in range(len(target_lines))]
+        raw_shifts[x] = float(np.median(diffs))
+
+    # Detect authentic staff line column span from ink hits
+    staff_cols = np.where(np.sum(hits, axis=0) >= 1)[0]
+    x_first = int(staff_cols[0]) if len(staff_cols) > 0 else 0
+    x_last = int(staff_cols[-1]) if len(staff_cols) > 0 else w - 1
+
+    xs = np.arange(w, dtype=np.float32)
+    ys = raw_shifts
+    return xs, ys, x_first, x_last
 
 
 def _robust_fit_curl(x_pts: np.ndarray, y_pts: np.ndarray, x_ref: float, L: float, is_left: bool) -> Tuple[float, float]:
@@ -465,15 +488,23 @@ def _robust_fit_curl(x_pts: np.ndarray, y_pts: np.ndarray, x_ref: float, L: floa
     return best_A, best_xc
 
 
-def _fit_c1_paper_curl(xs: np.ndarray, ys: np.ndarray, width: int) -> Tuple[float, float, float, float, float, float, int, int]:
+def _fit_c1_paper_curl(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    width: int,
+    x_first: Optional[int] = None,
+    x_last: Optional[int] = None
+) -> Tuple[float, float, float, float, float, float, int, int]:
     """
     Fits two-sided C1 physical paper curl model relative to actual staff boundaries [x_first, x_last].
     """
     if len(xs) < 50:
         return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, width - 1
 
-    x_first = int(xs[0])
-    x_last = int(xs[-1])
+    if x_first is None:
+        x_first = int(xs[0])
+    if x_last is None:
+        x_last = int(xs[-1])
     L = float(max(10, x_last - x_first))
 
     # 1. Estimate linear slope k in central 50% plateau of staff

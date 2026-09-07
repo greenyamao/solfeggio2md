@@ -298,6 +298,9 @@ class LayoutDetector:
             cur_conf = sorted_dets[i]["confidence"]
             cur_cls = sorted_dets[i]["class"]
 
+            cur_s = sorted_dets[i].get("s", None)
+            cur_staves = sorted_dets[i].get("staves_count", 1)
+
             for j in range(i + 1, len(sorted_dets)):
                 if used[j]:
                     continue
@@ -308,14 +311,19 @@ class LayoutDetector:
                 if v_ratio >= v_overlap_thresh and h_rel >= -max_gap_px:
                     cur_box = cls.merge_boxes(cur_box, other_box)
                     cur_conf = max(cur_conf, sorted_dets[j]["confidence"])
+                    cur_staves = max(cur_staves, sorted_dets[j].get("staves_count", 1))
                     used[j] = True
 
             used[i] = True
-            merged.append({
+            m_dict = {
                 "class": cur_cls,
                 "confidence": cur_conf,
-                "box": cur_box
-            })
+                "box": cur_box,
+                "staves_count": cur_staves
+            }
+            if cur_s is not None:
+                m_dict["s"] = cur_s
+            merged.append(m_dict)
         return merged
 
     @classmethod
@@ -687,6 +695,9 @@ class LayoutDetector:
                         "staves_count": 1,
                         "s": staff_s
                     })
+
+        # Heal horizontally split segments (e.g. short exercises split at double barlines)
+        final_blocks = self.heal_collinear_segments(final_blocks, v_overlap_thresh=0.55, img_w=img_w)
 
         # Sort candidates top-to-bottom by raw y1
         final_blocks.sort(key=lambda item: item["box"][1])
