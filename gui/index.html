@@ -189,7 +189,7 @@
               <span id="live-book-badge" class="badge badge-grand">Режим ожидания</span>
             </div>
             <div class="live-image-canvas">
-              <img id="live-preview-img" class="fit-image" alt="Предпросмотр" src="" />
+              <img id="live-preview-img" class="fit-image" alt="Предпросмотр" decoding="async" src="" />
               <div id="live-empty-banner" class="live-empty-state">
                 <span>Изображение появится после старта конвейера</span>
               </div>
@@ -239,7 +239,7 @@
                 <button id="btn-toggle-scan-mode" class="btn-xs" style="cursor: pointer; background: rgba(255,255,255,0.06); border: 1px solid var(--accent-primary); color: var(--text-secondary); border-radius: 4px; padding: 2px 8px; font-size: 11px; transition: all 0.2s;" title="Переключить между разметкой YOLO и исходным сканом PDF">Исходный скан</button>
               </div>
               <div class="panel-canvas">
-                <img id="scan-debug-img" class="fit-image" alt="Исходный скан" src="" />
+                <img id="scan-debug-img" class="fit-image" alt="Исходный скан" decoding="async" src="" />
               </div>
             </div>
             <div class="split-column">
@@ -251,7 +251,7 @@
                 <span class="panel-subtitle">Очищенные текстовые блоки</span>
               </div>
               <div class="panel-canvas">
-                <img id="scan-mask-img" class="fit-image" alt="Маскированная страница" src="" />
+                <img id="scan-mask-img" class="fit-image" alt="Маскированная страница" decoding="async" src="" />
               </div>
             </div>
           </div>
@@ -270,7 +270,7 @@
                 <span class="panel-subtitle">Оригинальный фрагмент со скана</span>
               </div>
               <div class="panel-canvas">
-                <img id="norm-raw-img" class="fit-image" alt="Исходная вырезка" src="" />
+                <img id="norm-raw-img" class="fit-image" alt="Исходная вырезка" decoding="async" src="" />
               </div>
             </div>
             <div class="split-column">
@@ -286,7 +286,7 @@
               </div>
               <div class="panel-canvas">
                 <div id="guidelines-layer" class="guide-lines-overlay"></div>
-                <img id="norm-deskew-img" class="fit-image" alt="Выровненный стан" src="" />
+                <img id="norm-deskew-img" class="fit-image" alt="Выровненный стан" decoding="async" src="" />
               </div>
             </div>
           </div>
@@ -304,7 +304,7 @@
             <div class="omr-left-pane">
               <div id="staves-subbar-3" class="subbar-staves"></div>
               <div class="crop-preview-box">
-                <img id="omr-crop-img" alt="Вырезка нот" src="" />
+                <img id="omr-crop-img" alt="Вырезка нот" decoding="async" src="" />
               </div>
               <div class="panel-header" style="background: var(--bg-surface-elevated); border-top: 1px solid var(--border-subtle);">
                 <span id="omr-model-badge" class="badge badge-grand">Transcoda-59M (RoPE)</span>

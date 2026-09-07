@@ -15,6 +15,7 @@ import cv2
 import numpy as np
 from PIL import Image
 import torch
+import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, PreTrainedTokenizerFast
 
 ROOT_DIR = Path(__file__).parent.parent.resolve()
@@ -72,59 +73,60 @@ class OMREngine:
     def _preprocess_transcoda(self, img_bgr: np.ndarray, target_w: int = 1050, target_h: int = 1485) -> torch.Tensor:
         """
         Transcoda expects normalized RGB float32 in [-1, 1] of shape (1, 3, target_h, target_w).
+        Uses pure PyTorch GPU bilinear interpolation to eliminate CPU bottlenecks.
         """
-        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-        pil_img = Image.fromarray(img_rgb)
-        
-        new_h = max(1, int(pil_img.height * (target_w / pil_img.width)))
-        pil_resized = pil_img.resize((target_w, new_h), Image.BILINEAR)
-        arr = np.array(pil_resized)
-        
-        if arr.shape[0] > target_h:
-            arr = arr[:target_h]
-        elif arr.shape[0] < target_h:
-            pad = np.full((target_h - arr.shape[0], target_w, 3), 255, dtype=arr.dtype)
-            arr = np.concatenate([arr, pad], axis=0)
-            
-        t = torch.from_numpy(arr).permute(2, 0, 1).float() / 255.0
-        t = (t - 0.5) / 0.5
-        return t.unsqueeze(0).to(self.device)
+        h, w = img_bgr.shape[:2]
+        new_h = max(1, int(round(h * (target_w / float(max(1, w))))))
+        clip_h = min(new_h, target_h)
+
+        is_cuda = self.device == "cuda" or "cuda" in str(self.device).lower()
+        dev = self.device if (is_cuda and torch.cuda.is_available()) else "cpu"
+        dtype = torch.float32
+
+        pixel_values = torch.ones((1, 3, target_h, target_w), dtype=dtype, device=dev)
+        img_rgb = img_bgr[:, :, ::-1].copy()
+        t = torch.from_numpy(img_rgb).to(device=dev, dtype=dtype).permute(2, 0, 1).unsqueeze(0)
+        t = ((t / 255.0) - 0.5) / 0.5
+        resized = F.interpolate(t, size=(new_h, target_w), mode="bilinear", align_corners=False)
+        pixel_values[0, :, :clip_h, :] = resized[0, :, :clip_h, :]
+        return pixel_values
 
     def _collate_crops_batch(self, crops_bgr: List[np.ndarray], target_w: int = 1050) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Dynamically resizes and collates a mini-batch of crops to the maximum height in the batch,
         rounded up to multiples of 32 for ConvNeXt, capped at 1485.
+        Uses pure PyTorch GPU bilinear interpolation to eliminate CPU bottlenecks.
         Returns (pixel_values, image_sizes).
         """
         batch_size = len(crops_bgr)
-        resized_crops = []
         item_heights = []
 
         for crop in crops_bgr:
             h, w = crop.shape[:2]
             scale = target_w / float(max(1, w))
             new_h = max(1, int(round(h * scale)))
-            img_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-            pil_img = Image.fromarray(img_rgb)
-            pil_resized = pil_img.resize((target_w, new_h), Image.BILINEAR)
-            resized_crops.append(np.array(pil_resized))
             item_heights.append(new_h)
 
         max_h = max(item_heights) if item_heights else 32
         batch_h = min(1485, int(np.ceil(max_h / 32.0) * 32))
 
-        batch_arr = np.full((batch_size, batch_h, target_w, 3), 255, dtype=np.uint8)
-        for i, arr in enumerate(resized_crops):
-            clip_h = min(arr.shape[0], batch_h)
-            batch_arr[i, :clip_h, :, :] = arr[:clip_h, :, :]
-
-        tensor = torch.from_numpy(batch_arr).permute(0, 3, 1, 2)
         is_cuda = self.device == "cuda" or "cuda" in str(self.device).lower()
+        dev = self.device if (is_cuda and torch.cuda.is_available()) else "cpu"
         dtype = torch.float16 if (is_cuda and torch.cuda.is_available()) else torch.float32
-        pixel_values = ((tensor.to(dtype=dtype) / 255.0) - 0.5) / 0.5
-        pixel_values = pixel_values.to(self.device)
 
-        image_sizes = torch.tensor([[h, target_w] for h in item_heights], device=self.device)
+        # Pure white background (255) normalized into Transcoda space: ((255 / 255.0) - 0.5) / 0.5 = 1.0
+        pixel_values = torch.ones((batch_size, 3, batch_h, target_w), dtype=dtype, device=dev)
+
+        for i, crop in enumerate(crops_bgr):
+            new_h = item_heights[i]
+            crop_rgb = crop[:, :, ::-1].copy()
+            t = torch.from_numpy(crop_rgb).to(device=dev, dtype=dtype).permute(2, 0, 1).unsqueeze(0)
+            t = ((t / 255.0) - 0.5) / 0.5
+            resized = F.interpolate(t, size=(new_h, target_w), mode="bilinear", align_corners=False)
+            clip_h = min(new_h, batch_h)
+            pixel_values[i, :, :clip_h, :] = resized[0, :, :clip_h, :]
+
+        image_sizes = torch.tensor([[h, target_w] for h in item_heights], device=dev)
         return pixel_values, image_sizes
 
     def transcribe_crops_batch(

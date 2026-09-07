@@ -5,7 +5,9 @@ import cv2
 import json
 import torch
 import numpy as np
+import threading
 from typing import Dict, List, Any, Optional
+from PIL import Image
 import pymupdf as fitz
 
 from core.page_preprocessor import deskew_page, PagePreprocessor, normalize_staff_crop, detect_and_split_spread
@@ -28,6 +30,8 @@ class PipelineWorker:
         self.layout_detector = None
         self.preprocessor = None
         self._sheet_mapping_cache: Dict[str, Dict[int, Dict[str, Any]]] = {}
+        self._page_cache: Dict[str, Dict[str, Any]] = {}
+        self._generating_debug: set = set()
 
     def get_hardware_status(self) -> Dict[str, Any]:
         """
@@ -236,6 +240,7 @@ class PipelineWorker:
         Loads real data for a given page including crops, deskewed crops,
         OMR transcriptions (ABC / Kern), and rendered markdown from output/.
         Never returns synthetic/mock data.
+        Employs fast in-memory caching and non-blocking background debug generation to eliminate UI freezes.
         """
         if "__page_" not in page_id:
             raise FileNotFoundError(f"Page not found: {page_id}")
@@ -245,6 +250,16 @@ class PipelineWorker:
         p_num = int(p_suffix)
         masked_file = book_dir / "2_masked_pages" / f"page_{p_num:04d}_masked.png"
         debug_file = book_dir / "2_masked_pages" / f"page_{p_num:04d}_debug.png"
+
+        # In-memory cache hit (0 ms instant response)
+        cached = self._page_cache.get(page_id)
+        if cached is not None:
+            cur_mtime = max(
+                debug_file.stat().st_mtime if debug_file.is_file() else 0,
+                masked_file.stat().st_mtime if masked_file.is_file() else 0
+            )
+            if cached.get("_cache_mtime", 0) >= cur_mtime and cur_mtime > 0:
+                return cached["data"]
 
         crops_dir = book_dir / "1_crops"
         crops_data = []
@@ -279,23 +294,32 @@ class PipelineWorker:
                     kern_txt = ""
 
                 deskew_file = crops_dir / f"{cf.stem}_deskew.png"
-                cf_bgr = cv2.imread(str(cf))
-                if cf_bgr is not None:
-                    h_c, w_c = cf_bgr.shape[:2]
-                    # Check if deskew_file already exists and is already 2x super-resolved
-                    d_img = cv2.imread(str(deskew_file)) if deskew_file.is_file() else None
-                    if d_img is not None and d_img.shape[1] >= int(w_c * 1.5):
-                        dewarped_bgr = d_img
-                        tilt_deg = 0.0
-                        bend_px = 0.0
-                    else:
+                
+                # Fast header-only dimensions read (<0.1ms)
+                try:
+                    with Image.open(cf) as im_raw:
+                        w_c, h_c = im_raw.size
+                except Exception:
+                    w_c, h_c = 1000, 60
+
+                if deskew_file.is_file():
+                    try:
+                        with Image.open(deskew_file) as im_d:
+                            sr_w, sr_h = im_d.size
+                    except Exception:
+                        sr_w, sr_h = w_c * 2, h_c * 2
+                    tilt_deg, bend_px = 0.0, 0.0
+                else:
+                    # Quick deskew fallback without heavy SR to avoid blocking UI thread
+                    cf_bgr = cv2.imread(str(cf))
+                    if cf_bgr is not None:
                         dewarped_bgr, tilt_deg, bend_px = normalize_staff_crop(
-                            cf_bgr, notation_class=cls_name, enhance_sr=True
+                            cf_bgr, notation_class=cls_name, enhance_sr=False
                         )
                         cv2.imwrite(str(deskew_file), dewarped_bgr)
-                    sr_h, sr_w = dewarped_bgr.shape[:2]
-                else:
-                    h_c, w_c, sr_h, sr_w, tilt_deg, bend_px = 60, 1000, 120, 2000, 0.0, 0.0
+                        sr_h, sr_w = dewarped_bgr.shape[:2]
+                    else:
+                        sr_w, sr_h, tilt_deg, bend_px = w_c * 2, h_c * 2, 0.0, 0.0
 
                 raw_ts = int(cf.stat().st_mtime) if cf.is_file() else 0
                 deskew_ts = int(deskew_file.stat().st_mtime) if deskew_file.is_file() else 0
@@ -327,19 +351,26 @@ class PipelineWorker:
         else:
             markdown_text = f"*(Текст страницы еще не распознан. Запустите пакетную обработку в Панели управления)*\n"
 
-        if not debug_file.is_file():
-            self._generate_debug_page(book_name, p_num, debug_file)
-
         sheet_info = self._get_sheet_info_for_page(book_name, p_num)
-
         mask_rel = f"/output/{book_name}/2_masked_pages/page_{p_num:04d}_masked.png"
+
         if debug_file.is_file():
             debug_ts = int(debug_file.stat().st_mtime)
             debug_rel = f"/output/{book_name}/2_masked_pages/page_{p_num:04d}_debug.png?t={debug_ts}"
         else:
-            debug_rel = mask_rel
+            # Fallback immediately to mask or sheet to avoid freezing HTTP request
+            debug_rel = mask_rel if masked_file.is_file() else sheet_info.get("sheet_url", mask_rel)
+            if page_id not in self._generating_debug:
+                self._generating_debug.add(page_id)
+                def _bg_gen():
+                    try:
+                        self._generate_debug_page(book_name, p_num, debug_file)
+                    finally:
+                        self._generating_debug.discard(page_id)
+                        self._page_cache.pop(page_id, None)
+                threading.Thread(target=_bg_gen, daemon=True).start()
 
-        return {
+        result = {
             "page_id": page_id,
             "title": f"Стр. {p_num}",
             "original_url": sheet_info["sheet_url"],
@@ -351,6 +382,18 @@ class PipelineWorker:
             "crops": crops_data,
             "markdown": markdown_text
         }
+
+        # Cache result
+        cur_mtime = max(
+            debug_file.stat().st_mtime if debug_file.is_file() else 0,
+            masked_file.stat().st_mtime if masked_file.is_file() else 0
+        )
+        self._page_cache[page_id] = {
+            "_cache_mtime": cur_mtime,
+            "data": result
+        }
+
+        return result
 
     def save_page_markdown(self, page_id: str, markdown_content: str) -> bool:
         """
@@ -364,6 +407,7 @@ class PipelineWorker:
         final_dir.mkdir(parents=True, exist_ok=True)
         md_file = final_dir / f"page_{p_num:04d}_final.md"
         md_file.write_text(markdown_content, encoding="utf-8")
+        self._page_cache.pop(page_id, None)
         return True
 
     def transcribe_crop_live(self, page_id: str, crop_stem: str) -> Dict[str, Any]:
@@ -416,6 +460,8 @@ class PipelineWorker:
             if kern_content:
                 kern_file = crops_dir / f"{crop_stem}.kern"
                 kern_file.write_text(kern_content, encoding="utf-8")
+
+            self._page_cache.pop(page_id, None)
 
             return {
                 "status": "success",

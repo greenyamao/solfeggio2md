@@ -173,6 +173,7 @@
       DOM.wsDashboard.classList.add('active');
       DOM.wsWorkbench.classList.remove('active');
       DOM.workbenchSubmodes.style.display = 'none';
+      refreshQueue();
     } else {
       DOM.btnWsWorkbench.classList.add('active');
       DOM.btnWsDashboard.classList.remove('active');
@@ -269,11 +270,13 @@
       const elapsed = formatSeconds(data.elapsed_seconds);
       DOM.hudTimeMetric.textContent = `Прошло: ${elapsed}`;
 
-      // Auto-refresh queue every 2.5 seconds so files added via Windows Explorer or external copy
-      // appear automatically in the UI table
-      if (!state._lastQueueSync || (Date.now() - state._lastQueueSync > 2500)) {
-        state._lastQueueSync = Date.now();
-        refreshQueue();
+      // Auto-refresh queue every 2.5 seconds ONLY when on dashboard tab
+      // so we don't contend for Python GIL and disk I/O while inspecting pages in workbench
+      if (state.activeWorkspace === 'dashboard') {
+        if (!state._lastQueueSync || (Date.now() - state._lastQueueSync > 2500)) {
+          state._lastQueueSync = Date.now();
+          refreshQueue();
+        }
       }
 
       // Initial load of workbench pages if empty
@@ -509,6 +512,34 @@
     }
   }
 
+  // Client-Side LRU Page Cache (stores up to 35 pages for instant 0ms switching)
+  const pageCache = new Map();
+
+  function prefetchAdjacentPages(currentIndex) {
+    if (!state.pages || state.pages.length === 0) return;
+    const toPrefetch = [];
+    if (currentIndex + 1 < state.pages.length) {
+      toPrefetch.push(state.pages[currentIndex + 1].page_id);
+    }
+    if (currentIndex - 1 >= 0) {
+      toPrefetch.push(state.pages[currentIndex - 1].page_id);
+    }
+
+    toPrefetch.forEach(pid => {
+      if (!pageCache.has(pid)) {
+        setTimeout(async () => {
+          try {
+            const data = await api(`/api/page/${pid}`);
+            pageCache.set(pid, data);
+            // Preload critical images in browser memory cache
+            if (data.mask_url) { const img = new Image(); img.decoding = 'async'; img.src = data.mask_url; }
+            if (data.debug_url) { const img = new Image(); img.decoding = 'async'; img.src = data.debug_url; }
+          } catch (_) {}
+        }, 80);
+      }
+    });
+  }
+
   async function selectWorkbenchPage(pageId) {
     const idx = state.pages.findIndex(p => p.page_id === pageId);
     if (idx !== -1) state.currentPageIndex = idx;
@@ -516,11 +547,27 @@
     DOM.pageSelect.value = pageId;
     DOM.pageCounter.textContent = `${state.currentPageIndex + 1} / ${state.pages.length}`;
 
+    // 1. Instant LRU Cache Hit (0 ms transition)
+    if (pageCache.has(pageId)) {
+      state.pageData = pageCache.get(pageId);
+      state.selectedCropIndex = 0;
+      renderActiveWorkbenchMode();
+      prefetchAdjacentPages(state.currentPageIndex);
+      return;
+    }
+
+    // 2. Network Fetch with caching and prefetching
     try {
       const data = await api(`/api/page/${pageId}`);
+      pageCache.set(pageId, data);
+      if (pageCache.size > 35) {
+        const oldestKey = pageCache.keys().next().value;
+        pageCache.delete(oldestKey);
+      }
       state.pageData = data;
       state.selectedCropIndex = 0;
       renderActiveWorkbenchMode();
+      prefetchAdjacentPages(state.currentPageIndex);
     } catch (err) {
       console.warn('Failed to load page data:', err);
     }
@@ -979,7 +1026,10 @@
     });
 
     if (DOM.btnRefreshPages) {
-      DOM.btnRefreshPages.addEventListener('click', () => loadWorkbenchPages(true));
+      DOM.btnRefreshPages.addEventListener('click', () => {
+        pageCache.clear();
+        loadWorkbenchPages(true);
+      });
     }
 
     DOM.btnNextPage.addEventListener('click', () => {
@@ -1093,6 +1143,7 @@
           crop.abc = res.abc;
           crop.kern = res.kern;
           crop.model_used = res.model_used;
+          pageCache.delete(state.pageData.page_id);
           renderMode3();
         }
       } catch (err) {
@@ -1121,6 +1172,7 @@
           body: JSON.stringify({ page_id: state.pageData.page_id, markdown: content })
         });
         if (res.status === 'success') {
+          pageCache.delete(state.pageData.page_id);
           DOM.btnSaveMd.textContent = 'Сохранено';
           setTimeout(() => { DOM.btnSaveMd.textContent = 'Сохранить'; }, 2000);
         }
