@@ -51,6 +51,12 @@ class OMREngine:
                 trust_remote_code=True
             ).to(self.device).eval()
             self.transcoda_tokenizer = PreTrainedTokenizerFast.from_pretrained(self.transcoda_repo)
+            eos_ids = [self.transcoda_tokenizer.eos_token_id or 2]
+            for bar_tok in ["==", "=||", "=:|", "=:|!"]:
+                tok_id = self.transcoda_tokenizer.convert_tokens_to_ids(bar_tok)
+                if tok_id is not None and tok_id != self.transcoda_tokenizer.unk_token_id:
+                    eos_ids.append(tok_id)
+            self.transcoda_eos_token_ids = list(dict.fromkeys(eos_ids))
 
     def _ensure_smt_loaded(self):
         if self.smt_model is None:
@@ -143,13 +149,15 @@ class OMREngine:
             effective_max_tokens = min(max_tokens, max(96, int(widest_crop_px * 0.45)))
 
             with torch.inference_mode():
+                eos_ids = getattr(self, "transcoda_eos_token_ids", [2, 212, 236, 155, 156])
                 out = self.transcoda_model.generate(
                     pixel_values=pixel_values,
                     image_sizes=image_sizes,
                     max_length=effective_max_tokens,
                     do_sample=False,
                     num_beams=1,
-                    repetition_penalty=1.1
+                    repetition_penalty=1.1,
+                    eos_token_id=eos_ids
                 )
 
             decoded_kerns = self.transcoda_tokenizer.batch_decode(out, skip_special_tokens=True)
@@ -216,9 +224,11 @@ class OMREngine:
     def _sanitize_runaway_kern(raw_kern: str, max_repeats: int = 3) -> str:
         """
         Detects and truncates degenerative runaway loops in Humdrum **kern generation:
-        1. Truncates after the first final double barline (==).
-        2. Detects and truncates identical repeating measure blocks.
-        3. Suppresses repeated identical lines.
+        1. Truncates immediately at any terminal barline (==, =||, =:|, =:|!, *-).
+        2. Detects header re-occurrence: if *clef, *k[, *M, or **kern occurs after musical
+           content has started, it is an unmistakable attention wrap-around restart.
+        3. Detects and truncates cyclical measure repetitions.
+        4. Suppresses repeated identical token lines.
         """
         if not raw_kern:
             return raw_kern
@@ -239,15 +249,27 @@ class OMREngine:
 
         seen_measures = []
         current_measure = []
+        has_music_started = False
 
         for line in lines:
-            # 1. Truncate at final double barline == (e.g. '==', '=4==', '=8==')
-            if "==" in line and not line.startswith("*") and not line.startswith("!"):
+            is_header = line.startswith("*") or line.startswith("!")
+            is_barline = line.startswith("=")
+
+            # 1. Truncate at terminal barlines (e.g. '==', '=||', '=:|', '*-')
+            if not is_header and any(t in line for t in ("==", "=||", "=:|", "*-")):
                 sanitized.append(line)
                 break
 
-            # 2. Measure tracking for cyclic loop detection
-            if line.startswith("=") and not line.startswith("=="):
+            # 2. Header re-occurrence detection:
+            # If musical notes have begun and a clef/key/meter header appears again,
+            # it is an unmistakable attention wrap-around to the start of the crop.
+            if has_music_started and is_header:
+                if any(line.startswith(h) for h in ("*clef", "*k[", "*M", "**kern")):
+                    break
+
+            # 3. Measure tracking for cyclic loop detection
+            if is_barline:
+                has_music_started = True
                 if current_measure:
                     m_tuple = tuple(current_measure)
                     if len(seen_measures) >= 2 and seen_measures[-1] == m_tuple and seen_measures[-2] == m_tuple:
@@ -257,9 +279,11 @@ class OMREngine:
                 current_measure.append(line)
             elif current_measure:
                 current_measure.append(line)
+            elif not is_header:
+                has_music_started = True
 
-            # 3. Line-level repeat suppression
-            if line.startswith("*") or line.startswith("!"):
+            # 4. Line-level repeat suppression
+            if is_header:
                 sanitized.append(line)
                 continue
 
