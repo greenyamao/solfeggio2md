@@ -138,11 +138,15 @@ class OMREngine:
             self._ensure_transcoda_loaded()
             pixel_values, image_sizes = self._collate_crops_batch(crops_bgr)
 
+            # Adaptive token limit bounded by widest crop in the batch
+            widest_crop_px = max(c.shape[1] for c in crops_bgr) if crops_bgr else 1000
+            effective_max_tokens = min(max_tokens, max(96, int(widest_crop_px * 0.45)))
+
             with torch.inference_mode():
                 out = self.transcoda_model.generate(
                     pixel_values=pixel_values,
                     image_sizes=image_sizes,
-                    max_length=max_tokens,
+                    max_length=effective_max_tokens,
                     do_sample=False,
                     num_beams=1,
                     repetition_penalty=1.1
@@ -151,8 +155,9 @@ class OMREngine:
             decoded_kerns = self.transcoda_tokenizer.batch_decode(out, skip_special_tokens=True)
             results = []
             for raw_k, tit in zip(decoded_kerns, titles):
+                clean_k = self._sanitize_runaway_kern(raw_k)
                 try:
-                    norm_k = self.bridge.normalize_humdrum(raw_k)
+                    norm_k = self.bridge.normalize_humdrum(clean_k)
                     abc_str = self.bridge.kern_to_abc(norm_k, title=tit)
                     results.append({
                         "abc": abc_str,
@@ -206,6 +211,42 @@ class OMREngine:
             "status": "error",
             "error": "Empty batch"
         }
+
+    @staticmethod
+    def _sanitize_runaway_kern(raw_kern: str, max_repeats: int = 5) -> str:
+        """
+        Detects and truncates degenerative runaway loops in Humdrum **kern generation
+        where identical tokens repeat endlessly.
+        """
+        if not raw_kern:
+            return raw_kern
+
+        lines = raw_kern.splitlines()
+        if len(lines) <= max_repeats:
+            return raw_kern
+
+        sanitized = []
+        repeat_count = 1
+        prev_line = None
+
+        for line in lines:
+            stripped = line.strip()
+            # Ignore comments and spine decorators for repeat counting
+            if stripped.startswith("*") or stripped.startswith("!"):
+                sanitized.append(line)
+                continue
+
+            if stripped == prev_line:
+                repeat_count += 1
+                if repeat_count > max_repeats:
+                    continue  # suppress runaway line repeat
+            else:
+                repeat_count = 1
+                prev_line = stripped
+
+            sanitized.append(line)
+
+        return "\n".join(sanitized)
 
     def purge_gpu_memory(self):
         """

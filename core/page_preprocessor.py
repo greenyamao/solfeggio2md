@@ -21,9 +21,9 @@ def detect_and_split_spread(img_bgr: np.ndarray, overlap_ratio: float = 0.005) -
     
     mid = w // 2
     
-    # Analyze central spine band: 46% to 54% of width
-    x1 = int(w * 0.46)
-    x2 = int(w * 0.54)
+    # Adaptive spine band: 38% to 62% of width (accommodates asymmetric spreads)
+    x1 = int(w * 0.38)
+    x2 = int(w * 0.62)
     if x2 <= x1 + 10:
         gutter_x = mid
     else:
@@ -42,8 +42,8 @@ def detect_and_split_spread(img_bgr: np.ndarray, overlap_ratio: float = 0.005) -
         else:
             gutter_x = mid
 
-    # Ensure gutter is reasonably close to middle
-    if abs(gutter_x - mid) > int(w * 0.04):
+    # Ensure gutter is within plausible spine zone (38% to 62%)
+    if gutter_x < int(w * 0.38) or gutter_x > int(w * 0.62):
         gutter_x = mid
         
     overlap_px = min(15, max(2, int(w * overlap_ratio)))

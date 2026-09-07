@@ -678,14 +678,18 @@ class PipelineBatchRunner:
 
                     for crop in crops_data:
                         crop_name = f"{crop['stub_id']}.png"
-                        cv2.imwrite(str(crops_dir / crop_name), crop["crop_img"])
+                        crop_path = crops_dir / crop_name
+                        if not crop_path.is_file() or overwrite:
+                            cv2.imwrite(str(crop_path), crop["crop_img"])
 
-                        # Normalize and dewarp staff for OMR
-                        dewarped_bgr, _, _ = normalize_staff_crop(
-                            crop["crop_img"], notation_class=crop.get("class", "staff")
-                        )
+                        # Normalize and dewarp staff for OMR (skip if already on disk)
                         deskew_name = f"{crop['stub_id']}_deskew.png"
-                        cv2.imwrite(str(crops_dir / deskew_name), dewarped_bgr)
+                        deskew_path = crops_dir / deskew_name
+                        if not deskew_path.is_file() or overwrite:
+                            dewarped_bgr, _, _ = normalize_staff_crop(
+                                crop["crop_img"], notation_class=crop.get("class", "staff")
+                            )
+                            cv2.imwrite(str(deskew_path), dewarped_bgr)
 
                     pages_done_count += 1
                     existing_valid_pages.add(bp)
@@ -887,7 +891,7 @@ class PipelineBatchRunner:
                     max_tokens=int(self.config.get("lm_max_tokens", 8192)),
                     context_length=int(self.config.get("qwen_context_length", 16196)),
                 )
-                raw_md_file.write_text(extracted_text, encoding="utf-8")
+                raw_md_file.write_text(self._sanitize_vlm_text(extracted_text), encoding="utf-8")
             except Exception as e:
                 fallback_txt = f"<!-- LM_STUDIO_ERROR: {str(e)} -->\n\n## Страница {int(p_num)}\n\n[Текст не распознан: ошибка связи с VLM]\n"
                 raw_md_file.write_text(fallback_txt, encoding="utf-8")
@@ -948,8 +952,11 @@ class PipelineBatchRunner:
         raw_files = sorted(raw_md_dir.glob("page_*_raw.md"))
         all_pages_content = []
 
+        injected_stubs = set()
+
         def inject_abc(match):
             cid = match.group(1).strip()
+            injected_stubs.add(cid)
             abc_file = crops_dir / f"{cid}.abc"
             if abc_file.is_file():
                 abc = abc_file.read_text(encoding="utf-8").strip()
@@ -962,15 +969,52 @@ class PipelineBatchRunner:
             final_file = final_dir / f"page_{p_num}.md"
 
             raw_text = r_file.read_text(encoding="utf-8")
-            final_text = re.sub(r"<!--\s*MUSIC_STUB_ID:\s*(.*?)\s*-->", inject_abc, raw_text)
-            final_file.write_text(final_text, encoding="utf-8")
+            raw_text = self._sanitize_vlm_text(raw_text)
 
+            # Check which stubs were expected for this page from crops_dir
+            page_stubs = []
+            if crops_dir.is_dir():
+                page_stubs = sorted([
+                    f.stem for f in crops_dir.glob(f"*_P{p_num}_S*.png")
+                    if not f.name.endswith("_deskew.png")
+                ])
+
+            injected_stubs.clear()
+            final_text = re.sub(r"<!--\s*MUSIC_STUB_ID:\s*(.*?)\s*-->", inject_abc, raw_text)
+
+            # Fallback recovery: if any stubs were omitted by VLM, append them cleanly to the bottom
+            missing_stubs = [s for s in page_stubs if s not in injected_stubs]
+            if missing_stubs:
+                recovered_blocks = []
+                for ms in missing_stubs:
+                    abc_file = crops_dir / f"{ms}.abc"
+                    if abc_file.is_file():
+                        abc = abc_file.read_text(encoding="utf-8").strip()
+                        recovered_blocks.append(f"\n\n```abc\n{abc}\n```\n")
+                if recovered_blocks:
+                    final_text += "\n\n<!-- RECOVERED_MUSIC_STUBS -->\n" + "\n".join(recovered_blocks)
+
+            final_file.write_text(final_text, encoding="utf-8")
             all_pages_content.append(f"<!-- PAGE {p_num} -->\n" + final_text)
 
         full_content = "\n\n---\n\n".join(all_pages_content)
         complete_book_file.write_text(full_content, encoding="utf-8")
         chk["phases"]["assembly"]["completed"] = True
         return True
+
+    @staticmethod
+    def _sanitize_vlm_text(text: str) -> str:
+        """
+        Sanitizes VLM text output:
+        1. Fixes HTML entity escapes for stub tags: &lt;!-- MUSIC_STUB_ID:... --&gt; -> <!-- MUSIC_STUB_ID:... -->
+        2. Fixes stray backticks around stub tags: `<!-- MUSIC_STUB_ID:... -->` -> <!-- MUSIC_STUB_ID:... -->
+        """
+        if not text:
+            return text
+        text = re.sub(r"&lt;!--\s*MUSIC_STUB_ID:([^\s>]+)\s*--&gt;", r"<!-- MUSIC_STUB_ID:\1 -->", text, flags=re.IGNORECASE)
+        text = re.sub(r"<!--\s*MUSIC_STUB_ID:([^\s>]+)\s*-->", r"<!-- MUSIC_STUB_ID:\1 -->", text)
+        text = re.sub(r"`\s*(<!--\s*MUSIC_STUB_ID:[^\s>]+?\s*-->)\s*`", r"\1", text)
+        return text
 
     # ---------------- Purge VRAM Barrier ---------------- #
 
