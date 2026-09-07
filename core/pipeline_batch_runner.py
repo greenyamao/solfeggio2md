@@ -241,11 +241,12 @@ class PipelineBatchRunner:
             return
 
         pages_count = 0
-        try:
-            with fitz.open(p) as doc:
-                pages_count = len(doc)
-        except Exception:
-            pages_count = 0
+        if p.stat().st_size >= 100:
+            try:
+                with fitz.open(p) as doc:
+                    pages_count = len(doc)
+            except Exception:
+                pages_count = 0
 
         # Check existing checkpoint without creating empty directories
         book_title = p.stem

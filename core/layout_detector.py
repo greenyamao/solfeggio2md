@@ -337,8 +337,8 @@ class LayoutDetector:
             imgsz = min(max_cap, max(1024, target_sz))
 
         # Inference with Ultralytics YOLO (FP16 enabled on CUDA, disabled on CPU)
-        # Use conf=0.15 to capture fainter measures and staves, filtered by is_valid_music_staff
-        effective_conf = min(self.conf_threshold, 0.15)
+        # Use conf=0.10 to capture fainter measures and staves, filtered by is_valid_music_staff
+        effective_conf = min(self.conf_threshold, 0.10)
         precision_kwargs = self._get_precision_kwargs(is_cuda)
         results = self.model.predict(
             source=img_bgr,
@@ -365,7 +365,8 @@ class LayoutDetector:
                 })
 
         # Process all 5 YOLO classes:
-        # Normalize classes and extend each detection along authentic continuous horizontal staff lines
+        # Extend each detection along authentic continuous horizontal staff lines
+        # Classify candidates strictly by physical staff height
         raw_grand = []
         raw_staves = []
         raw_systems = []
@@ -373,6 +374,12 @@ class LayoutDetector:
         for d in raw_detections:
             cls_name = d["class"].lower().replace(" ", "_")
             traced_box = self.trace_staff_horizontal_extent(gray, d["box"])
+            bh = traced_box[3] - traced_box[1]
+
+            # Discard spurious measure boxes that bridge across multiple systems
+            if "measure" in cls_name and bh > 170 and d["confidence"] < 0.85:
+                continue
+
             d_traced = {
                 "class": cls_name,
                 "confidence": d["confidence"],
@@ -380,16 +387,22 @@ class LayoutDetector:
             }
 
             if cls_name in ("grand_staff", "grandstaff"):
-                d_traced["class"] = "grand_staff"
-                raw_grand.append(d_traced)
+                if bh > 175:
+                    d_traced["class"] = "system"
+                    raw_systems.append(d_traced)
+                else:
+                    d_traced["class"] = "grand_staff"
+                    raw_grand.append(d_traced)
             elif cls_name in ("systems", "system", "system_measures"):
-                h = traced_box[3] - traced_box[1]
-                if h >= 70:
+                if bh >= 175:
+                    d_traced["class"] = "system"
+                    raw_systems.append(d_traced)
+                elif bh >= 70:
                     d_traced["class"] = "grand_staff"
                     raw_grand.append(d_traced)
                 else:
-                    d_traced["class"] = "system"
-                    raw_systems.append(d_traced)
+                    d_traced["class"] = "staff"
+                    raw_staves.append(d_traced)
             elif cls_name in ("staves", "staff", "stave_measures"):
                 d_traced["class"] = "staff"
                 raw_staves.append(d_traced)
@@ -400,110 +413,74 @@ class LayoutDetector:
         merge_boxes = self.merge_boxes
         heal_collinear_segments = lambda dets, **kw: self.heal_collinear_segments(dets, img_w=img_w, **kw)
 
-        # 1. Process grand_staff (highest priority: piano 2-staff systems)
+        # 1. Process grand_staff (piano 2-staff systems)
         accepted_grand = heal_collinear_segments(raw_grand)
         for g in accepted_grand:
             g["class"] = "grand_staff"
 
-        # 2. Process staves: remove any staff that falls inside a grand_staff
-        staves_outside_grand = []
-        for s in raw_staves:
-            inside_grand = False
-            for g in accepted_grand:
-                v_ratio = vertical_overlap_ratio(s["box"], g["box"])
-                h_rel = horizontal_overlap_or_gap(s["box"], g["box"])
-                if v_ratio > 0.60 and h_rel > 0:
-                    inside_grand = True
-                    break
-            if not inside_grand:
-                staves_outside_grand.append(s)
+        # 2. Process systems (multi-staff orchestral/chamber scores)
+        accepted_systems = heal_collinear_segments(raw_systems)
+        for sys_b in accepted_systems:
+            sys_b["class"] = "system"
 
-        accepted_staves = heal_collinear_segments(staves_outside_grand)
+        # 3. Process staves: remove any staff that falls inside a grand_staff or system
+        staves_outside = []
+        for s in raw_staves:
+            inside = False
+            for g in accepted_grand:
+                if vertical_overlap_ratio(s["box"], g["box"]) > 0.60 and horizontal_overlap_or_gap(s["box"], g["box"]) > 0:
+                    inside = True
+                    break
+            if not inside:
+                for sys_b in accepted_systems:
+                    if vertical_overlap_ratio(s["box"], sys_b["box"]) > 0.60 and horizontal_overlap_or_gap(s["box"], sys_b["box"]) > 0:
+                        inside = True
+                        break
+            if not inside:
+                staves_outside.append(s)
+
+        accepted_staves = heal_collinear_segments(staves_outside)
         for s in accepted_staves:
             s["class"] = "staff"
 
-        # 3. Process systems:
-        # Disambiguate between multi-staff ensemble scores and single-staff melodies
-        accepted_systems = []
-        for sys_det in raw_systems:
-            if any(vertical_overlap_ratio(sys_det["box"], g["box"]) > 0.60 and horizontal_overlap_or_gap(sys_det["box"], g["box"]) > 0 for g in accepted_grand):
-                continue
-            collides_with_staff = False
-            for st in accepted_staves:
-                if vertical_overlap_ratio(sys_det["box"], st["box"]) > 0.60 and horizontal_overlap_or_gap(sys_det["box"], st["box"]) > 0:
-                    collides_with_staff = True
-                    break
-            if not collides_with_staff:
-                sys_h = sys_det["box"][3] - sys_det["box"][1]
-                sys_w = sys_det["box"][2] - sys_det["box"][0]
-                # Scale-adaptive single-staff identification:
-                if sys_h < int(img_h * 0.06) or (sys_w / max(1, sys_h)) >= 6.5:
-                    accepted_staves.append({
-                        "class": "staff",
-                        "confidence": sys_det["confidence"],
-                        "box": sys_det["box"]
-                    })
-                else:
-                    accepted_systems.append({
-                        "class": "system",
-                        "confidence": sys_det["confidence"],
-                        "box": sys_det["box"]
-                    })
-
-        # Final re-heal staves just in case an unclassified system merged with a staff
-        accepted_staves = heal_collinear_segments(accepted_staves)
-        accepted_systems = heal_collinear_segments(accepted_systems)
-
-        selected_candidates = accepted_grand + accepted_staves + accepted_systems
-
-        # Physical staff line verification (filters analysis brackets, slurs, divider lines)
-        valid_candidates = []
-        for cand in selected_candidates:
-            x1, y1, x2, y2 = cand["box"]
-            patch = img_bgr[y1:y2, x1:x2]
-            if is_valid_music_staff(patch, cand["class"], cand["confidence"]):
-                valid_candidates.append(cand)
-
-        # 4. Grand staff consolidation: merge vertically adjacent single staves that share the same horizontal span
-        valid_candidates.sort(key=lambda item: item["box"][1])
-        consolidated = []
+        # 4. Consolidate vertically adjacent single staves that share the same horizontal span into grand_staff
+        all_staves = sorted(accepted_staves, key=lambda item: item["box"][1])
+        consolidated_staves = []
         skip_indices = set()
-        for i in range(len(valid_candidates)):
+        for i in range(len(all_staves)):
             if i in skip_indices:
                 continue
-            c1 = valid_candidates[i]
+            c1 = all_staves[i]
             merged_as_grand = False
-            if c1["class"] == "staff" and i + 1 < len(valid_candidates):
-                c2 = valid_candidates[i + 1]
-                if c2["class"] == "staff":
-                    x1_max = max(c1["box"][0], c2["box"][0])
-                    x2_min = min(c1["box"][2], c2["box"][2])
-                    w1 = c1["box"][2] - c1["box"][0]
-                    w2 = c2["box"][2] - c2["box"][0]
-                    h_overlap = (x2_min - x1_max) / float(min(w1, w2)) if x2_min > x1_max else 0.0
-                    v_gap = c2["box"][1] - c1["box"][3]
-                    h1 = c1["box"][3] - c1["box"][1]
-                    h2 = c2["box"][3] - c2["box"][1]
-                    avg_h = (h1 + h2) / 2.0
-                    # In piano music, gap between treble and bass is 0.5 to 2.5 staff heights
-                    if h_overlap >= 0.70 and 0 <= v_gap <= int(avg_h * 2.5):
-                        merged_box = [
-                            min(c1["box"][0], c2["box"][0]),
-                            c1["box"][1],
-                            max(c1["box"][2], c2["box"][2]),
-                            c2["box"][3]
-                        ]
-                        consolidated.append({
-                            "class": "grand_staff",
-                            "confidence": max(c1["confidence"], c2["confidence"]),
-                            "box": merged_box
-                        })
-                        skip_indices.add(i + 1)
-                        merged_as_grand = True
-            if not merged_as_grand:
-                consolidated.append(c1)
+            if i + 1 < len(all_staves):
+                c2 = all_staves[i + 1]
+                x1_max = max(c1["box"][0], c2["box"][0])
+                x2_min = min(c1["box"][2], c2["box"][2])
+                w1 = c1["box"][2] - c1["box"][0]
+                w2 = c2["box"][2] - c2["box"][0]
+                h_overlap = (x2_min - x1_max) / float(min(w1, w2)) if x2_min > x1_max else 0.0
+                v_gap = c2["box"][1] - c1["box"][3]
+                total_h = c2["box"][3] - c1["box"][1]
 
-        selected_candidates = consolidated
+                # Piano grand staff constraint: gap <= 55 px, total height <= 170 px
+                if h_overlap >= 0.70 and 0 <= v_gap <= 55 and total_h <= 170:
+                    merged_box = [
+                        min(c1["box"][0], c2["box"][0]),
+                        c1["box"][1],
+                        max(c1["box"][2], c2["box"][2]),
+                        c2["box"][3]
+                    ]
+                    accepted_grand.append({
+                        "class": "grand_staff",
+                        "confidence": max(c1["confidence"], c2["confidence"]),
+                        "box": merged_box
+                    })
+                    skip_indices.add(i + 1)
+                    merged_as_grand = True
+            if not merged_as_grand:
+                consolidated_staves.append(c1)
+
+        selected_candidates = accepted_grand + consolidated_staves + accepted_systems
 
         # Physical staff line verification (filters analysis brackets, slurs, divider lines)
         valid_candidates = []
@@ -521,24 +498,25 @@ class LayoutDetector:
                 if i != j:
                     v_ratio = vertical_overlap_ratio(c1["box"], c2["box"])
                     h_rel = horizontal_overlap_or_gap(c1["box"], c2["box"])
-                    if v_ratio > 0.40 and h_rel > 0:
-                        w1 = c1["box"][2] - c1["box"][0]
-                        w2 = c2["box"][2] - c2["box"][0]
-                        h_overlap_ratio = h_rel / float(min(w1, w2))
-                        if h_overlap_ratio > 0.60:
-                            if c2["confidence"] > c1["confidence"] + 0.05:
+                    if v_ratio > 0.35 and h_rel > 0:
+                        # If a noisy system overlaps with a genuine grand staff, suppress the system
+                        if c1["class"] == "system" and c2["class"] == "grand_staff":
+                            if c1["confidence"] < 0.70:
                                 suppress = True
                                 break
-                            elif abs(c2["confidence"] - c1["confidence"]) <= 0.05 and (w2 * (c2["box"][3] - c2["box"][1])) > (w1 * (c1["box"][3] - c1["box"][1])):
+                        elif c2["confidence"] > c1["confidence"] + 0.10:
+                            suppress = True
+                            break
+                        elif abs(c2["confidence"] - c1["confidence"]) <= 0.10:
+                            w1 = c1["box"][2] - c1["box"][0]
+                            w2 = c2["box"][2] - c2["box"][0]
+                            if (w2 * (c2["box"][3] - c2["box"][1])) > (w1 * (c1["box"][3] - c1["box"][1])):
                                 suppress = True
                                 break
             if not suppress:
                 deduped.append(c1)
 
         selected_candidates = deduped
-
-        # Convert to grayscale for ink analysis
-        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
 
         # Sort candidates top-to-bottom by raw y1
         selected_candidates.sort(key=lambda item: item["box"][1])
@@ -556,83 +534,41 @@ class LayoutDetector:
             cand_crop = img_bgr[y1:y2, x1:x2]
             s_est, _ = estimate_staff_spacing(cand_crop, cls_name)
 
-            # Horizontal expansion proportional to staff space
-            if cls_name == "grand_staff":
-                pad_l = max(int(s_est * 4.5), int(bw * 0.04))
-                pad_r = max(int(s_est * 2.5), int(bw * 0.02))
+            # Snap to outermost authentic horizontal staff lines
+            strip = gray[y1:y2, x1:x2]
+            if strip.size > 0:
+                bg_val = float(np.percentile(strip, 90))
+                k_line = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 1))
+                strip_bin = (strip < bg_val - 40).astype(np.uint8) * 255
+                strip_lines = cv2.morphologyEx(strip_bin, cv2.MORPH_OPEN, k_line)
+                row_ink = np.sum(strip_lines > 0, axis=1)
+                line_rows = np.where(row_ink > int(bw * 0.15))[0]
+                if len(line_rows) > 0:
+                    top_staff_y = y1 + int(line_rows[0])
+                    bot_staff_y = y1 + int(line_rows[-1])
+                else:
+                    top_staff_y = y1
+                    bot_staff_y = y2
             else:
-                pad_l = max(int(s_est * 3.5), int(bw * 0.03))
-                pad_r = max(int(s_est * 2.5), int(bw * 0.02))
+                top_staff_y = y1
+                bot_staff_y = y2
 
-            px1 = max(0, x1 - pad_l)
-            px2 = min(img_w, x2 + pad_r)
+            # Bounded padding: capture ledger lines, note stems, dynamics, while preserving text headings
+            pad_y = int(min(24, max(10, s_est * 1.5)))
+            pad_x = int(min(35, max(12, s_est * 2.0)))
 
-            # Vertical expansion via ink profile
-            staff_strip = gray[y1:y2, x1:x2]
-            bg_val = float(np.percentile(staff_strip, 90)) if staff_strip.size > 0 else 250.0
-            ink_thresh = bg_val - 45.0
+            px1 = max(0, x1 - pad_x)
+            px2 = min(img_w, x2 + pad_x)
 
-            inside_ink = np.sum(gray[y1:y2, px1:px2] < ink_thresh, axis=1)
-            median_inside_ink = float(np.median(inside_ink)) if len(inside_ink) > 0 else 100.0
-            noise_thresh = max(2, int(median_inside_ink * 0.02))
+            prev_y2 = filtered[-1]["padded_box"][3] if filtered else None
+            py1 = max(0, top_staff_y - pad_y)
+            if prev_y2 is not None and prev_y2 < top_staff_y:
+                py1 = max(py1, prev_y2 + 4)
 
-            # Upward expansion limit: don't cross midpoint to previous candidate
-            prev_y2 = selected_candidates[idx_cand - 1]["box"][3] if idx_cand > 0 else None
-            max_up = int(s_est * 5.0)
-            if prev_y2 is not None and prev_y2 < y1:
-                avail_up = max(int(s_est * 0.6), (y1 - prev_y2) // 2)
-                max_up = min(max_up, avail_up)
-            max_up = min(max_up, y1)
-
-            zero_run_thresh = max(3, int(s_est * 0.75))
-            zero_run_up = 0
-            best_up = 0
-            for dy in range(1, max_up + 1):
-                y_curr = y1 - dy
-                row = gray[y_curr, px1:px2]
-                cnt = int(np.sum(row < ink_thresh))
-                if cnt > noise_thresh:
-                    best_up = dy
-                    zero_run_up = 0
-                else:
-                    zero_run_up += 1
-                    if zero_run_up >= zero_run_thresh:
-                        break
-
-            # Place top margin safely in whitespace
-            pad_t = max(int(s_est * 1.8), best_up + int(s_est * 0.8))
-            if prev_y2 is not None and prev_y2 < y1:
-                pad_t = min(pad_t, max(int(s_est * 0.5), y1 - prev_y2 - int(s_est * 0.5)))
-            pad_t = min(pad_t, y1)
-            py1 = y1 - pad_t
-
-            # Downward expansion limit: don't cross midpoint to next candidate
             next_y1 = selected_candidates[idx_cand + 1]["box"][1] if idx_cand + 1 < num_cands else None
-            max_down = int(s_est * 5.0)
-            if next_y1 is not None and next_y1 > y2:
-                avail_down = max(int(s_est * 0.6), (next_y1 - y2) // 2)
-                max_down = min(max_down, avail_down)
-            max_down = min(max_down, img_h - y2)
-
-            zero_run_down = 0
-            best_down = 0
-            for dy in range(1, max_down + 1):
-                y_curr = y2 + dy
-                row = gray[y_curr, px1:px2]
-                cnt = int(np.sum(row < ink_thresh))
-                if cnt > noise_thresh:
-                    best_down = dy
-                    zero_run_down = 0
-                else:
-                    zero_run_down += 1
-                    if zero_run_down >= zero_run_thresh:
-                        break
-
-            pad_b = max(int(s_est * 1.8), best_down + int(s_est * 0.8))
-            if next_y1 is not None and next_y1 > y2:
-                pad_b = min(pad_b, max(int(s_est * 0.5), next_y1 - y2 - int(s_est * 0.5)))
-            pad_b = min(pad_b, img_h - y2)
-            py2 = y2 + pad_b
+            py2 = min(img_h, bot_staff_y + pad_y)
+            if next_y1 is not None and next_y1 > bot_staff_y:
+                py2 = min(py2, next_y1 - 4)
 
             filtered.append({
                 "class": cls_name,
