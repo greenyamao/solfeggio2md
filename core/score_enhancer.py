@@ -387,8 +387,13 @@ class ScoreEnhancer:
         bg = F.avg_pool2d(bg, kernel_size=21, stride=1, padding=10)
         return torch.clamp(tensor_bgr / (bg + 1e-5), 0.0, 1.0)
 
+    _cached_cugan_models: dict = {}
+
     def _ensure_cugan_loaded(self) -> None:
         if self.cugan_model is None and self.enable_cugan:
+            if self.device in ScoreEnhancer._cached_cugan_models:
+                self.cugan_model = ScoreEnhancer._cached_cugan_models[self.device]
+                return
             try:
                 from huggingface_hub import hf_hub_download
                 from safetensors.torch import load_file
@@ -403,6 +408,7 @@ class ScoreEnhancer:
                 model = UpCunet2x(in_channels=3, out_channels=3)
                 model.load_state_dict(weights)
                 self.cugan_model = model.to(device=self.device, dtype=load_dtype).eval()
+                ScoreEnhancer._cached_cugan_models[self.device] = self.cugan_model
             except Exception as e:
                 # Graceful degradation if offline or safetensors missing
                 self.cugan_model = None
@@ -413,30 +419,32 @@ class ScoreEnhancer:
         run_sr: bool = True
     ) -> np.ndarray:
         """
-        Enhances a music staff crop:
-        1. Fast GPU background division (whitening, bleed-through removal).
-        2. Optional Real-CUGAN 2x stroke restoration.
+        Enhances crop:
+        1. Pure GPU background division (removes paper yellowing / verso bleed-through).
+        2. Real-CUGAN 2x Conservative line-art super-resolution (heals broken lines, sharpens stems).
         """
         if not isinstance(crop_bgr, np.ndarray) or crop_bgr.size == 0:
             return crop_bgr
 
-        # Step 1: Classical GPU Background Division
+        # Step 1: GPU Background division
         clean_bgr = self.gpu_background_division(crop_bgr, kernel_size=31, device=self.device)
 
-        if not run_sr or not self.enable_cugan or self.device != "cuda":
+        if not run_sr or not self.enable_cugan:
             return clean_bgr
 
-        # Step 2: Real-CUGAN 2x Super-Resolution (Pure GPU CUDA)
+        # Step 2: Real-CUGAN 2x Super-Resolution
         self._ensure_cugan_loaded()
         if self.cugan_model is None:
             return clean_bgr
 
         try:
-            dtype = torch.float16 if self.device == "cuda" else torch.float32
-            t_in = (
-                torch.from_numpy(clean_bgr).permute(2, 0, 1).unsqueeze(0).to(device=self.device, dtype=dtype)
-                / 255.0
-            )
+            # Scale image to 2x using UpCunet2x
+            h, w = clean_bgr.shape[:2]
+            t_dtype = torch.float16 if self.device == "cuda" else torch.float32
+            
+            # Normalize to [0, 1] range float tensor (1, C, H, W)
+            t_in = torch.from_numpy(clean_bgr).permute(2, 0, 1).unsqueeze(0).to(device=self.device, dtype=t_dtype) / 255.0
+            
             with torch.inference_mode():
                 out_sr = self.cugan_model(t_in, 0)
                 
@@ -450,6 +458,7 @@ class ScoreEnhancer:
         """
         Unloads Real-CUGAN from VRAM and triggers full CUDA garbage collection.
         """
+        ScoreEnhancer._cached_cugan_models.clear()
         if self.cugan_model is not None:
             del self.cugan_model
             self.cugan_model = None

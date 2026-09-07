@@ -692,17 +692,30 @@ class PipelineBatchRunner:
         valid_batch_files = []
 
         for cf in batch_files:
-            deskew_file = crops_dir / f"{cf.stem}_deskew.png"
-            crop_path_to_read = deskew_file if deskew_file.is_file() else cf
-            crop_bgr = cv2.imread(str(crop_path_to_read))
-            if crop_bgr is None:
-                continue
-
             cls_name = "staff"
             if "grand_staff" in cf.stem:
                 cls_name = "grand_staff"
             elif "system" in cf.stem:
                 cls_name = "system"
+
+            deskew_file = crops_dir / f"{cf.stem}_deskew.png"
+            if deskew_file.is_file():
+                crop_bgr = cv2.imread(str(deskew_file))
+            else:
+                raw_crop = cv2.imread(str(cf))
+                if raw_crop is not None:
+                    dewarped_bgr, _, _ = normalize_staff_crop(
+                        raw_crop,
+                        notation_class=cls_name,
+                        enhance_sr=False
+                    )
+                    cv2.imwrite(str(deskew_file), dewarped_bgr)
+                    crop_bgr = dewarped_bgr
+                else:
+                    crop_bgr = None
+
+            if crop_bgr is None:
+                continue
 
             batch_crops_bgr.append(crop_bgr)
             batch_classes.append(cls_name)
@@ -905,16 +918,6 @@ class PipelineBatchRunner:
                                 crop_path = crops_dir / crop_name
                                 if not crop_path.is_file() or overwrite:
                                     cv2.imwrite(str(crop_path), crop["crop_img"])
-
-                                deskew_name = f"{crop['stub_id']}_deskew.png"
-                                deskew_path = crops_dir / deskew_name
-                                if not deskew_path.is_file() or overwrite:
-                                    dewarped_bgr, _, _ = normalize_staff_crop(
-                                        crop["crop_img"],
-                                        notation_class=crop.get("class", "staff"),
-                                        enhance_sr=self.config.get("enable_cugan_sr", True)
-                                    )
-                                    cv2.imwrite(str(deskew_path), dewarped_bgr)
 
                                 if overwrite or crop["stub_id"] not in existing_valid_abcs:
                                     new_crops_to_enqueue.append(crop_path)
@@ -1188,17 +1191,6 @@ class PipelineBatchRunner:
                         crop_path = crops_dir / crop_name
                         if not crop_path.is_file() or overwrite:
                             cv2.imwrite(str(crop_path), crop["crop_img"])
-
-                        # Normalize, dewarp, and 2x super-resolve staff for OMR (skip if already on disk)
-                        deskew_name = f"{crop['stub_id']}_deskew.png"
-                        deskew_path = crops_dir / deskew_name
-                        if not deskew_path.is_file() or overwrite:
-                            dewarped_bgr, _, _ = normalize_staff_crop(
-                                crop["crop_img"],
-                                notation_class=crop.get("class", "staff"),
-                                enhance_sr=self.config.get("enable_cugan_sr", True)
-                            )
-                            cv2.imwrite(str(deskew_path), dewarped_bgr)
 
                     pages_done_count += 1
                     existing_valid_pages.add(bp)
