@@ -20,7 +20,6 @@ def detect_and_split_spread(img_bgr: np.ndarray, overlap_ratio: float = 0.005) -
         return [(img_bgr, "single")]
     
     mid = w // 2
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     
     # Analyze central spine band: 46% to 54% of width
     x1 = int(w * 0.46)
@@ -28,9 +27,9 @@ def detect_and_split_spread(img_bgr: np.ndarray, overlap_ratio: float = 0.005) -
     if x2 <= x1 + 10:
         gutter_x = mid
     else:
-        strip = gray[:, x1:x2]
-        ink = (strip < 220).astype(np.float32)
-        col_ink = np.mean(ink, axis=0)  # fraction of ink per column
+        strip_bgr = img_bgr[:, x1:x2]
+        strip = cv2.cvtColor(strip_bgr, cv2.COLOR_BGR2GRAY)
+        col_ink = (np.count_nonzero(strip < 220, axis=0) / float(max(1, h))).astype(np.float32)
         col_ink_s = cv2.GaussianBlur(col_ink.reshape(1, -1), (15, 1), 0).flatten()
         min_ink = float(np.min(col_ink_s))
         
@@ -64,7 +63,12 @@ def estimate_skew_fourier(gray_img: np.ndarray) -> float:
     """
     try:
         from jdeskew.estimator import get_angle
-        return float(get_angle(gray_img))
+        try:
+            if gray_img.shape[0] > 1024:
+                return float(get_angle(gray_img, vertical_image_shape=1024))
+            return float(get_angle(gray_img))
+        except TypeError:
+            return float(get_angle(gray_img))
     except ImportError:
         pass
 
@@ -219,7 +223,12 @@ def normalize_staff_crop(crop_bgr: np.ndarray, notation_class: str = "staff") ->
     # 1. 2D-DFT Rotational Deskew Angle
     try:
         from jdeskew.estimator import get_angle
-        raw_angle = float(get_angle(gray))
+        if w_orig > 600:
+            scale_factor = 600.0 / float(w_orig)
+            scaled_gray = cv2.resize(gray, (600, max(1, int(round(h_orig * scale_factor)))), interpolation=cv2.INTER_AREA)
+        else:
+            scaled_gray = gray
+        raw_angle = float(get_angle(scaled_gray))
         if abs(raw_angle) > 35.0:
             tilt_deg = 0.0
         else:

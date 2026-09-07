@@ -272,7 +272,14 @@ def main():
         daemon=True
     )
     server_thread.start()
-    time.sleep(0.4)
+
+    # Fast port readiness check (ready in <10ms instead of artificial 400ms block)
+    import socket
+    for _ in range(40):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            if s.connect_ex(('127.0.0.1', port)) == 0:
+                break
+        time.sleep(0.01)
 
     server_url = f"http://127.0.0.1:{port}"
     print(f"============================================================")
@@ -297,9 +304,9 @@ def main():
         print(f"Falling back to system browser: {server_url}")
         import webbrowser
         webbrowser.open(server_url)
+        stop_event = threading.Event()
         try:
-            while True:
-                time.sleep(1)
+            stop_event.wait()
         except KeyboardInterrupt:
             print("Shutting down.")
 

@@ -434,7 +434,7 @@ class PipelineBatchRunner:
 
     def _check_pause(self) -> None:
         while not self._pause_event.is_set() and not self._stop_event.is_set():
-            time.sleep(0.3)
+            self._pause_event.wait(timeout=0.2)
 
     # ---------------- 4-Phase Book Processing ---------------- #
 
@@ -504,6 +504,9 @@ class PipelineBatchRunner:
                 return False
             chk["phases"]["slicing"]["completed"] = True
             self._write_checkpoint(book_title, chk)
+
+        # ---------------- Inter-phase Memory Purge Barrier ---------------- #
+        self._purge_vram()
 
         # ---------------- Phase 2: OMR Music Recognition ---------------- #
         if not chk["phases"]["omr"]["completed"] or overwrite:
@@ -609,7 +612,7 @@ class PipelineBatchRunner:
                     continue
 
                 page = doc[s_idx]
-                pix = page.get_pixmap(dpi=dpi)
+                pix = page.get_pixmap(dpi=dpi, alpha=False)
                 img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
                 img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR if pix.n == 4 else cv2.COLOR_RGB2BGR)
                 del pix
@@ -731,43 +734,71 @@ class PipelineBatchRunner:
             device = "cuda" if torch.cuda.is_available() else "cpu"
             self.omr_engine = OMREngine(device=device)
 
-        crops_done_count = len(existing_valid_abcs)
+        pending_crops = []
+        for crop_file in crop_files:
+            if overwrite or crop_file.stem not in existing_valid_abcs:
+                pending_crops.append(crop_file)
 
-        for c_idx, crop_file in enumerate(crop_files, start=1):
+        crops_done_count = len(existing_valid_abcs)
+        batch_size = 4  # Balanced mini-batch size for optimal Tensor Core saturation and low VRAM
+
+        for b_start in range(0, len(pending_crops), batch_size):
             if self._stop_event.is_set():
                 return False
             self._check_pause()
 
-            abc_file = crops_dir / f"{crop_file.stem}.abc"
-            if not overwrite and crop_file.stem in existing_valid_abcs:
+            batch_files = pending_crops[b_start:b_start + batch_size]
+            batch_crops_bgr = []
+            batch_classes = []
+            batch_titles = []
+            valid_batch_files = []
+
+            for cf in batch_files:
+                deskew_file = crops_dir / f"{cf.stem}_deskew.png"
+                crop_path_to_read = deskew_file if deskew_file.is_file() else cf
+                crop_bgr = cv2.imread(str(crop_path_to_read))
+                if crop_bgr is None:
+                    continue
+
+                cls_name = "staff"
+                if "grand_staff" in cf.stem:
+                    cls_name = "grand_staff"
+                elif "system" in cf.stem:
+                    cls_name = "system"
+
+                batch_crops_bgr.append(crop_bgr)
+                batch_classes.append(cls_name)
+                batch_titles.append(cf.stem)
+                valid_batch_files.append(cf)
+
+            if not batch_crops_bgr:
                 continue
 
-            deskew_file = crops_dir / f"{crop_file.stem}_deskew.png"
-            crop_path_to_read = deskew_file if deskew_file.is_file() else crop_file
-            crop_bgr = cv2.imread(str(crop_path_to_read))
-            if crop_bgr is None:
-                continue
+            results = self.omr_engine.transcribe_crops_batch(
+                crops_bgr=batch_crops_bgr,
+                notation_classes=batch_classes,
+                titles=batch_titles
+            )
 
-            cls_name = "staff"
-            if "grand_staff" in crop_file.stem:
-                cls_name = "grand_staff"
-            elif "system" in crop_file.stem:
-                cls_name = "system"
+            for cf, res in zip(valid_batch_files, results):
+                abc_content = res.get("abc", "")
+                if abc_content:
+                    abc_file = crops_dir / f"{cf.stem}.abc"
+                    abc_file.write_text(abc_content, encoding="utf-8")
+                crops_done_count += 1
 
-            res = self.omr_engine.transcribe_crop(crop_bgr, notation_class=cls_name, title=crop_file.stem)
-            abc_content = res.get("abc", "")
-            if abc_content:
-                abc_file.write_text(abc_content, encoding="utf-8")
-
-            crops_done_count += 1
+            # Update checkpoint and HUD once per batch (instead of per single crop)
             chk["phases"]["omr"]["crops_done"] = crops_done_count
             self._write_checkpoint(crops_dir.parent.name, chk)
 
-            pct = 25.0 + (c_idx / total_crops) * 25.0
+            curr_idx = min(total_crops, len(existing_valid_abcs) + b_start + len(valid_batch_files))
+            pct = 25.0 + (curr_idx / max(1, total_crops)) * 25.0
+            last_cls = batch_classes[-1] if batch_classes else "staff"
+            last_model = results[-1].get("model_used", "OMR") if results else "OMR"
             self._update_hud(
                 "Фаза 2/4: Распознавание нот (OMR)",
                 pct,
-                f"Стан {c_idx}/{total_crops} ({cls_name}) • {res.get('model_used', 'OMR')}",
+                f"Стан {curr_idx}/{total_crops} ({last_cls}) • {last_model} [batch={len(valid_batch_files)}]",
             )
 
         chk["phases"]["omr"]["completed"] = True
@@ -952,12 +983,24 @@ class PipelineBatchRunner:
             self.omr_engine = None
 
         if self.layout_detector is not None:
+            try:
+                if hasattr(self.layout_detector, "purge_gpu_memory"):
+                    self.layout_detector.purge_gpu_memory()
+            except Exception:
+                pass
             self.layout_detector = None
 
         gc.collect()
         if torch.cuda.is_available():
             try:
+                torch.cuda.synchronize()
+            except Exception:
+                pass
+            try:
                 torch.cuda.empty_cache()
+            except Exception:
+                pass
+            try:
                 torch.cuda.ipc_collect()
             except Exception:
                 pass

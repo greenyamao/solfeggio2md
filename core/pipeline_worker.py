@@ -114,7 +114,7 @@ class PipelineWorker:
                 if p_num > len(doc) or p_num < 1:
                     return False
                 page = doc[p_num - 1]
-                pix = page.get_pixmap(dpi=200)
+                pix = page.get_pixmap(dpi=200, alpha=False)
                 img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
                 img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR if pix.n == 4 else cv2.COLOR_RGB2BGR)
 
@@ -167,7 +167,7 @@ class PipelineWorker:
                         dewarped_bgr, tilt_deg, bend_px = normalize_staff_crop(cf_bgr, notation_class=cls_name)
                         cv2.imwrite(str(deskew_file), dewarped_bgr)
                     else:
-                        _, tilt_deg, bend_px = normalize_staff_crop(cf_bgr, notation_class=cls_name)
+                        tilt_deg, bend_px = 0.0, 0.0
                 else:
                     h_c, w_c, tilt_deg, bend_px = 60, 1000, 0.0, 0.0
 
