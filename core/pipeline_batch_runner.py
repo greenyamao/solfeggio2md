@@ -26,7 +26,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from core.lmstudio_client import LMStudioClient
-from core.page_preprocessor import PagePreprocessor, deskew_page, normalize_staff_crop
+from core.page_preprocessor import PagePreprocessor, deskew_page, normalize_staff_crop, detect_and_split_spread
 from core.layout_detector import LayoutDetector
 from core.book_section_filter import BookSectionFilter
 
@@ -463,11 +463,16 @@ class PipelineBatchRunner:
 
         # Physical disk inspection: sync checkpoint with actual files on disk
         if not overwrite:
-            try:
-                with fitz.open(pdf_path) as doc:
-                    tot_p = len(doc)
-            except Exception:
-                tot_p = chk["phases"]["slicing"].get("total_pages", 0)
+            tot_p = chk["phases"]["slicing"].get("total_pages", 0)
+            if tot_p == 0:
+                try:
+                    with fitz.open(pdf_path) as doc:
+                        tot_p = sum(
+                            2 if (1.22 <= (p.rect.width / float(max(1.0, p.rect.height))) <= 2.2 and p.rect.height >= 300) else 1
+                            for p in doc
+                        )
+                except Exception:
+                    tot_p = 0
 
             existing_m = len([f for f in masked_dir.glob("page_*_masked.png") if f.stat().st_size > 1000])
             if existing_m >= tot_p and tot_p > 0:
@@ -547,8 +552,24 @@ class PipelineBatchRunner:
         self, pdf_path: Path, crops_dir: Path, masked_dir: Path, chk: Dict[str, Any], overwrite: bool
     ) -> bool:
         with fitz.open(pdf_path) as doc:
-            total_pages = len(doc)
-            chk["phases"]["slicing"]["total_pages"] = total_pages
+            total_sheets = len(doc)
+
+            # Pre-compute sheet to book page mapping (two-page spreads produce 2 book pages)
+            sheet_mapping: List[Tuple[int, ...]] = []
+            cur_bp = 1
+            for s_idx in range(total_sheets):
+                p = doc[s_idx]
+                w, h = p.rect.width, p.rect.height
+                is_spread = (1.22 <= (w / float(max(1.0, h))) <= 2.2 and h >= 300)
+                if is_spread:
+                    sheet_mapping.append((cur_bp, cur_bp + 1))
+                    cur_bp += 2
+                else:
+                    sheet_mapping.append((cur_bp,))
+                    cur_bp += 1
+
+            total_book_pages = cur_bp - 1
+            chk["phases"]["slicing"]["total_pages"] = total_book_pages
 
             existing_valid_pages = set()
             if not overwrite:
@@ -557,11 +578,11 @@ class PipelineBatchRunner:
                     if m and f.stat().st_size > 1000:
                         existing_valid_pages.add(int(m.group(1)))
 
-            if not overwrite and len(existing_valid_pages) >= total_pages and total_pages > 0:
+            if not overwrite and len(existing_valid_pages) >= total_book_pages and total_book_pages > 0:
                 chk["phases"]["slicing"]["completed"] = True
-                chk["phases"]["slicing"]["pages_done"] = total_pages
+                chk["phases"]["slicing"]["pages_done"] = total_book_pages
                 self._write_checkpoint(pdf_path.stem, chk)
-                self._update_hud("Фаза 1/4: Нарезка уже выполнена на диске", 25.0, f"Все {total_pages} стр. готовы")
+                self._update_hud("Фаза 1/4: Нарезка уже выполнена на диске", 25.0, f"Все {total_book_pages} стр. готовы")
                 return True
 
             if self.layout_detector is None:
@@ -578,89 +599,102 @@ class PipelineBatchRunner:
             dpi = int(self.config.get("dpi", 200))
             pages_done_count = len(existing_valid_pages)
 
-            for p_idx in range(1, total_pages + 1):
+            for s_idx in range(total_sheets):
                 if self._stop_event.is_set():
                     return False
                 self._check_pause()
 
-                sec_info = sections.get(p_idx, {})
-                if sec_info.get("skip", False):
-                    pages_done_count += 1
-                    chk["phases"]["slicing"]["pages_done"] = pages_done_count
-                    self._write_checkpoint(pdf_path.stem, chk)
-                    pct = (p_idx / total_pages) * 25.0
-                    self._update_hud(
-                        "Фаза 1/4: Нарезка и маскирование",
-                        pct,
-                        f"Стр. {p_idx}/{total_pages} • Пропуск: {sec_info.get('reason', 'служебная страница')}",
-                    )
+                book_pages = sheet_mapping[s_idx]
+                if not overwrite and all(bp in existing_valid_pages for bp in book_pages):
                     continue
 
-                mask_file = masked_dir / f"page_{p_idx:04d}_masked.png"
-                if not overwrite and p_idx in existing_valid_pages:
-                    continue
-
-                page = doc[p_idx - 1]
+                page = doc[s_idx]
                 pix = page.get_pixmap(dpi=dpi)
                 img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
                 img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR if pix.n == 4 else cv2.COLOR_RGB2BGR)
                 del pix
 
-                # Preprocess (deskew)
-                deskewed_bgr, _ = deskew_page(img_bgr)
+                # Automated two-page spread splitting along central spine / gutter
+                split_pages = detect_and_split_spread(img_bgr)
+                if len(split_pages) != len(book_pages):
+                    if len(split_pages) == 1:
+                        split_pages = [(img_bgr, "single")]
+                        book_pages = (book_pages[0],)
 
-                # Layout detection
-                detections = self.layout_detector.detect(deskewed_bgr)
+                for (sub_img, side), bp in zip(split_pages, book_pages):
+                    if self._stop_event.is_set():
+                        return False
+                    self._check_pause()
 
-                # Check dynamic front/back matter skip
-                should_skip, reason = section_filter.check_after_detection(
-                    p_idx, total_pages, len(detections), gray=cv2.cvtColor(deskewed_bgr, cv2.COLOR_BGR2GRAY)
-                )
-                if should_skip:
+                    mask_file = masked_dir / f"page_{bp:04d}_masked.png"
+                    if not overwrite and bp in existing_valid_pages:
+                        continue
+
+                    # Preprocess: individual book page deskew
+                    deskewed_bgr, _ = deskew_page(sub_img)
+
+                    # Layout detection (scale-adaptive, physical staff periodicity verification)
+                    detections = self.layout_detector.detect(deskewed_bgr)
+
+                    # Dynamic front/back matter skip
+                    should_skip, reason = section_filter.check_after_detection(
+                        bp, total_book_pages, len(detections), gray=cv2.cvtColor(deskewed_bgr, cv2.COLOR_BGR2GRAY)
+                    )
+                    if should_skip:
+                        pages_done_count += 1
+                        existing_valid_pages.add(bp)
+                        chk["phases"]["slicing"]["pages_done"] = pages_done_count
+                        self._write_checkpoint(pdf_path.stem, chk)
+
+                        # Write empty mask placeholder for physical disk tracking
+                        cv2.imwrite(str(mask_file), deskewed_bgr)
+                        raw_md_file = masked_dir.parent / "3_raw_md" / f"page_{bp:04d}_raw.md"
+                        if not raw_md_file.is_file() or overwrite:
+                            raw_md_file.parent.mkdir(parents=True, exist_ok=True)
+                            raw_md_file.write_text(f"## Страница {bp}\n\n<!-- Пропуск: {reason} -->\n", encoding="utf-8")
+
+                        pct = (bp / total_book_pages) * 25.0
+                        self._update_hud(
+                            "Фаза 1/4: Нарезка и маскирование",
+                            pct,
+                            f"Стр. {bp}/{total_book_pages} • Пропуск: {reason}",
+                        )
+                        continue
+
+                    # Whiteout and save crops
+                    masked_img, crops_data = self.layout_detector.mask_page(
+                        deskewed_bgr, detections, tag_prefix=f"{pdf_path.stem}_P{bp:04d}"
+                    )
+
+                    # Render and save debug image with YOLO bounding boxes for UI inspection
+                    debug_img = self.layout_detector.render_debug_image(deskewed_bgr, detections)
+                    debug_file = masked_dir / f"page_{bp:04d}_debug.png"
+                    cv2.imwrite(str(debug_file), debug_img)
+
+                    cv2.imwrite(str(mask_file), masked_img)
+
+                    for crop in crops_data:
+                        crop_name = f"{crop['stub_id']}.png"
+                        cv2.imwrite(str(crops_dir / crop_name), crop["crop_img"])
+
+                        # Normalize and dewarp staff for OMR
+                        dewarped_bgr, _, _ = normalize_staff_crop(
+                            crop["crop_img"], notation_class=crop.get("class", "staff")
+                        )
+                        deskew_name = f"{crop['stub_id']}_deskew.png"
+                        cv2.imwrite(str(crops_dir / deskew_name), dewarped_bgr)
+
                     pages_done_count += 1
+                    existing_valid_pages.add(bp)
                     chk["phases"]["slicing"]["pages_done"] = pages_done_count
                     self._write_checkpoint(pdf_path.stem, chk)
-                    pct = (p_idx / total_pages) * 25.0
+
+                    pct = (bp / total_book_pages) * 25.0
                     self._update_hud(
                         "Фаза 1/4: Нарезка и маскирование",
                         pct,
-                        f"Стр. {p_idx}/{total_pages} • Пропуск: {reason}",
+                        f"Стр. {bp}/{total_book_pages} ({side}) • Вырезано станов: {len(crops_data)}",
                     )
-                    continue
-
-                # Whiteout and save crops
-                masked_img, crops_data = self.layout_detector.mask_page(
-                    deskewed_bgr, detections, tag_prefix=f"{pdf_path.stem}_P{p_idx:04d}"
-                )
-
-                # Render and save debug image with YOLO bounding boxes for UI inspection
-                debug_img = self.layout_detector.render_debug_image(deskewed_bgr, detections)
-                debug_file = masked_dir / f"page_{p_idx:04d}_debug.png"
-                cv2.imwrite(str(debug_file), debug_img)
-
-                cv2.imwrite(str(mask_file), masked_img)
-
-                for crop in crops_data:
-                    crop_name = f"{crop['stub_id']}.png"
-                    cv2.imwrite(str(crops_dir / crop_name), crop["crop_img"])
-
-                    # Normalize and dewarp staff for OMR
-                    dewarped_bgr, _, _ = normalize_staff_crop(
-                        crop["crop_img"], notation_class=crop.get("class", "staff")
-                    )
-                    deskew_name = f"{crop['stub_id']}_deskew.png"
-                    cv2.imwrite(str(crops_dir / deskew_name), dewarped_bgr)
-
-                pages_done_count += 1
-                chk["phases"]["slicing"]["pages_done"] = pages_done_count
-                self._write_checkpoint(pdf_path.stem, chk)
-
-                pct = (p_idx / total_pages) * 25.0
-                self._update_hud(
-                    "Фаза 1/4: Нарезка и маскирование",
-                    pct,
-                    f"Стр. {p_idx}/{total_pages} • Вырезано станов: {len(crops_data)}",
-                )
 
         return True
 

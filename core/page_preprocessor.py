@@ -3,10 +3,10 @@ import numpy as np
 from typing import List, Tuple, Dict, Any
 
 
-def detect_and_split_spread(img_bgr: np.ndarray, overlap_ratio: float = 0.02) -> List[Tuple[np.ndarray, str]]:
+def detect_and_split_spread(img_bgr: np.ndarray, overlap_ratio: float = 0.005) -> List[Tuple[np.ndarray, str]]:
     """
-    Detects whether an image is a two-page spread (landscape) and splits it along
-    the central book spine / gutter.
+    Detects whether an image is a two-page spread (landscape, aspect_ratio >= 1.25)
+    and splits it along the central book spine / gutter.
     
     Returns:
         List of tuples: [(page_img, "left"), (page_img, "right")] or [(img_bgr, "single")]
@@ -14,44 +14,40 @@ def detect_and_split_spread(img_bgr: np.ndarray, overlap_ratio: float = 0.02) ->
     h, w = img_bgr.shape[:2]
     aspect_ratio = w / float(h)
     
-    # A scanned two-page book spread has aspect ratio typically between 1.25 and 1.85,
-    # and has a full page height (at least 600px).
-    # Isolated horizontal staff strips (crops) have aspect ratio > 2.0 and should NEVER be split!
-    if not (1.25 <= aspect_ratio <= 1.85 and h >= 600):
+    # A scanned two-page book spread has aspect ratio >= 1.25 and full page height (at least 300px).
+    # Isolated single staves have aspect ratio > 4.0 and height < 200px and should not be split.
+    if not (1.22 <= aspect_ratio <= 2.2 and h >= 300):
         return [(img_bgr, "single")]
     
-    # Search for gutter in the central 35% to 65% of width
-    search_start = int(w * 0.35)
-    search_end = int(w * 0.65)
-    
+    mid = w // 2
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     
-    # Downscale for fast robust gutter analysis
-    small_h = 400
-    scale = small_h / float(h)
-    small_w = int(w * scale)
-    small_gray = cv2.resize(gray, (small_w, small_h), interpolation=cv2.INTER_AREA)
-    
-    s_start = int(small_w * 0.35)
-    s_end = int(small_w * 0.65)
-    
-    # Vertical projection profile: column average intensity
-    col_means = np.mean(small_gray[:, s_start:s_end], axis=0)
-    
-    # Smooth column profile with Gaussian filter to avoid local glyph noise
-    col_smooth = cv2.GaussianBlur(col_means.reshape(1, -1).astype(np.float32), (31, 1), 0).flatten()
-    
-    # Gutter usually appears as a local darkness minimum (shadow in the fold)
-    # or a prominent gap in text/staves.
-    local_min_idx = int(np.argmin(col_smooth))
-    gutter_x_small = s_start + local_min_idx
-    gutter_x = int(gutter_x_small / scale)
-    
-    # Sanity check: gutter should be reasonably close to the middle (within 40% - 60% of W)
-    if not (0.40 * w <= gutter_x <= 0.60 * w):
-        gutter_x = w // 2
+    # Analyze central spine band: 46% to 54% of width
+    x1 = int(w * 0.46)
+    x2 = int(w * 0.54)
+    if x2 <= x1 + 10:
+        gutter_x = mid
+    else:
+        strip = gray[:, x1:x2]
+        ink = (strip < 220).astype(np.float32)
+        col_ink = np.mean(ink, axis=0)  # fraction of ink per column
+        col_ink_s = cv2.GaussianBlur(col_ink.reshape(1, -1), (15, 1), 0).flatten()
+        min_ink = float(np.min(col_ink_s))
         
-    overlap_px = int(w * overlap_ratio)
+        # Columns with minimal ink in the spine fold
+        min_cols = np.where(col_ink_s <= min_ink + 0.005)[0]
+        if len(min_cols) > 0:
+            target = mid - x1
+            best_col = min_cols[np.argmin(np.abs(min_cols - target))]
+            gutter_x = x1 + int(best_col)
+        else:
+            gutter_x = mid
+
+    # Ensure gutter is reasonably close to middle
+    if abs(gutter_x - mid) > int(w * 0.04):
+        gutter_x = mid
+        
+    overlap_px = min(15, max(2, int(w * overlap_ratio)))
     left_x_end = min(w, gutter_x + overlap_px)
     right_x_start = max(0, gutter_x - overlap_px)
     

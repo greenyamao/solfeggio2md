@@ -6,6 +6,77 @@ import numpy as np
 from core.page_preprocessor import estimate_staff_spacing
 
 
+def is_valid_music_staff(crop_bgr: np.ndarray, cls_name: str, conf: float) -> bool:
+    """
+    Physical verification that a candidate bounding box contains authentic parallel music staff lines.
+    Rejects:
+    - Analysis brackets (|---|---|---|)
+    - Slur / phrase arcs
+    - Text underlines, footnote lines, and table borders
+    - Blank whitespace hallucinations
+    """
+    gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY) if len(crop_bgr.shape) == 3 else crop_bgr
+    h, w = gray.shape
+    if h < 15 or w < 30:
+        return False
+
+    is_grand = "grand" in cls_name.lower()
+
+    # Dynamic binarization
+    bg_val = float(np.percentile(gray, 90)) if gray.size > 0 else 250.0
+    ink_thresh = bg_val - 40.0
+    bin_inv = (gray < ink_thresh).astype(np.uint8) * 255
+
+    # 1. Morphological horizontal line detection (minimum segment length 10% width)
+    kernel_len = max(15, min(60, int(w * 0.10)))
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_len, 1))
+    lines_img = cv2.morphologyEx(bin_inv, cv2.MORPH_OPEN, kernel)
+
+    # Row projection of horizontal line segments
+    proj = np.sum(lines_img > 0, axis=1)
+    min_row_coverage = max(15, int(w * 0.18))
+    active_rows = np.where(proj >= min_row_coverage)[0]
+
+    line_centers = []
+    for r in active_rows:
+        if not line_centers or r - line_centers[-1][-1] > 2:
+            line_centers.append([r])
+        else:
+            line_centers[-1].append(r)
+
+    centers = [float(np.mean(grp)) for grp in line_centers]
+
+    # Method 2 fallback: if lines are faint or broken, check peak projection in central strip
+    if len(centers) < 3:
+        x1, x2 = int(w * 0.25), int(w * 0.75)
+        strip = gray[:, x1:x2]
+        strip_proj = np.sum(255.0 - strip, axis=1)
+        peaks = [
+            y for y in range(1, h - 1)
+            if strip_proj[y] > strip_proj[y - 1] and strip_proj[y] >= strip_proj[y + 1] and strip_proj[y] > 0.25 * np.max(strip_proj)
+        ]
+        fpeaks = []
+        for y in sorted(peaks, key=lambda y: strip_proj[y], reverse=True):
+            if all(abs(y - fp) >= 4 for fp in fpeaks):
+                fpeaks.append(y)
+        fpeaks.sort()
+        if len(fpeaks) >= 3:
+            centers = fpeaks
+
+    # A real music staff must have at least 3 parallel lines
+    if len(centers) < 3:
+        return False
+
+    diffs = np.diff(centers)
+    median_s = float(np.median(diffs))
+    if median_s < 3.0:
+        return False
+
+    consistent_diffs = [d for d in diffs if 0.55 * median_s <= d <= 1.45 * median_s]
+    min_consistent = 4 if is_grand else 2
+    return len(consistent_diffs) >= min_consistent
+
+
 class LayoutDetector:
     """
     Music Document Layout Analysis (DLA) using OLA v2.0 (YOLOv8x/v11x).
@@ -223,6 +294,38 @@ class LayoutDetector:
         accepted_systems = heal_collinear_segments(accepted_systems)
 
         selected_candidates = accepted_grand + accepted_staves + accepted_systems
+
+        # Physical staff line verification (filters analysis brackets, slurs, divider lines)
+        valid_candidates = []
+        for cand in selected_candidates:
+            x1, y1, x2, y2 = cand["box"]
+            patch = img_bgr[y1:y2, x1:x2]
+            if is_valid_music_staff(patch, cand["class"], cand["confidence"]):
+                valid_candidates.append(cand)
+
+        # Vertical collision suppression for duplicate/nested detections
+        deduped = []
+        for i, c1 in enumerate(valid_candidates):
+            suppress = False
+            for j, c2 in enumerate(valid_candidates):
+                if i != j:
+                    v_ratio = vertical_overlap_ratio(c1["box"], c2["box"])
+                    h_rel = horizontal_overlap_or_gap(c1["box"], c2["box"])
+                    if v_ratio > 0.40 and h_rel > 0:
+                        w1 = c1["box"][2] - c1["box"][0]
+                        w2 = c2["box"][2] - c2["box"][0]
+                        h_overlap_ratio = h_rel / float(min(w1, w2))
+                        if h_overlap_ratio > 0.60:
+                            if c2["confidence"] > c1["confidence"] + 0.05:
+                                suppress = True
+                                break
+                            elif abs(c2["confidence"] - c1["confidence"]) <= 0.05 and (w2 * (c2["box"][3] - c2["box"][1])) > (w1 * (c1["box"][3] - c1["box"][1])):
+                                suppress = True
+                                break
+            if not suppress:
+                deduped.append(c1)
+
+        selected_candidates = deduped
 
         # Convert to grayscale for ink analysis
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
