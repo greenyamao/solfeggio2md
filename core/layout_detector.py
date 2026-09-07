@@ -360,6 +360,119 @@ class LayoutDetector:
         return row_coverage >= 0.65
 
     @classmethod
+    def detect_connecting_barlines(cls, gray: np.ndarray, s1: Dict[str, Any], s2: Dict[str, Any], staff_s: float) -> bool:
+        """
+        Scans the inter-staff gap across the horizontal span for continuous vertical barlines
+        linking the two staves across measures. Immune to faded/broken left curly braces.
+        """
+        v_gap = s2["y_top"] - s1["y_bot"]
+        if v_gap <= 0:
+            return True
+
+        x_start = max(s1["x_left"], s2["x_left"])
+        x_end = min(s1["x_right"], s2["x_right"])
+        if (x_end - x_start) <= int(staff_s * 4.0):
+            return False
+
+        inter_roi = gray[s1["y_bot"]:s2["y_top"], x_start:x_end]
+        if inter_roi.size == 0:
+            return False
+
+        bg = float(np.percentile(inter_roi, 90))
+        bin_inv = (inter_roi < bg - 35).astype(np.uint8)
+
+        k_h = max(3, int(v_gap * 0.70))
+        vert_k = cv2.getStructuringElement(cv2.MORPH_RECT, (1, k_h))
+        opened = cv2.morphologyEx(bin_inv, cv2.MORPH_OPEN, vert_k)
+
+        num_labels, _, stats, _ = cv2.connectedComponentsWithStats(opened)
+        for idx in range(1, num_labels):
+            h_stat = stats[idx, cv2.CC_STAT_HEIGHT]
+            w_stat = stats[idx, cv2.CC_STAT_WIDTH]
+            if h_stat >= int(v_gap * 0.75) and (h_stat / max(1, w_stat)) >= 2.0:
+                return True
+        return False
+
+    @classmethod
+    def expand_envelope_to_ledger_lines(
+        cls,
+        gray: np.ndarray,
+        box: List[int],
+        staff_s: float,
+        max_search_s: float = 3.5,
+        whitespace_s: float = 0.75
+    ) -> List[int]:
+        """
+        Dynamically expands vertical box envelope using 8-connected components and ink projection
+        so notes on ledger lines, tall stems, accidentals, and dynamics are never bisected.
+        """
+        h_img, w_img = gray.shape[:2]
+        x1, y1, x2, y2 = box
+        search_margin = int(max_search_s * staff_s)
+
+        y_search_min = max(0, y1 - search_margin)
+        y_search_max = min(h_img, y2 + search_margin)
+        x_min = max(0, x1)
+        x_max = min(w_img, x2)
+
+        corridor = gray[y_search_min:y_search_max, x_min:x_max]
+        if corridor.size == 0:
+            return box
+
+        bg = float(np.percentile(corridor, 90))
+        bin_corridor = (corridor < bg - 35).astype(np.uint8)
+
+        vert_proj = np.sum(bin_corridor, axis=1)
+        max_ink = np.max(vert_proj) if np.max(vert_proj) > 0 else 1
+        norm_proj = vert_proj / float(max_ink)
+
+        staff_top_rel = y1 - y_search_min
+        staff_bot_rel = y2 - y_search_min
+        whitespace_limit = max(1, int(whitespace_s * staff_s))
+
+        empty_count = 0
+        new_top_rel = staff_top_rel
+        for y in range(staff_top_rel - 1, -1, -1):
+            if norm_proj[y] <= 0.015:
+                empty_count += 1
+                if empty_count >= whitespace_limit:
+                    new_top_rel = y + empty_count
+                    break
+            else:
+                empty_count = 0
+                new_top_rel = y
+
+        empty_count = 0
+        new_bot_rel = staff_bot_rel
+        for y in range(staff_bot_rel + 1, len(norm_proj)):
+            if norm_proj[y] <= 0.015:
+                empty_count += 1
+                if empty_count >= whitespace_limit:
+                    new_bot_rel = y - empty_count
+                    break
+            else:
+                empty_count = 0
+                new_bot_rel = y
+
+        final_ymin = y_search_min + max(0, new_top_rel)
+        final_ymax = y_search_min + min(corridor.shape[0], new_bot_rel)
+
+        num_labels, _, stats, _ = cv2.connectedComponentsWithStats(bin_corridor, connectivity=8)
+        for i in range(1, num_labels):
+            comp_y = y_search_min + stats[i, cv2.CC_STAT_TOP]
+            comp_h = stats[i, cv2.CC_STAT_HEIGHT]
+            comp_bot = comp_y + comp_h
+
+            if comp_y < final_ymin and comp_bot >= final_ymin:
+                if comp_h <= int(5.5 * staff_s):
+                    final_ymin = min(final_ymin, comp_y)
+            if comp_bot > final_ymax and comp_y <= final_ymax:
+                if comp_h <= int(5.5 * staff_s):
+                    final_ymax = max(final_ymax, comp_bot)
+
+        return [int(x1), int(max(0, final_ymin)), int(x2), int(min(h_img, final_ymax))]
+
+    @classmethod
     def extract_physical_5line_staves(cls, gray: np.ndarray) -> Tuple[List[Dict[str, Any]], float]:
         """
         DPI-invariant, font-invariant physical 5-line music staff extractor.
@@ -470,15 +583,21 @@ class LayoutDetector:
                 v_gap = cand_s["y_top"] - prev_s["y_bot"]
 
                 has_connector = self.has_continuous_vertical_connector(gray, prev_s, cand_s, staff_s)
+                has_barlines = self.detect_connecting_barlines(gray, prev_s, cand_s, staff_s)
 
                 can_merge = False
                 if len(cur) == 1:
-                    if (h_iou >= 0.55 or has_connector) and 0 <= v_gap <= int(staff_s * 8.5):
-                        if has_connector or v_gap <= int(staff_s * 6.5):
+                    if has_connector or has_barlines:
+                        # With verified left brace or through-measure barlines, natural piano layout allows wider gap
+                        if 0 <= v_gap <= int(staff_s * 12.0) and (h_iou >= 0.40 or has_connector):
+                            can_merge = True
+                    else:
+                        # Geometrically proximate unlinked staves
+                        if 0 <= v_gap <= int(staff_s * 6.5) and h_iou >= 0.50:
                             can_merge = True
                 elif len(cur) >= 2:
-                    # Joining 3rd+ staff strictly requires continuous left system connector
-                    if has_connector and 0 <= v_gap <= int(staff_s * 10.0) and h_iou >= 0.50:
+                    # Joining 3rd+ staff strictly requires continuous left system connector or through-system barlines
+                    if (has_connector or has_barlines) and 0 <= v_gap <= int(staff_s * 12.0) and h_iou >= 0.40:
                         can_merge = True
 
                 if can_merge:
@@ -495,10 +614,13 @@ class LayoutDetector:
             by1 = cur[0]["y_top"]
             by2 = cur[-1]["y_bot"]
 
+            # Dynamically expand envelope to enclose ledger lines, tall stems, accidentals, and dynamics
+            exp_box = self.expand_envelope_to_ledger_lines(gray, [bx1, by1, bx2, by2], staff_s)
+
             phys_blocks.append({
                 "class": cls_name,
                 "confidence": 0.95,
-                "box": [bx1, by1, bx2, by2],
+                "box": exp_box,
                 "staves_count": num_staves,
                 "s": staff_s
             })
@@ -557,10 +679,11 @@ class LayoutDetector:
                 if not overlap and conf >= 0.35 and is_valid_music_staff(img_bgr[b_xy[1]:b_xy[3], b_xy[0]:b_xy[2]], cls_name, conf):
                     bh = b_xy[3] - b_xy[1]
                     cls_clean = "staff" if bh < int(staff_s * 6.0) else ("grand_staff" if bh < int(staff_s * 16.0) else "system")
+                    exp_b = self.expand_envelope_to_ledger_lines(gray, b_xy, staff_s)
                     final_blocks.append({
                         "class": cls_clean,
                         "confidence": conf,
-                        "box": b_xy,
+                        "box": exp_b,
                         "staves_count": 1,
                         "s": staff_s
                     })
@@ -577,8 +700,8 @@ class LayoutDetector:
             x1, y1, x2, y2 = d["box"]
             s_val = d.get("s", staff_s)
 
-            pad_y = int(min(24, max(10, s_val * 1.5)))
-            pad_x = int(min(35, max(12, s_val * 2.0)))
+            pad_y = int(min(16, max(6, s_val * 0.8)))
+            pad_x = int(min(30, max(12, s_val * 1.5)))
 
             px1 = max(0, x1 - pad_x)
             px2 = min(img_w, x2 + pad_x)

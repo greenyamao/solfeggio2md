@@ -129,17 +129,18 @@ def configure_cpu_core_affinity(prefer_p_cores: bool = True) -> bool:
             p_affinity = list(range(min(p_core_threads, total_threads)))
             proc.cpu_affinity(p_affinity)
 
-            # Clamp PyTorch and OpenCV CPU threads to physical P-cores
+            # Clamp PyTorch and OpenCV CPU threads to 4 cores
+            # Prevents Intel 13th/14th Gen HX laptop CPUs (i9-14900HX) from triggering 157W PL2 thermal spikes
             try:
                 import torch
-                torch.set_num_threads(8)
+                torch.set_num_threads(4)
                 torch.set_num_interop_threads(2)
             except Exception:
                 pass
 
             try:
                 import cv2
-                cv2.setNumThreads(8)
+                cv2.setNumThreads(4)
             except Exception:
                 pass
 

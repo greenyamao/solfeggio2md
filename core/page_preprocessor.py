@@ -291,34 +291,72 @@ def normalize_staff_crop(crop_bgr: np.ndarray, notation_class: str = "staff") ->
                 shifts = np.zeros(w_d, dtype=np.float32)
                 prev_d = 0.0
 
-                for x in range(x_first, x_last + 1):
-                    col = lines_mask[:, x]
-                    if sums[x] < 2.0:
-                        shifts[x] = prev_d
-                        continue
+                # Offload 1D cross-correlation batch to CUDA if available to avoid CPU thread heating
+                use_cuda = False
+                try:
+                    import torch
+                    import torch.nn.functional as F
+                    if torch.cuda.is_available():
+                        use_cuda = True
+                except Exception:
+                    pass
 
-                    # Search within physically continuous window around prev_d bounded by max_phys_shift
-                    low_d = int(np.floor(max(-max_phys_shift, prev_d - 1.5)))
-                    high_d = int(np.ceil(min(max_phys_shift, prev_d + 1.5)))
+                if use_cuda:
+                    max_d_int = int(np.ceil(max_phys_shift))
+                    t_mask = torch.from_numpy(lines_mask).cuda().permute(1, 0).unsqueeze(1)  # (w_d, 1, h_d)
+                    t_prof = torch.from_numpy(init_profile).cuda().view(1, 1, -1)
+                    corr_matrix = F.conv1d(t_mask, t_prof, padding=max_d_int).squeeze(1).cpu().numpy()
+                    center_idx = max_d_int
 
-                    corrs = []
-                    d_vals = list(range(low_d, high_d + 1))
-                    for d in d_vals:
-                        c = np.sum(col[d:] * init_profile[:-d]) if d > 0 else (
-                            np.sum(col[:d] * init_profile[-d:]) if d < 0 else np.sum(col * init_profile)
-                        )
-                        corrs.append(c)
+                    for x in range(x_first, x_last + 1):
+                        if sums[x] < 2.0:
+                            shifts[x] = prev_d
+                            continue
 
-                    best_idx = int(np.argmax(corrs))
-                    best_d = float(d_vals[best_idx])
-                    # Sub-pixel parabolic peak refinement
-                    if 0 < best_idx < len(corrs) - 1:
-                        y0, y1, y2 = corrs[best_idx - 1], corrs[best_idx], corrs[best_idx + 1]
-                        denom = 2.0 * (2.0 * y1 - y0 - y2)
-                        if denom > 1e-4:
-                            best_d += float(y0 - y2) / denom
-                    shifts[x] = best_d
-                    prev_d = best_d
+                        low_d = int(np.floor(max(-max_phys_shift, prev_d - 1.5)))
+                        high_d = int(np.ceil(min(max_phys_shift, prev_d + 1.5)))
+
+                        i_low = center_idx + low_d
+                        i_high = center_idx + high_d + 1
+                        sub_corrs = corr_matrix[x, i_low:i_high]
+                        best_local = int(np.argmax(sub_corrs))
+                        best_d = float(low_d + best_local)
+                        if 0 < best_local < len(sub_corrs) - 1:
+                            y0, y1, y2 = sub_corrs[best_local - 1], sub_corrs[best_local], sub_corrs[best_local + 1]
+                            denom = 2.0 * (2.0 * y1 - y0 - y2)
+                            if denom > 1e-4:
+                                best_d += float(y0 - y2) / denom
+                        shifts[x] = best_d
+                        prev_d = best_d
+                else:
+                    for x in range(x_first, x_last + 1):
+                        col = lines_mask[:, x]
+                        if sums[x] < 2.0:
+                            shifts[x] = prev_d
+                            continue
+
+                        # Search within physically continuous window around prev_d bounded by max_phys_shift
+                        low_d = int(np.floor(max(-max_phys_shift, prev_d - 1.5)))
+                        high_d = int(np.ceil(min(max_phys_shift, prev_d + 1.5)))
+
+                        corrs = []
+                        d_vals = list(range(low_d, high_d + 1))
+                        for d in d_vals:
+                            c = np.sum(col[d:] * init_profile[:-d]) if d > 0 else (
+                                np.sum(col[:d] * init_profile[-d:]) if d < 0 else np.sum(col * init_profile)
+                            )
+                            corrs.append(c)
+
+                        best_idx = int(np.argmax(corrs))
+                        best_d = float(d_vals[best_idx])
+                        # Sub-pixel parabolic peak refinement
+                        if 0 < best_idx < len(corrs) - 1:
+                            y0, y1, y2 = corrs[best_idx - 1], corrs[best_idx], corrs[best_idx + 1]
+                            denom = 2.0 * (2.0 * y1 - y0 - y2)
+                            if denom > 1e-4:
+                                best_d += float(y0 - y2) / denom
+                        shifts[x] = best_d
+                        prev_d = best_d
 
                 # Pad margins with edge shifts so margins don't shear
                 if x_first > 0:

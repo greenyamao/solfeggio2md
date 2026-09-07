@@ -225,8 +225,8 @@ def inspect_staff_pair(
                 barline_count += 1
 
     can_merge_grand = (
-        (h_iou >= 0.55 or has_left_conn) and 0 <= v_gap <= int(staff_s * 8.5) and
-        (has_left_conn or v_gap <= int(staff_s * 6.5) or barline_count >= 1)
+        ((has_left_conn or barline_count >= 1) and 0 <= v_gap <= int(staff_s * 12.0) and (h_iou >= 0.40 or has_left_conn)) or
+        (0 <= v_gap <= int(staff_s * 6.5) and h_iou >= 0.50)
     )
 
     return {
