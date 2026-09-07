@@ -117,6 +117,12 @@ class PipelineBatchRunner:
             "estimated_remaining_seconds": 0.0,
             "vram_allocated_mb": 0.0,
             "last_log": "Инициализация выполнена",
+            "phase_progress": {
+                "phase1": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Ожидание"},
+                "phase2": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Ожидание"},
+                "phase3": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Ожидание"},
+                "phase4": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Ожидание"},
+            },
         }
 
         # Lazy engines
@@ -423,6 +429,12 @@ class PipelineBatchRunner:
                             "current_book_name": item["name"],
                             "book_progress_pct": 0.0,
                             "queue_progress_pct": round(((book_idx - 1) / max(1, total_books)) * 100, 1),
+                            "phase_progress": {
+                                "phase1": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Ожидание"},
+                                "phase2": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Ожидание"},
+                                "phase3": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Ожидание"},
+                                "phase4": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Ожидание"},
+                            },
                         }
                     )
 
@@ -436,8 +448,13 @@ class PipelineBatchRunner:
 
             with self._lock:
                 self.metrics["queue_progress_pct"] = 100.0
+                self.metrics["book_progress_pct"] = 100.0
                 self.metrics["current_phase_name"] = "Очередь полностью обработана"
                 self.metrics["current_item_detail"] = "Все задачи завершены"
+                for p_key in ("phase1", "phase2", "phase3", "phase4"):
+                    if p_key in self.metrics.get("phase_progress", {}):
+                        self.metrics["phase_progress"][p_key]["pct"] = 100.0
+                        self.metrics["phase_progress"][p_key]["status"] = "completed"
 
         except Exception as e:
             with self._lock:
@@ -517,6 +534,54 @@ class PipelineBatchRunner:
 
             self._write_checkpoint(book_title, chk)
 
+        # ---------------- 4-Phase Progress Initialization ---------------- #
+        p1_comp = bool(chk["phases"]["slicing"].get("completed", False) and not overwrite)
+        p1_tot = int(chk["phases"]["slicing"].get("total_pages", 0))
+        p1_done = p1_tot if p1_comp else int(chk["phases"]["slicing"].get("pages_done", 0))
+
+        p2_comp = bool(chk["phases"]["omr"].get("completed", False) and not overwrite)
+        p2_tot = int(chk["phases"]["omr"].get("total_crops", 0))
+        p2_done = p2_tot if p2_comp else int(chk["phases"]["omr"].get("crops_done", 0))
+
+        p3_comp = bool(chk["phases"]["vlm"].get("completed", False) and not overwrite)
+        p3_tot = int(chk["phases"]["vlm"].get("total_pages", 0))
+        p3_done = p3_tot if p3_comp else int(chk["phases"]["vlm"].get("pages_done", 0))
+
+        p4_comp = bool(chk["phases"]["assembly"].get("completed", False) and not overwrite)
+
+        self._update_phase_progress(
+            "phase1",
+            pct=100.0 if p1_comp else (round((p1_done / p1_tot) * 100.0, 1) if p1_tot > 0 else 0.0),
+            done=p1_done,
+            total=p1_tot,
+            status="completed" if p1_comp else "pending",
+            detail="Готово" if p1_comp else "Ожидание",
+        )
+        self._update_phase_progress(
+            "phase2",
+            pct=100.0 if p2_comp else (round((p2_done / p2_tot) * 100.0, 1) if p2_tot > 0 else 0.0),
+            done=p2_done,
+            total=p2_tot,
+            status="completed" if p2_comp else "pending",
+            detail="Готово" if p2_comp else "Ожидание",
+        )
+        self._update_phase_progress(
+            "phase3",
+            pct=100.0 if p3_comp else (round((p3_done / p3_tot) * 100.0, 1) if p3_tot > 0 else 0.0),
+            done=p3_done,
+            total=p3_tot,
+            status="completed" if p3_comp else "pending",
+            detail="Готово" if p3_comp else "Ожидание",
+        )
+        self._update_phase_progress(
+            "phase4",
+            pct=100.0 if p4_comp else 0.0,
+            done=0,
+            total=0,
+            status="completed" if p4_comp else "pending",
+            detail="Готово" if p4_comp else "Ожидание",
+        )
+
         # ---------------- Phase 1: Slicing & Masking ---------------- #
         if not chk["phases"]["slicing"]["completed"] or overwrite:
             self._update_hud("Фаза 1/4: Нарезка и маскирование верстки (YOLO OLA v2.0)", 0.0)
@@ -563,6 +628,48 @@ class PipelineBatchRunner:
         self._update_hud(f"Книга {book_title} успешно завершена", 100.0)
         return True
 
+    def _update_phase_progress(
+        self,
+        phase_id: str,
+        pct: float,
+        done: int = 0,
+        total: int = 0,
+        status: str = "running",
+        detail: str = "",
+    ) -> None:
+        with self._lock:
+            if "phase_progress" not in self.metrics:
+                self.metrics["phase_progress"] = {
+                    "phase1": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": ""},
+                    "phase2": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": ""},
+                    "phase3": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": ""},
+                    "phase4": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": ""},
+                }
+            p = self.metrics["phase_progress"].setdefault(phase_id, {})
+            p["pct"] = round(min(100.0, max(0.0, float(pct))), 1)
+            p["done"] = int(done)
+            p["total"] = int(total)
+            p["status"] = str(status)
+            if detail:
+                p["detail"] = str(detail)
+
+            # Recalculate book_progress_pct across all 4 phases (weights: P1=25%, P2=25%, P3=35%, P4=15%)
+            p1 = self.metrics["phase_progress"]["phase1"]["pct"]
+            p2 = self.metrics["phase_progress"]["phase2"]["pct"]
+            p3 = self.metrics["phase_progress"]["phase3"]["pct"]
+            p4 = self.metrics["phase_progress"]["phase4"]["pct"]
+            book_overall_pct = round((p1 * 0.25) + (p2 * 0.25) + (p3 * 0.35) + (p4 * 0.15), 1)
+            self.metrics["book_progress_pct"] = book_overall_pct
+
+            # Calculate continuous queue_progress_pct
+            cur_idx = max(1, self.metrics.get("current_book_index", 1))
+            tot_books = max(1, self.metrics.get("total_books", len(self.queue) or 1))
+            continuous_queue_pct = round((((cur_idx - 1) + (book_overall_pct / 100.0)) / tot_books) * 100.0, 1)
+            self.metrics["queue_progress_pct"] = min(100.0, max(0.0, continuous_queue_pct))
+
+            if detail:
+                self.metrics["current_item_detail"] = detail
+
     def _update_hud(self, phase_name: str, book_pct: float, detail: str = "") -> None:
         with self._lock:
             self.metrics["current_phase_name"] = phase_name
@@ -606,6 +713,7 @@ class PipelineBatchRunner:
                 chk["phases"]["slicing"]["completed"] = True
                 chk["phases"]["slicing"]["pages_done"] = total_book_pages
                 self._write_checkpoint(pdf_path.stem, chk)
+                self._update_phase_progress("phase1", 100.0, total_book_pages, total_book_pages, "completed", f"Все {total_book_pages} стр. готовы")
                 self._update_hud("Фаза 1/4: Нарезка уже выполнена на диске", 25.0, f"Все {total_book_pages} стр. готовы")
                 return True
 
@@ -682,11 +790,13 @@ class PipelineBatchRunner:
                             raw_md_file.parent.mkdir(parents=True, exist_ok=True)
                             raw_md_file.write_text(f"## Страница {bp}\n\n<!-- Пропуск: {reason} -->\n", encoding="utf-8")
 
-                        pct = (bp / total_book_pages) * 25.0
+                        pct_p1 = round((bp / max(1, total_book_pages)) * 100.0, 1)
+                        detail_msg = f"Стр. {bp}/{total_book_pages} • Пропуск: {reason}"
+                        self._update_phase_progress("phase1", pct_p1, bp, total_book_pages, "running", detail_msg)
                         self._update_hud(
                             "Фаза 1/4: Нарезка и маскирование",
-                            pct,
-                            f"Стр. {bp}/{total_book_pages} • Пропуск: {reason}",
+                            (bp / total_book_pages) * 25.0,
+                            detail_msg,
                         )
                         continue
 
@@ -724,13 +834,16 @@ class PipelineBatchRunner:
                     chk["phases"]["slicing"]["pages_done"] = pages_done_count
                     self._write_checkpoint(pdf_path.stem, chk)
 
-                    pct = (bp / total_book_pages) * 25.0
+                    pct_p1 = round((bp / max(1, total_book_pages)) * 100.0, 1)
+                    detail_msg = f"Стр. {bp}/{total_book_pages} ({side}) • Вырезано станов: {len(crops_data)}"
+                    self._update_phase_progress("phase1", pct_p1, bp, total_book_pages, "running", detail_msg)
                     self._update_hud(
                         "Фаза 1/4: Нарезка и маскирование",
-                        pct,
-                        f"Стр. {bp}/{total_book_pages} ({side}) • Вырезано станов: {len(crops_data)}",
+                        (bp / total_book_pages) * 25.0,
+                        detail_msg,
                     )
 
+        self._update_phase_progress("phase1", 100.0, total_book_pages, total_book_pages, "completed", f"Все {total_book_pages} стр. нарезаны")
         return True
 
     # ---------------- Phase 2 Implementation ---------------- #
@@ -745,6 +858,7 @@ class PipelineBatchRunner:
 
         if total_crops == 0:
             chk["phases"]["omr"]["completed"] = True
+            self._update_phase_progress("phase2", 100.0, 0, 0, "completed", "Нет станов для OMR")
             return True
 
         existing_valid_abcs = set()
@@ -757,6 +871,7 @@ class PipelineBatchRunner:
             chk["phases"]["omr"]["completed"] = True
             chk["phases"]["omr"]["crops_done"] = total_crops
             self._write_checkpoint(crops_dir.parent.name, chk)
+            self._update_phase_progress("phase2", 100.0, total_crops, total_crops, "completed", f"Все {total_crops} станов готовы")
             self._update_hud("Фаза 2/4: OMR уже выполнен на диске", 50.0, f"Все {total_crops} станов готовы")
             return True
 
@@ -832,15 +947,18 @@ class PipelineBatchRunner:
             self._write_checkpoint(crops_dir.parent.name, chk)
 
             curr_idx = min(total_crops, len(existing_valid_abcs) + b_start + len(valid_batch_files))
-            pct = 25.0 + (curr_idx / max(1, total_crops)) * 25.0
+            pct_p2 = round((curr_idx / max(1, total_crops)) * 100.0, 1)
             last_cls = batch_classes[-1] if batch_classes else "staff"
             last_model = results[-1].get("model_used", "OMR") if results else "OMR"
+            detail_msg = f"Стан {curr_idx}/{total_crops} ({last_cls}) • {last_model} [batch={len(valid_batch_files)}]"
+            self._update_phase_progress("phase2", pct_p2, curr_idx, total_crops, "running", detail_msg)
             self._update_hud(
                 "Фаза 2/4: Распознавание нот (OMR)",
-                pct,
-                f"Стан {curr_idx}/{total_crops} ({last_cls}) • {last_model} [batch={len(valid_batch_files)}]",
+                25.0 + (curr_idx / max(1, total_crops)) * 25.0,
+                detail_msg,
             )
 
+        self._update_phase_progress("phase2", 100.0, total_crops, total_crops, "completed", f"Все {total_crops} станов распознаны")
         chk["phases"]["omr"]["completed"] = True
         self._write_checkpoint(crops_dir.parent.name, chk)
         return True
@@ -856,6 +974,7 @@ class PipelineBatchRunner:
 
         if total_masks == 0:
             chk["phases"]["vlm"]["completed"] = True
+            self._update_phase_progress("phase3", 100.0, 0, 0, "completed", "Нет страниц для VLM")
             return True
 
         existing_valid_mds = set()
@@ -870,6 +989,7 @@ class PipelineBatchRunner:
             chk["phases"]["vlm"]["completed"] = True
             chk["phases"]["vlm"]["pages_done"] = total_masks
             self._write_checkpoint(masked_dir.parent.name, chk)
+            self._update_phase_progress("phase3", 100.0, total_masks, total_masks, "completed", f"Все {total_masks} стр. готовы")
             self._update_hud("Фаза 3/4: Текст VLM уже извлечен на диске", 90.0, f"Все {total_masks} стр. готовы")
             return True
 
@@ -879,6 +999,7 @@ class PipelineBatchRunner:
             chk["phases"]["vlm"]["completed"] = True
             chk["phases"]["vlm"]["pages_done"] = total_masks
             self._write_checkpoint(masked_dir.parent.name, chk)
+            self._update_phase_progress("phase3", 100.0, total_masks, total_masks, "skipped", "Пропущено (skip_vlm=True)")
             self._update_hud("Фаза 3/4: VLM OCR пропущен (skip_vlm=True)", 90.0, "Текстовый VLM отключен в настройках")
             return True
 
@@ -887,7 +1008,9 @@ class PipelineBatchRunner:
         if not is_online:
             with self._lock:
                 self.metrics["last_log"] = f"LM Studio недоступен: {msg}"
-            return self._vlm_fallback_mode(mask_files, raw_md_dir, chk)
+            ok = self._vlm_fallback_mode(mask_files, raw_md_dir, chk)
+            self._update_phase_progress("phase3", 100.0, total_masks, total_masks, "completed", "Сформировано (fallback)")
+            return ok
 
         # Attempt to load model
         try:
@@ -936,13 +1059,16 @@ class PipelineBatchRunner:
             chk["phases"]["vlm"]["pages_done"] = vlm_done_count
             self._write_checkpoint(masked_dir.parent.name, chk)
 
-            pct = 55.0 + (m_idx / total_masks) * 35.0
+            pct_p3 = round((m_idx / max(1, total_masks)) * 100.0, 1)
+            detail_msg = f"Стр. {m_idx}/{total_masks} (Qwen VLM через LM Studio)"
+            self._update_phase_progress("phase3", pct_p3, m_idx, total_masks, "running", detail_msg)
             self._update_hud(
                 "Фаза 3/4: Текстовый VLM проход",
-                pct,
-                f"Стр. {m_idx}/{total_masks} (Qwen VLM через LM Studio)",
+                55.0 + (m_idx / total_masks) * 35.0,
+                detail_msg,
             )
 
+        self._update_phase_progress("phase3", 100.0, total_masks, total_masks, "completed", f"Все {total_masks} стр. обработаны VLM")
         chk["phases"]["vlm"]["completed"] = True
         self._write_checkpoint(masked_dir.parent.name, chk)
         return True
@@ -983,11 +1109,14 @@ class PipelineBatchRunner:
         complete_book_file = book_dir / f"{book_dir.name}_complete.md"
         if not overwrite and complete_book_file.is_file() and complete_book_file.stat().st_size > 0:
             chk["phases"]["assembly"]["completed"] = True
+            self._update_phase_progress("phase4", 100.0, 1, 1, "completed", "Издание уже собрано на диске")
             return True
 
         raw_files = sorted(raw_md_dir.glob("page_*_raw.md"))
-        all_pages_content = []
+        total_raw = len(raw_files)
+        self._update_phase_progress("phase4", 10.0, 0, total_raw, "running", "Сборка Markdown страниц...")
 
+        all_pages_content = []
         injected_stubs = set()
 
         def inject_abc(match):
@@ -999,7 +1128,7 @@ class PipelineBatchRunner:
                 return f"\n\n```abc\n{abc}\n```\n\n"
             return f"\n\n% [Ноты {cid} не найдены]\n\n"
 
-        for r_file in raw_files:
+        for r_idx, r_file in enumerate(raw_files, start=1):
             p_num_str = re.search(r"page_(\d+)_raw", r_file.stem)
             p_num = p_num_str.group(1) if p_num_str else "0001"
             final_file = final_dir / f"page_{p_num}.md"
@@ -1033,9 +1162,13 @@ class PipelineBatchRunner:
             final_file.write_text(final_text, encoding="utf-8")
             all_pages_content.append(f"<!-- PAGE {p_num} -->\n" + final_text)
 
+            pct_p4 = round(10.0 + (r_idx / max(1, total_raw)) * 80.0, 1)
+            self._update_phase_progress("phase4", pct_p4, r_idx, total_raw, "running", f"Сборка стр. {p_num} ({r_idx}/{total_raw})")
+
         full_content = "\n\n---\n\n".join(all_pages_content)
         complete_book_file.write_text(full_content, encoding="utf-8")
         chk["phases"]["assembly"]["completed"] = True
+        self._update_phase_progress("phase4", 100.0, total_raw, total_raw, "completed", f"Издание {book_dir.name} собрано")
         return True
 
     @staticmethod

@@ -43,6 +43,14 @@
     hudPhaseName: document.getElementById('hud-phase-name'),
     hudPhaseBar: document.getElementById('hud-phase-bar'),
     hudItemDetail: document.getElementById('hud-item-detail'),
+    hudP1Bar: document.getElementById('hud-p1-bar'),
+    hudP1Badge: document.getElementById('hud-p1-badge'),
+    hudP2Bar: document.getElementById('hud-p2-bar'),
+    hudP2Badge: document.getElementById('hud-p2-badge'),
+    hudP3Bar: document.getElementById('hud-p3-bar'),
+    hudP3Badge: document.getElementById('hud-p3-badge'),
+    hudP4Bar: document.getElementById('hud-p4-bar'),
+    hudP4Badge: document.getElementById('hud-p4-badge'),
 
     // Pipeline Controls
     btnPipelineStart: document.getElementById('btn-pipeline-start'),
@@ -254,21 +262,58 @@
     });
   }
 
+  function updatePhaseBadge(barEl, badgeEl, phase, unitName) {
+    if (!barEl || !badgeEl) return;
+    if (!phase) {
+      barEl.style.width = '0%';
+      badgeEl.textContent = 'Ожидание';
+      badgeEl.className = 'hud-phase-badge';
+      return;
+    }
+
+    const pct = typeof phase.pct === 'number' ? Math.min(100, Math.max(0, phase.pct)) : 0;
+    barEl.style.width = `${pct}%`;
+
+    const status = phase.status || 'pending';
+    badgeEl.className = `hud-phase-badge ${status}`;
+
+    if (status === 'completed') {
+      badgeEl.textContent = phase.total > 0 ? `100% (${phase.total} ${unitName})` : '100% Готово';
+    } else if (status === 'skipped') {
+      badgeEl.textContent = 'Пропущено';
+    } else if (status === 'running') {
+      badgeEl.textContent = phase.total > 0 ? `${phase.done}/${phase.total} ${unitName}` : `${pct.toFixed(0)}%`;
+    } else {
+      badgeEl.textContent = 'Ожидание';
+    }
+  }
+
   async function pollPipelineStatus() {
     try {
       const data = await api('/api/pipeline/status');
       state.pipelineMetrics = data;
 
-      // Update HUD Numbers & Bars
-      DOM.hudQueueMetric.textContent = `${data.queue_progress_pct.toFixed(1)}% (Книг: ${data.current_book_index}/${data.total_books})`;
-      DOM.hudQueueBar.style.width = `${Math.min(100, data.queue_progress_pct)}%`;
+      // Update HUD Master Queue Progress & Time
+      const qPct = typeof data.queue_progress_pct === 'number' ? data.queue_progress_pct : 0.0;
+      const curBook = data.current_book_index || 0;
+      const totBooks = data.total_books || 0;
+      const bookName = data.current_book_name ? ` • ${data.current_book_name}` : '';
+      DOM.hudQueueMetric.textContent = `${qPct.toFixed(1)}% (Книг: ${curBook}/${totBooks}${bookName})`;
+      if (DOM.hudQueueBar) DOM.hudQueueBar.style.width = `${Math.min(100, Math.max(0, qPct))}%`;
 
-      DOM.hudPhaseName.textContent = data.current_phase_name;
-      DOM.hudPhaseBar.style.width = `${Math.min(100, data.book_progress_pct)}%`;
-      DOM.hudItemDetail.textContent = data.current_item_detail;
+      if (DOM.hudPhaseName) DOM.hudPhaseName.textContent = data.current_phase_name || 'Готов к запуску';
+      if (DOM.hudPhaseBar) DOM.hudPhaseBar.style.width = `${Math.min(100, data.book_progress_pct || 0)}%`;
+      if (DOM.hudItemDetail) DOM.hudItemDetail.textContent = data.current_item_detail || 'Очередь ожидает команды';
 
       const elapsed = formatSeconds(data.elapsed_seconds);
       DOM.hudTimeMetric.textContent = `Прошло: ${elapsed}`;
+
+      // Update 4 Dedicated Phase Bars & Badges
+      const pp = data.phase_progress || {};
+      updatePhaseBadge(DOM.hudP1Bar, DOM.hudP1Badge, pp.phase1, 'стр.');
+      updatePhaseBadge(DOM.hudP2Bar, DOM.hudP2Badge, pp.phase2, 'стан.');
+      updatePhaseBadge(DOM.hudP3Bar, DOM.hudP3Badge, pp.phase3, 'стр.');
+      updatePhaseBadge(DOM.hudP4Bar, DOM.hudP4Badge, pp.phase4, 'стр.');
 
       // Auto-refresh queue every 2.5 seconds ONLY when on dashboard tab
       // so we don't contend for Python GIL and disk I/O while inspecting pages in workbench

@@ -82,31 +82,73 @@
       
       <!-- Fixed-Height Unified Progress HUD (Strict Zero-Scroll Component) -->
       <section class="hud-dashboard-card">
-        <div class="hud-row">
-          <div class="hud-metric-group">
+        <!-- Master Queue Progress Bar (Top Row) -->
+        <div class="hud-queue-row">
+          <div class="hud-queue-label-group">
             <span class="hud-metric-label">ОБЩИЙ ПРОГРЕСС ОЧЕРЕДИ</span>
-            <span id="hud-queue-metric" class="hud-metric-value">0.0% (Книг: 0/0 • Стр: 0)</span>
+            <span id="hud-queue-metric" class="hud-metric-value">0.0% (Книг: 0/0)</span>
           </div>
-          <div class="hud-progress-wrapper">
-            <div id="hud-queue-bar" class="hud-progress-fill" style="width: 0%;"></div>
+          <div class="hud-progress-wrapper hud-queue-wrapper">
+            <div id="hud-queue-bar" class="hud-progress-fill bar-queue" style="width: 0%;"></div>
           </div>
-          <div class="hud-time-group">
-            <span class="hud-metric-label">ВРЕМЯ ОБРАБОТКИ</span>
-            <span id="hud-time-metric" class="hud-metric-value">00:00 • ETA: --:--</span>
+          <div class="hud-queue-meta-group">
+            <span id="hud-phase-name" class="hud-phase-highlight">Готов к запуску</span>
+            <span id="hud-time-metric" class="hud-time-value">Прошло: 00:00</span>
           </div>
         </div>
 
-        <div class="hud-row" style="margin-top: 10px;">
-          <div class="hud-metric-group">
-            <span class="hud-metric-label">ТЕКУЩИЙ ЭТАП ПРОХОДА</span>
-            <span id="hud-phase-name" class="hud-phase-highlight">Готов к запуску</span>
+        <!-- 4 Dedicated Stage Progress Bars (Phase Grid) -->
+        <div class="hud-phases-grid">
+          <!-- Phase 1: Slicing & Layout Analysis -->
+          <div class="hud-phase-card">
+            <div class="hud-phase-meta">
+              <span class="hud-phase-title">1. Нарезка и верстка</span>
+              <span id="hud-p1-badge" class="hud-phase-badge">Ожидание</span>
+            </div>
+            <div class="hud-phase-bar-wrapper">
+              <div id="hud-p1-bar" class="hud-phase-fill fill-p1" style="width: 0%;"></div>
+            </div>
           </div>
-          <div class="hud-progress-wrapper">
-            <div id="hud-phase-bar" class="hud-progress-fill fill-accent" style="width: 0%;"></div>
+
+          <!-- Phase 2: Optical Music Recognition -->
+          <div class="hud-phase-card">
+            <div class="hud-phase-meta">
+              <span class="hud-phase-title">2. Распознавание нот</span>
+              <span id="hud-p2-badge" class="hud-phase-badge">Ожидание</span>
+            </div>
+            <div class="hud-phase-bar-wrapper">
+              <div id="hud-p2-bar" class="hud-phase-fill fill-p2" style="width: 0%;"></div>
+            </div>
           </div>
-          <div class="hud-status-group">
-            <span id="hud-item-detail" class="hud-detail-text">Очередь ожидает команды</span>
+
+          <!-- Phase 3: Book Text VLM Extraction -->
+          <div class="hud-phase-card">
+            <div class="hud-phase-meta">
+              <span class="hud-phase-title">3. Текст книги (VLM)</span>
+              <span id="hud-p3-badge" class="hud-phase-badge">Ожидание</span>
+            </div>
+            <div class="hud-phase-bar-wrapper">
+              <div id="hud-p3-bar" class="hud-phase-fill fill-p3" style="width: 0%;"></div>
+            </div>
           </div>
+
+          <!-- Phase 4: Final Markdown Assembly -->
+          <div class="hud-phase-card">
+            <div class="hud-phase-meta">
+              <span class="hud-phase-title">4. Сборка Markdown</span>
+              <span id="hud-p4-badge" class="hud-phase-badge">Ожидание</span>
+            </div>
+            <div class="hud-phase-bar-wrapper">
+              <div id="hud-p4-bar" class="hud-phase-fill fill-p4" style="width: 0%;"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Operational Detail Subline & Backward-compatible Phase Bar Anchor -->
+        <div class="hud-bottom-detail">
+          <span class="hud-metric-label" style="font-size: 10px;">ТЕКУЩАЯ ОПЕРАЦИЯ:</span>
+          <span id="hud-item-detail" class="hud-detail-text">Очередь ожидает команды</span>
+          <div id="hud-phase-bar" style="display: none; width: 0%;"></div>
         </div>
       </section>
 
