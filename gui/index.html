@@ -232,19 +232,20 @@
             <div class="split-column">
               <div class="panel-header">
                 <div class="panel-title-group">
-                  <span class="panel-title">Исходный скан с разметкой YOLO OLA v2.0</span>
+                  <span id="mode1-left-title" class="panel-title">Исходный скан листа PDF</span>
+                  <span id="badge-spread-info" class="badge badge-grand" style="display: none;">Разворот</span>
                   <span id="badge-staves-count" class="badge badge-staff">0 станов</span>
                 </div>
-                <span class="badge badge-grand">OLA v2.0</span>
+                <button id="btn-toggle-scan-mode" class="btn-xs" style="cursor: pointer; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); color: var(--text-secondary); border-radius: 4px; padding: 2px 8px; font-size: 11px; transition: all 0.2s;" title="Переключить между исходным листом PDF и разметкой YOLO">Разметка YOLO</button>
               </div>
               <div class="panel-canvas">
-                <img id="scan-debug-img" class="fit-image" alt="Аннотированный скан" src="" />
+                <img id="scan-debug-img" class="fit-image" alt="Исходный скан" src="" />
               </div>
             </div>
             <div class="split-column">
               <div class="panel-header">
                 <div class="panel-title-group">
-                  <span class="panel-title">Маскированная страница для VLM</span>
+                  <span id="mode1-right-title" class="panel-title">Маскированная страница для VLM</span>
                   <span class="badge badge-mask">&lt;!-- MUSIC_STUB_ID --&gt;</span>
                 </div>
                 <span class="text-secondary" style="font-size: 11px;">Белые плашки</span>

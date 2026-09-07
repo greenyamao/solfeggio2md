@@ -23,7 +23,8 @@
     activeMode: 1,
     selectedCropIndex: 0,
     activeCodeTab: 'abc',
-    isRawMarkdownView: false
+    isRawMarkdownView: false,
+    showYoloDebugMode1: false
   };
 
   // DOM Elements Cache
@@ -79,6 +80,9 @@
     scanDebugImg: document.getElementById('scan-debug-img'),
     scanMaskImg: document.getElementById('scan-mask-img'),
     badgeStavesCount: document.getElementById('badge-staves-count'),
+    mode1LeftTitle: document.getElementById('mode1-left-title'),
+    badgeSpreadInfo: document.getElementById('badge-spread-info'),
+    btnToggleScanMode: document.getElementById('btn-toggle-scan-mode'),
 
     // Mode 2: Normalization
     stavesSubbar2: document.getElementById('staves-subbar-2'),
@@ -533,9 +537,38 @@
 
   function renderMode1() {
     const d = state.pageData;
-    DOM.scanDebugImg.src = d.debug_url || '';
+    const showYolo = state.showYoloDebugMode1;
+
+    if (showYolo) {
+      DOM.scanDebugImg.src = d.debug_url || d.original_url || '';
+      if (DOM.mode1LeftTitle) DOM.mode1LeftTitle.textContent = `Разметка YOLO OLA v2.0 (${d.title})`;
+      if (DOM.btnToggleScanMode) {
+        DOM.btnToggleScanMode.textContent = 'Исходный лист';
+        DOM.btnToggleScanMode.style.borderColor = 'var(--accent-primary)';
+      }
+    } else {
+      DOM.scanDebugImg.src = d.original_url || d.debug_url || '';
+      if (DOM.mode1LeftTitle) DOM.mode1LeftTitle.textContent = 'Исходный скан листа PDF';
+      if (DOM.btnToggleScanMode) {
+        DOM.btnToggleScanMode.textContent = 'Разметка YOLO';
+        DOM.btnToggleScanMode.style.borderColor = 'rgba(255,255,255,0.12)';
+      }
+    }
+
     DOM.scanMaskImg.src = d.mask_url || '';
     DOM.badgeStavesCount.textContent = `${d.crops.length} станов`;
+
+    if (DOM.badgeSpreadInfo) {
+      if (d.is_spread) {
+        DOM.badgeSpreadInfo.style.display = 'inline-flex';
+        DOM.badgeSpreadInfo.textContent = d.spread_side === 'left' ? 'Разворот: левая стр.' : 'Разворот: правая стр.';
+        DOM.badgeSpreadInfo.className = 'badge badge-grand';
+      } else {
+        DOM.badgeSpreadInfo.style.display = 'inline-flex';
+        DOM.badgeSpreadInfo.textContent = 'Одиночный лист';
+        DOM.badgeSpreadInfo.className = 'badge badge-staff';
+      }
+    }
   }
 
   function renderMode2() {
@@ -781,6 +814,13 @@
         switchWorkbenchMode(parseInt(btn.dataset.mode, 10));
       });
     });
+
+    if (DOM.btnToggleScanMode) {
+      DOM.btnToggleScanMode.addEventListener('click', () => {
+        state.showYoloDebugMode1 = !state.showYoloDebugMode1;
+        renderMode1();
+      });
+    }
 
     DOM.toggleGuidelines.addEventListener('change', (e) => {
       DOM.guidelinesLayer.style.display = e.target.checked ? 'block' : 'none';

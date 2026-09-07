@@ -113,14 +113,29 @@ class LayoutDetector:
             is_cuda = (self.device == "cuda" or "cuda" in str(self.device).lower())
             if is_cuda and torch.cuda.is_available():
                 dummy_img = np.zeros((640, 640, 3), dtype=np.uint8)
+                precision_kwargs = self._get_precision_kwargs(is_cuda=True)
                 self.model.predict(
                     source=dummy_img,
                     conf=self.conf_threshold,
                     imgsz=640,
                     device=self.device,
-                    half=True,
-                    verbose=False
+                    verbose=False,
+                    **precision_kwargs
                 )
+
+    @staticmethod
+    def _get_precision_kwargs(is_cuda: bool) -> dict:
+        """
+        Determines the correct precision arguments for Ultralytics YOLO.
+        Ultralytics 8.4+ unified precision under `quantize` (16 for FP16) and deprecated `half`.
+        """
+        try:
+            from ultralytics.cfg import DEFAULT_CFG_DICT
+            if "quantize" in DEFAULT_CFG_DICT:
+                return {"quantize": 16} if is_cuda else {}
+        except Exception:
+            pass
+        return {"half": is_cuda}
 
     def purge_gpu_memory(self) -> None:
         """
@@ -256,13 +271,14 @@ class LayoutDetector:
             imgsz = min(max_cap, max(1024, target_sz))
 
         # Inference with Ultralytics YOLO (FP16 enabled on CUDA, disabled on CPU)
+        precision_kwargs = self._get_precision_kwargs(is_cuda)
         results = self.model.predict(
             source=img_bgr,
             conf=self.conf_threshold,
             imgsz=imgsz,
             device=self.device,
-            half=is_cuda,
-            verbose=False
+            verbose=False,
+            **precision_kwargs
         )
 
         raw_detections = []

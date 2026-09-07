@@ -29,6 +29,7 @@ from core.lmstudio_client import LMStudioClient
 from core.page_preprocessor import PagePreprocessor, deskew_page, normalize_staff_crop, detect_and_split_spread
 from core.layout_detector import LayoutDetector
 from core.book_section_filter import BookSectionFilter
+from core.windows_perf import enable_windows_high_performance
 
 
 DEFAULT_CONFIG_FILE = ROOT_DIR / "config.json"
@@ -439,6 +440,7 @@ class PipelineBatchRunner:
     # ---------------- 4-Phase Book Processing ---------------- #
 
     def _process_book(self, pdf_path: Path, item: Dict[str, Any]) -> bool:
+        enable_windows_high_performance()
         book_title = pdf_path.stem
         book_dir = self._get_book_dir(book_title)
 
@@ -616,6 +618,11 @@ class PipelineBatchRunner:
                 img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
                 img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR if pix.n == 4 else cv2.COLOR_RGB2BGR)
                 del pix
+
+                # Persist original un-split sheet scan for UI inspection / Mode 1 comparison
+                sheet_file = masked_dir / f"sheet_{s_idx:04d}.png"
+                if not sheet_file.is_file() or overwrite:
+                    cv2.imwrite(str(sheet_file), img_bgr)
 
                 # Automated two-page spread splitting along central spine / gutter
                 split_pages = detect_and_split_spread(img_bgr)

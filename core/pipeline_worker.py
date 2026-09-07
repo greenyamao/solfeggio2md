@@ -8,7 +8,7 @@ import numpy as np
 from typing import Dict, List, Any, Optional
 import pymupdf as fitz
 
-from core.page_preprocessor import deskew_page, PagePreprocessor, normalize_staff_crop
+from core.page_preprocessor import deskew_page, PagePreprocessor, normalize_staff_crop, detect_and_split_spread
 from core.layout_detector import LayoutDetector
 
 
@@ -95,13 +95,97 @@ class PipelineWorker:
             device = "cuda" if torch.cuda.is_available() else "cpu"
             self.layout_detector = LayoutDetector(weights_path=str(weights_path), device=device)
 
+    def _get_sheet_info_for_page(self, book_name: str, p_num: int) -> Dict[str, Any]:
+        """
+        Determines the source PDF sheet index, spread status, and URL for a given book page number.
+        Accommodates both 2-page spreads (where sheet produces 2 book pages) and single pages.
+        Caches rendered sheet image to disk as sheet_{s_idx:04d}.png if not already present.
+        """
+        book_dir = self.root_dir / "output" / book_name
+        masked_dir = book_dir / "2_masked_pages"
+        masked_dir.mkdir(parents=True, exist_ok=True)
+
+        pdf_path = self.root_dir / "in" / f"{book_name}.pdf"
+        if not pdf_path.is_file():
+            candidates = list((self.root_dir / "in").glob("*.pdf"))
+            if candidates:
+                pdf_path = candidates[0]
+            else:
+                mask_file = masked_dir / f"page_{p_num:04d}_masked.png"
+                debug_file = masked_dir / f"page_{p_num:04d}_debug.png"
+                fallback_url = (
+                    f"/output/{book_name}/2_masked_pages/{debug_file.name}"
+                    if debug_file.is_file()
+                    else f"/output/{book_name}/2_masked_pages/{mask_file.name}"
+                )
+                return {
+                    "sheet_idx": max(0, p_num - 1),
+                    "is_spread": False,
+                    "spread_side": "single",
+                    "sheet_url": fallback_url,
+                }
+
+        try:
+            with fitz.open(pdf_path) as doc:
+                total_sheets = len(doc)
+                target_s_idx = 0
+                is_spread = False
+                side = "single"
+                cur_bp = 1
+
+                for s_idx in range(total_sheets):
+                    p = doc[s_idx]
+                    w, h = p.rect.width, p.rect.height
+                    sheet_is_spread = (1.22 <= (w / float(max(1.0, h))) <= 2.2 and h >= 300)
+                    if sheet_is_spread:
+                        if p_num == cur_bp:
+                            target_s_idx = s_idx
+                            is_spread = True
+                            side = "left"
+                            break
+                        elif p_num == cur_bp + 1:
+                            target_s_idx = s_idx
+                            is_spread = True
+                            side = "right"
+                            break
+                        cur_bp += 2
+                    else:
+                        if p_num == cur_bp:
+                            target_s_idx = s_idx
+                            is_spread = False
+                            side = "single"
+                            break
+                        cur_bp += 1
+
+                sheet_file = masked_dir / f"sheet_{target_s_idx:04d}.png"
+                if not sheet_file.is_file():
+                    pix = doc[target_s_idx].get_pixmap(dpi=200, alpha=False)
+                    img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+                    img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR if pix.n == 4 else cv2.COLOR_RGB2BGR)
+                    cv2.imwrite(str(sheet_file), img_bgr)
+
+                return {
+                    "sheet_idx": target_s_idx,
+                    "is_spread": is_spread,
+                    "spread_side": side,
+                    "sheet_url": f"/output/{book_name}/2_masked_pages/sheet_{target_s_idx:04d}.png",
+                }
+        except Exception:
+            mask_file = masked_dir / f"page_{p_num:04d}_masked.png"
+            return {
+                "sheet_idx": max(0, p_num - 1),
+                "is_spread": False,
+                "spread_side": "single",
+                "sheet_url": f"/output/{book_name}/2_masked_pages/{mask_file.name}",
+            }
+
     def _generate_debug_page(self, book_name: str, p_num: int, debug_file: Path) -> bool:
         """
         Generates original scan with YOLO bounding boxes on demand if missing from disk.
+        Correctly accounts for two-page spread bisection to match physical book page numbers.
         """
         pdf_path = self.root_dir / "in" / f"{book_name}.pdf"
         if not pdf_path.is_file():
-            # Try to locate by prefix/name in in/
             candidates = list((self.root_dir / "in").glob("*.pdf"))
             if candidates:
                 pdf_path = candidates[0]
@@ -110,21 +194,34 @@ class PipelineWorker:
 
         try:
             self._ensure_layout_detector()
+            sheet_info = self._get_sheet_info_for_page(book_name, p_num)
+            s_idx = sheet_info["sheet_idx"]
+            side = sheet_info["spread_side"]
+
             with fitz.open(pdf_path) as doc:
-                if p_num > len(doc) or p_num < 1:
+                if s_idx >= len(doc) or s_idx < 0:
                     return False
-                page = doc[p_num - 1]
+                page = doc[s_idx]
                 pix = page.get_pixmap(dpi=200, alpha=False)
                 img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
                 img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR if pix.n == 4 else cv2.COLOR_RGB2BGR)
 
-            deskewed_bgr, _ = deskew_page(img_bgr)
+            if sheet_info["is_spread"]:
+                split_pages = detect_and_split_spread(img_bgr)
+                if len(split_pages) == 2:
+                    sub_img = split_pages[0][0] if side == "left" else split_pages[1][0]
+                else:
+                    sub_img = img_bgr
+            else:
+                sub_img = img_bgr
+
+            deskewed_bgr, _ = deskew_page(sub_img)
             detections = self.layout_detector.detect(deskewed_bgr)
             debug_img = self.layout_detector.render_debug_image(deskewed_bgr, detections)
             debug_file.parent.mkdir(parents=True, exist_ok=True)
             cv2.imwrite(str(debug_file), debug_img)
             return True
-        except Exception as e:
+        except Exception:
             return False
 
     def get_page_data(self, page_id: str) -> Dict[str, Any]:
@@ -196,15 +293,20 @@ class PipelineWorker:
         else:
             markdown_text = f"*(Текст страницы еще не распознан. Запустите пакетную обработку в Панели управления)*\n"
 
+        sheet_info = self._get_sheet_info_for_page(book_name, p_num)
+
         mask_rel = f"/output/{book_name}/2_masked_pages/page_{p_num:04d}_masked.png"
         debug_rel = f"/output/{book_name}/2_masked_pages/page_{p_num:04d}_debug.png" if debug_file.is_file() else mask_rel
 
         return {
             "page_id": page_id,
             "title": f"Стр. {p_num}",
-            "original_url": debug_rel,
+            "original_url": sheet_info["sheet_url"],
             "debug_url": debug_rel,
             "mask_url": mask_rel,
+            "is_spread": sheet_info["is_spread"],
+            "spread_side": sheet_info["spread_side"],
+            "sheet_idx": sheet_info["sheet_idx"],
             "crops": crops_data,
             "markdown": markdown_text
         }

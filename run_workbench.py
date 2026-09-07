@@ -36,6 +36,7 @@ if str(ROOT_DIR) not in sys.path:
 from core.pipeline_worker import PipelineWorker
 from core.pipeline_batch_runner import PipelineBatchRunner
 from core.lmstudio_client import LMStudioClient
+from core.windows_perf import enable_windows_high_performance
 
 
 def find_available_port(start_port: int = 18492) -> int:
@@ -262,6 +263,7 @@ def create_app(worker: PipelineWorker, runner: PipelineBatchRunner) -> bottle.Bo
 
 
 def main():
+    enable_windows_high_performance()
     worker = PipelineWorker()
     runner = PipelineBatchRunner()
     port = find_available_port(18492)
