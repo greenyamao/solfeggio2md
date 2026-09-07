@@ -215,11 +215,66 @@ class LayoutDetector:
     def merge_boxes(b1: List[int], b2: List[int]) -> List[int]:
         return [min(b1[0], b2[0]), min(b1[1], b2[1]), max(b1[2], b2[2]), max(b1[3], b2[3])]
 
+    @staticmethod
+    def trace_staff_horizontal_extent(gray: np.ndarray, box: List[int]) -> List[int]:
+        """
+        Given a candidate detection box [x1, y1, x2, y2], traces authentic
+        continuous horizontal staff lines left and right to capture the full width
+        from clef/brace to terminating barline.
+        """
+        img_h, img_w = gray.shape[:2]
+        x1, y1, x2, y2 = box
+        pad_y = 6
+        sy1 = max(0, y1 - pad_y)
+        sy2 = min(img_h, y2 + pad_y)
+        strip_gray = gray[sy1:sy2, :]
+        if strip_gray.size == 0:
+            return box
+
+        bg_val = float(np.percentile(strip_gray, 90))
+        bin_lines = (strip_gray < bg_val - 35).astype(np.uint8) * 255
+        k = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 1))
+        lines_only = cv2.morphologyEx(bin_lines, cv2.MORPH_OPEN, k)
+        col_sums = np.sum(lines_only > 0, axis=0)
+
+        mid_sums = col_sums[x1:x2]
+        active_mid = mid_sums[mid_sums > 0]
+        if len(active_mid) == 0:
+            return box
+        min_line_thresh = max(3, int(np.percentile(active_mid, 20) * 0.4))
+
+        # Trace left from x1
+        ext_x1 = x1
+        zero_run = 0
+        max_gap = 35
+        for x in range(x1, -1, -1):
+            if col_sums[x] >= min_line_thresh:
+                ext_x1 = x
+                zero_run = 0
+            else:
+                zero_run += 1
+                if zero_run > max_gap:
+                    break
+
+        # Trace right from x2
+        ext_x2 = x2
+        zero_run = 0
+        for x in range(x2, img_w):
+            if col_sums[x] >= min_line_thresh:
+                ext_x2 = x
+                zero_run = 0
+            else:
+                zero_run += 1
+                if zero_run > max_gap:
+                    break
+
+        return [ext_x1, y1, ext_x2, y2]
+
     @classmethod
     def heal_collinear_segments(
         cls,
         detections_list: List[Dict[str, Any]],
-        v_overlap_thresh: float = 0.60,
+        v_overlap_thresh: float = 0.55,
         max_gap_px: Optional[int] = None,
         img_w: int = 1000
     ) -> List[Dict[str, Any]]:
@@ -230,7 +285,7 @@ class LayoutDetector:
         if not detections_list:
             return []
         if max_gap_px is None:
-            max_gap_px = max(25, int(img_w * 0.025))
+            max_gap_px = max(40, int(img_w * 0.04))
 
         merged = []
         sorted_dets = sorted(detections_list, key=lambda x: x["confidence"], reverse=True)
@@ -270,6 +325,7 @@ class LayoutDetector:
         """
         self._ensure_loaded()
         img_h, img_w = img_bgr.shape[:2]
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
 
         # Scale-adaptive YOLO inference size:
         # Preserves fine 1-px staff lines across different page resolutions (150 - 400 DPI)
@@ -281,10 +337,12 @@ class LayoutDetector:
             imgsz = min(max_cap, max(1024, target_sz))
 
         # Inference with Ultralytics YOLO (FP16 enabled on CUDA, disabled on CPU)
+        # Use conf=0.15 to capture fainter measures and staves, filtered by is_valid_music_staff
+        effective_conf = min(self.conf_threshold, 0.15)
         precision_kwargs = self._get_precision_kwargs(is_cuda)
         results = self.model.predict(
             source=img_bgr,
-            conf=self.conf_threshold,
+            conf=effective_conf,
             imgsz=imgsz,
             device=self.device,
             verbose=False,
@@ -306,21 +364,35 @@ class LayoutDetector:
                     "box": [int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])],  # x1, y1, x2, y2
                 })
 
-        # Filter and prioritize detections:
-        # If a single 'staff' is physically inside an identified 'grand_staff',
-        # suppress the child single 'staff' to avoid double-cropping.
+        # Process all 5 YOLO classes:
+        # Normalize classes and extend each detection along authentic continuous horizontal staff lines
         raw_grand = []
         raw_staves = []
         raw_systems = []
 
         for d in raw_detections:
             cls_name = d["class"].lower().replace(" ", "_")
+            traced_box = self.trace_staff_horizontal_extent(gray, d["box"])
+            d_traced = {
+                "class": cls_name,
+                "confidence": d["confidence"],
+                "box": traced_box
+            }
+
             if cls_name in ("grand_staff", "grandstaff"):
-                raw_grand.append(d)
-            elif cls_name in ("staves", "staff"):
-                raw_staves.append(d)
-            elif cls_name in ("systems", "system"):
-                raw_systems.append(d)
+                d_traced["class"] = "grand_staff"
+                raw_grand.append(d_traced)
+            elif cls_name in ("systems", "system", "system_measures"):
+                h = traced_box[3] - traced_box[1]
+                if h >= 70:
+                    d_traced["class"] = "grand_staff"
+                    raw_grand.append(d_traced)
+                else:
+                    d_traced["class"] = "system"
+                    raw_systems.append(d_traced)
+            elif cls_name in ("staves", "staff", "stave_measures"):
+                d_traced["class"] = "staff"
+                raw_staves.append(d_traced)
 
         box_iou = self.box_iou
         vertical_overlap_ratio = self.vertical_overlap_ratio
@@ -383,6 +455,55 @@ class LayoutDetector:
         accepted_systems = heal_collinear_segments(accepted_systems)
 
         selected_candidates = accepted_grand + accepted_staves + accepted_systems
+
+        # Physical staff line verification (filters analysis brackets, slurs, divider lines)
+        valid_candidates = []
+        for cand in selected_candidates:
+            x1, y1, x2, y2 = cand["box"]
+            patch = img_bgr[y1:y2, x1:x2]
+            if is_valid_music_staff(patch, cand["class"], cand["confidence"]):
+                valid_candidates.append(cand)
+
+        # 4. Grand staff consolidation: merge vertically adjacent single staves that share the same horizontal span
+        valid_candidates.sort(key=lambda item: item["box"][1])
+        consolidated = []
+        skip_indices = set()
+        for i in range(len(valid_candidates)):
+            if i in skip_indices:
+                continue
+            c1 = valid_candidates[i]
+            merged_as_grand = False
+            if c1["class"] == "staff" and i + 1 < len(valid_candidates):
+                c2 = valid_candidates[i + 1]
+                if c2["class"] == "staff":
+                    x1_max = max(c1["box"][0], c2["box"][0])
+                    x2_min = min(c1["box"][2], c2["box"][2])
+                    w1 = c1["box"][2] - c1["box"][0]
+                    w2 = c2["box"][2] - c2["box"][0]
+                    h_overlap = (x2_min - x1_max) / float(min(w1, w2)) if x2_min > x1_max else 0.0
+                    v_gap = c2["box"][1] - c1["box"][3]
+                    h1 = c1["box"][3] - c1["box"][1]
+                    h2 = c2["box"][3] - c2["box"][1]
+                    avg_h = (h1 + h2) / 2.0
+                    # In piano music, gap between treble and bass is 0.5 to 2.5 staff heights
+                    if h_overlap >= 0.70 and 0 <= v_gap <= int(avg_h * 2.5):
+                        merged_box = [
+                            min(c1["box"][0], c2["box"][0]),
+                            c1["box"][1],
+                            max(c1["box"][2], c2["box"][2]),
+                            c2["box"][3]
+                        ]
+                        consolidated.append({
+                            "class": "grand_staff",
+                            "confidence": max(c1["confidence"], c2["confidence"]),
+                            "box": merged_box
+                        })
+                        skip_indices.add(i + 1)
+                        merged_as_grand = True
+            if not merged_as_grand:
+                consolidated.append(c1)
+
+        selected_candidates = consolidated
 
         # Physical staff line verification (filters analysis brackets, slurs, divider lines)
         valid_candidates = []

@@ -282,23 +282,35 @@ def normalize_staff_crop(crop_bgr: np.ndarray, notation_class: str = "staff") ->
                 ref_x_end = min(x_last, ref_x_start + 40)
                 init_profile = np.mean(lines_mask[:, ref_x_start:ref_x_end], axis=1)
 
+                # Estimate staff line spacing S from init_profile to bound physical dewarp search range
+                line_ys = np.where(init_profile > 0.15)[0]
+                diffs = [line_ys[i] - line_ys[i - 1] for i in range(1, len(line_ys)) if line_ys[i] - line_ys[i - 1] > 3]
+                s_spacing = float(np.median(diffs)) if len(diffs) else 8.0
+                max_phys_shift = max(2.5, min(4.5, s_spacing * 0.45))
+
                 shifts = np.zeros(w_d, dtype=np.float32)
-                search_range = 18
+                prev_d = 0.0
 
                 for x in range(x_first, x_last + 1):
                     col = lines_mask[:, x]
                     if sums[x] < 2.0:
-                        shifts[x] = shifts[x - 1] if x > x_first else 0.0
+                        shifts[x] = prev_d
                         continue
 
-                    corrs = [
-                        np.sum(col[d:] * init_profile[:-d]) if d > 0 else (
+                    # Search within physically continuous window around prev_d bounded by max_phys_shift
+                    low_d = int(np.floor(max(-max_phys_shift, prev_d - 1.5)))
+                    high_d = int(np.ceil(min(max_phys_shift, prev_d + 1.5)))
+
+                    corrs = []
+                    d_vals = list(range(low_d, high_d + 1))
+                    for d in d_vals:
+                        c = np.sum(col[d:] * init_profile[:-d]) if d > 0 else (
                             np.sum(col[:d] * init_profile[-d:]) if d < 0 else np.sum(col * init_profile)
                         )
-                        for d in range(-search_range, search_range + 1)
-                    ]
+                        corrs.append(c)
+
                     best_idx = int(np.argmax(corrs))
-                    best_d = float(best_idx - search_range)
+                    best_d = float(d_vals[best_idx])
                     # Sub-pixel parabolic peak refinement
                     if 0 < best_idx < len(corrs) - 1:
                         y0, y1, y2 = corrs[best_idx - 1], corrs[best_idx], corrs[best_idx + 1]
@@ -306,6 +318,7 @@ def normalize_staff_crop(crop_bgr: np.ndarray, notation_class: str = "staff") ->
                         if denom > 1e-4:
                             best_d += float(y0 - y2) / denom
                     shifts[x] = best_d
+                    prev_d = best_d
 
                 # Pad margins with edge shifts so margins don't shear
                 if x_first > 0:
