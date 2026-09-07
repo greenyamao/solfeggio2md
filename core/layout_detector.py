@@ -536,13 +536,23 @@ class LayoutDetector:
                 for pb in final_blocks:
                     v_ratio = self.vertical_overlap_ratio(b_xy, pb["box"])
                     h_rel = self.horizontal_overlap_or_gap(b_xy, pb["box"])
-                    if v_ratio > 0.40 and h_rel > 0:
+                    v_mid = (b_xy[1] + b_xy[3]) / 2.0
+                    if (v_ratio > 0.20 or (pb["box"][1] <= v_mid <= pb["box"][3])) and h_rel > 0:
                         overlap = True
                         if cls_name in ("grand_staff", "grandstaff") and pb["class"] == "staff" and pb["staves_count"] >= 2:
                             pb["class"] = "grand_staff"
                         elif cls_name in ("system", "systems") and pb["staves_count"] >= 3:
                             pb["class"] = "system"
                         break
+
+                if not overlap:
+                    total_v_intersect = sum(
+                        max(0, min(b_xy[3], pb["box"][3]) - max(b_xy[1], pb["box"][1]))
+                        for pb in final_blocks
+                        if self.horizontal_overlap_or_gap(b_xy, pb["box"]) > 0
+                    )
+                    if (total_v_intersect / float(max(1, b_xy[3] - b_xy[1]))) > 0.25:
+                        overlap = True
 
                 if not overlap and conf >= 0.35 and is_valid_music_staff(img_bgr[b_xy[1]:b_xy[3], b_xy[0]:b_xy[2]], cls_name, conf):
                     bh = b_xy[3] - b_xy[1]

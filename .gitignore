@@ -22,3 +22,6 @@ weights/*.bin
 
 # Queue state
 queue_state.json
+
+# Scratch and diagnostic logs
+/scratch/
