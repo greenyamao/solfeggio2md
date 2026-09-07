@@ -264,6 +264,13 @@ def main():
     p_pair.add_argument("--pair", type=str, required=True, help="1-based staff indices, e.g. 1,2")
     p_pair.add_argument("--book", type=str, help="Optional PDF path")
 
+    # Crop command
+    p_crop = subparsers.add_parser("crop", help="Inspect normalization of a specific staff crop")
+    p_crop.add_argument("--page", type=int, required=True, help="Book page number")
+    p_crop.add_argument("--staff", type=int, default=1, help="1-based staff block index on page (default: 1)")
+    p_crop.add_argument("--render", action="store_true", help="Save before/after comparison to scratch/")
+    p_crop.add_argument("--book", type=str, help="Optional PDF path")
+
     args = parser.parse_args()
 
     pdf_path = Path(args.book) if args.book else get_default_pdf()
@@ -314,6 +321,39 @@ def main():
               f"gap={res['v_gap_px']}px ({res['v_gap_S']}S), IoU={res['h_iou']}, "
               f"left_brace={res['has_left_brace']}, barlines={res['inter_barlines_count']} -> "
               f"{res['verdict']}")
+
+    elif args.command == "crop":
+        page_res = inspect_page(resolver, detector, args.page, render=False)
+        blocks = page_res["blocks"]
+        if args.staff < 1 or args.staff > len(blocks):
+            print(f"Error: Page {args.page} has {len(blocks)} blocks (1-based).")
+            return
+        b = blocks[args.staff - 1]
+        img_bgr = resolver.get_page_bgr(args.page)
+        px1, py1, px2, py2 = b["pad"]
+        crop = img_bgr[py1:py2, px1:px2]
+
+        t0 = time.perf_counter()
+        norm_crop, tilt, bend = normalize_staff_crop(crop, notation_class=b["cls"])
+        dt_ms = (time.perf_counter() - t0) * 1000
+
+        render_msg = ""
+        if args.render:
+            SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
+            out_p = SCRATCH_DIR / f"crop_p{args.page:04d}_s{args.staff:02d}.png"
+            h_c, w_c = crop.shape[:2]
+            h_n, w_n = norm_crop.shape[:2]
+            max_w = max(w_c, w_n)
+            c_pad = cv2.copyMakeBorder(crop, 0, 0, 0, max_w - w_c, cv2.BORDER_CONSTANT, value=(255, 255, 255))
+            n_pad = cv2.copyMakeBorder(norm_crop, 0, 0, 0, max_w - w_n, cv2.BORDER_CONSTANT, value=(255, 255, 255))
+            sep = np.full((3, max_w, 3), (0, 0, 255), dtype=np.uint8)
+            stacked = np.vstack([c_pad, sep, n_pad])
+            cv2.imwrite(str(out_p), stacked)
+            render_msg = f" | Img: {out_p}"
+
+        action = "straightened" if bend >= 1.0 else "clean (unchanged)"
+        print(f"P{args.page:04d} #{args.staff} {b['cls']} [{crop.shape[1]}x{crop.shape[0]}px]: "
+              f"tilt={tilt:+.1f}° bend={bend:.1f}px -> {action} in {dt_ms:.1f}ms{render_msg}")
 
 
 if __name__ == "__main__":

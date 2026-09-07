@@ -258,7 +258,9 @@ def normalize_staff_crop(crop_bgr: np.ndarray, notation_class: str = "staff") ->
     else:
         deskewed = padded_rot
 
-    # 3. 1D Continuous Profile Straightening: aligns every vertical 1-px column to horizontal reference
+    # 3. 5 Virtual Reference Lines Alignment:
+    # Directly aligns vertical 1-px slices by the averaged delta between the 5 virtual reference lines and 5 real staff lines.
+    # Completely rejects duration arrows, beams, accidentals, and lyrics without parabola predictions.
     bend_delta = 0.0
     h_d, w_d = deskewed.shape[:2]
     if w_d >= 160 and h_d >= 25:
@@ -267,7 +269,7 @@ def normalize_staff_crop(crop_bgr: np.ndarray, notation_class: str = "staff") ->
             bg_val = float(np.percentile(d_gray, 90))
             bin_inv = (d_gray < bg_val - 35).astype(np.float32)
 
-            # Isolate horizontal staff line segments (erase note stems, text, accidentals)
+            # Isolate horizontal staff line segments
             k_len = max(15, min(40, int(w_d * 0.04)))
             k_line = cv2.getStructuringElement(cv2.MORPH_RECT, (k_len, 1))
             lines_mask = cv2.morphologyEx(bin_inv, cv2.MORPH_OPEN, k_line)
@@ -278,20 +280,71 @@ def normalize_staff_crop(crop_bgr: np.ndarray, notation_class: str = "staff") ->
                 x_first = int(has_lines[0])
                 x_last = int(has_lines[-1])
 
-                ref_x_start = min(x_first + 5, max(x_first, x_last - 45))
-                ref_x_end = min(x_last, ref_x_start + 40)
-                init_profile = np.mean(lines_mask[:, ref_x_start:ref_x_end], axis=1)
+                # Establish 5 virtual reference lines from central stable span
+                x_mid_start = int(w_d * 0.25)
+                x_mid_end = int(w_d * 0.75)
+                if x_mid_end <= x_mid_start + 20:
+                    x_mid_start, x_mid_end = x_first, x_last
 
-                # Estimate staff line spacing S from init_profile to bound physical dewarp search range
-                line_ys = np.where(init_profile > 0.15)[0]
-                diffs = [line_ys[i] - line_ys[i - 1] for i in range(1, len(line_ys)) if line_ys[i] - line_ys[i - 1] > 3]
-                s_spacing = float(np.median(diffs)) if len(diffs) else 8.0
-                max_phys_shift = max(3.5, min(14.0, s_spacing * 1.5))
+                mid_proj = np.sum(lines_mask[:, x_mid_start:x_mid_end], axis=1)
 
-                shifts = np.zeros(w_d, dtype=np.float32)
-                prev_d = 0.0
+                # Detect horizontal line peaks in the stable body
+                peaks = []
+                for y in range(1, h_d - 1):
+                    if mid_proj[y] > mid_proj[y-1] and mid_proj[y] >= mid_proj[y+1] and mid_proj[y] > 2.0:
+                        peaks.append((mid_proj[y], y))
+                peaks.sort(key=lambda p: p[0], reverse=True)
 
-                # Offload 1D cross-correlation batch to CUDA if available to avoid CPU thread heating
+                is_grand = notation_class.lower().replace(" ", "_") in ("grand_staff", "grandstaff")
+                geom_s = max(2.5, h_d / 13.0 if is_grand else h_d / 4.0)
+
+                filtered_peaks = []
+                for p in peaks:
+                    y = p[1]
+                    if all(abs(y - fp) >= max(3, int(geom_s * 0.5)) for fp in filtered_peaks):
+                        filtered_peaks.append(y)
+                filtered_peaks.sort()
+
+                diffs = [filtered_peaks[i] - filtered_peaks[i-1] for i in range(1, len(filtered_peaks))
+                         if 0.45 * geom_s <= filtered_peaks[i] - filtered_peaks[i-1] <= 1.8 * geom_s]
+                staff_s = float(np.median(diffs)) if diffs else float(geom_s)
+
+                # Locate the 5 virtual reference lines (or 5+5 for grand staff)
+                virtual_lines = []
+                if is_grand and len(filtered_peaks) >= 10:
+                    treble_cands = [p for p in filtered_peaks if p < h_d * 0.55]
+                    bass_cands = [p for p in filtered_peaks if p >= h_d * 0.45]
+                    if len(treble_cands) >= 5 and len(bass_cands) >= 5:
+                        virtual_lines.extend(treble_cands[:5])
+                        virtual_lines.extend(bass_cands[-5:])
+
+                if len(virtual_lines) < 5:
+                    if len(filtered_peaks) >= 5:
+                        best_err = 999.0
+                        best_grp = filtered_peaks[:5]
+                        for i in range(len(filtered_peaks) - 4):
+                            cand = filtered_peaks[i:i+5]
+                            err = float(np.mean(np.abs(np.diff(cand) - staff_s)))
+                            if err < best_err:
+                                best_err = err
+                                best_grp = cand
+                        virtual_lines = best_grp
+                    else:
+                        center_y = h_d / 2.0
+                        virtual_lines = [int(round(center_y + (k - 2) * staff_s)) for k in range(5)]
+
+                # Construct synthetic virtual comb kernel
+                comb_kernel = np.zeros(h_d, dtype=np.float32)
+                for yk in virtual_lines:
+                    for dy in [-1, 0, 1]:
+                        if 0 <= yk + dy < h_d:
+                            comb_kernel[yk + dy] = 1.0 if dy == 0 else 0.5
+
+                # Search range bounded by physical paper mechanics
+                max_phys_shift = max(3.5, min(14.0, staff_s * 1.5))
+                max_d_int = int(np.ceil(max_phys_shift))
+
+                # Batch cross-correlation via CUDA or CPU
                 use_cuda = False
                 try:
                     import torch
@@ -302,20 +355,19 @@ def normalize_staff_crop(crop_bgr: np.ndarray, notation_class: str = "staff") ->
                     pass
 
                 if use_cuda:
-                    max_d_int = int(np.ceil(max_phys_shift))
-                    t_mask = torch.from_numpy(lines_mask).cuda().permute(1, 0).unsqueeze(1)  # (w_d, 1, h_d)
-                    t_prof = torch.from_numpy(init_profile).cuda().view(1, 1, -1)
-                    corr_matrix = F.conv1d(t_mask, t_prof, padding=max_d_int).squeeze(1).cpu().numpy()
+                    t_mask = torch.from_numpy(lines_mask).cuda().permute(1, 0).unsqueeze(1)
+                    t_comb = torch.from_numpy(comb_kernel).cuda().view(1, 1, -1)
+                    corr_matrix = F.conv1d(t_mask, t_comb, padding=max_d_int).squeeze(1).cpu().numpy()
                     center_idx = max_d_int
 
+                    shifts = np.zeros(w_d, dtype=np.float32)
+                    prev_d = 0.0
                     for x in range(x_first, x_last + 1):
                         if sums[x] < 2.0:
                             shifts[x] = prev_d
                             continue
-
                         low_d = int(np.floor(max(-max_phys_shift, prev_d - 1.5)))
                         high_d = int(np.ceil(min(max_phys_shift, prev_d + 1.5)))
-
                         i_low = center_idx + low_d
                         i_high = center_idx + high_d + 1
                         sub_corrs = corr_matrix[x, i_low:i_high]
@@ -329,27 +381,24 @@ def normalize_staff_crop(crop_bgr: np.ndarray, notation_class: str = "staff") ->
                         shifts[x] = best_d
                         prev_d = best_d
                 else:
+                    shifts = np.zeros(w_d, dtype=np.float32)
+                    prev_d = 0.0
                     for x in range(x_first, x_last + 1):
                         col = lines_mask[:, x]
                         if sums[x] < 2.0:
                             shifts[x] = prev_d
                             continue
-
-                        # Search within physically continuous window around prev_d bounded by max_phys_shift
                         low_d = int(np.floor(max(-max_phys_shift, prev_d - 1.5)))
                         high_d = int(np.ceil(min(max_phys_shift, prev_d + 1.5)))
-
                         corrs = []
                         d_vals = list(range(low_d, high_d + 1))
                         for d in d_vals:
-                            c = np.sum(col[d:] * init_profile[:-d]) if d > 0 else (
-                                np.sum(col[:d] * init_profile[-d:]) if d < 0 else np.sum(col * init_profile)
+                            c = np.sum(col[d:] * comb_kernel[:-d]) if d > 0 else (
+                                np.sum(col[:d] * comb_kernel[-d:]) if d < 0 else np.sum(col * comb_kernel)
                             )
                             corrs.append(c)
-
                         best_idx = int(np.argmax(corrs))
                         best_d = float(d_vals[best_idx])
-                        # Sub-pixel parabolic peak refinement
                         if 0 < best_idx < len(corrs) - 1:
                             y0, y1, y2 = corrs[best_idx - 1], corrs[best_idx], corrs[best_idx + 1]
                             denom = 2.0 * (2.0 * y1 - y0 - y2)
@@ -364,25 +413,26 @@ def normalize_staff_crop(crop_bgr: np.ndarray, notation_class: str = "staff") ->
                 if x_last < w_d - 1:
                     shifts[x_last + 1:] = shifts[x_last]
 
-                # Smooth displacement curve: median filter (removes localized spikes) + Gaussian filter
-                k_med = min(41, len(shifts) if len(shifts) % 2 == 1 else len(shifts) - 1)
-                if k_med >= 5:
+                # 4. Displacement smoothing: median filter (removes outlier spikes) + Gaussian smoothing (ensures C1 continuity without staircase aliasing)
+                k_med = min(15, len(shifts) if len(shifts) % 2 == 1 else len(shifts) - 1)
+                if k_med >= 3:
                     padded = np.pad(shifts, k_med // 2, mode='edge')
                     med_shifts = np.array([np.median(padded[i:i + k_med]) for i in range(w_d)], dtype=np.float32)
                 else:
                     med_shifts = shifts
 
-                k_gauss = min(51, len(shifts) if len(shifts) % 2 == 1 else len(shifts) - 1)
+                k_gauss = min(41, len(shifts) if len(shifts) % 2 == 1 else len(shifts) - 1)
                 if k_gauss >= 5:
-                    kernel_g = cv2.getGaussianKernel(k_gauss, 12.0).flatten()
+                    kernel_g = cv2.getGaussianKernel(k_gauss, 10.0).flatten()
                     smooth_dy = np.convolve(med_shifts, kernel_g, mode='same').astype(np.float32)
                 else:
                     smooth_dy = med_shifts
 
                 max_bend = float(np.max(np.abs(smooth_dy)))
-                if max_bend >= 0.5:
+                # 5. Strict Deadband Protection: if deviation is < 1.0 px, staff is already straight
+                if max_bend >= 1.0:
                     bend_delta = max_bend
-                    # Shift each vertical 1-pixel slice by smooth_dy(x) to lock lines strictly horizontal
+                    # Shift each vertical 1-pixel slice by smooth_dy(x) to lock lines strictly to virtual lines
                     grid_x = np.tile(np.arange(w_d, dtype=np.float32), (h_d, 1)).astype(np.float32)
                     grid_y = (np.tile(np.arange(h_d, dtype=np.float32)[:, None], (1, w_d)) + smooth_dy[None, :]).astype(np.float32)
 
