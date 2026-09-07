@@ -110,9 +110,11 @@
     omrCodeBox: document.getElementById('omr-code-box'),
     omrCopyStatus: document.getElementById('omr-copy-status'),
     omrSheetCanvas: document.getElementById('omr-sheet-canvas'),
+    omrSheetViewport: document.getElementById('omr-sheet-viewport'),
     omrSheetDiagnostics: document.getElementById('omr-sheet-diagnostics'),
     omrRenderTiming: document.getElementById('omr-render-timing'),
     omrSheetEngineBadge: document.getElementById('omr-sheet-engine-badge'),
+    btnToggleScoreTheme: document.getElementById('btn-toggle-score-theme'),
 
     // Mode 4: Book Final
     finalScanImg: document.getElementById('final-scan-img'),
@@ -1057,6 +1059,18 @@
         }
       });
       scoreObserver.observe(DOM.omrSheetCanvas);
+    }
+
+    let isDarkScoreTheme = false;
+    if (DOM.btnToggleScoreTheme) {
+      DOM.btnToggleScoreTheme.addEventListener('click', () => {
+        isDarkScoreTheme = !isDarkScoreTheme;
+        if (DOM.omrSheetViewport) {
+          DOM.omrSheetViewport.classList.toggle('theme-paper', !isDarkScoreTheme);
+          DOM.omrSheetViewport.classList.toggle('theme-dark', isDarkScoreTheme);
+        }
+        DOM.btnToggleScoreTheme.querySelector('span').textContent = isDarkScoreTheme ? 'Бумага: Темная' : 'Бумага: Белая';
+      });
     }
 
     DOM.btnRerunOmr.addEventListener('click', async () => {

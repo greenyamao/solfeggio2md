@@ -344,10 +344,17 @@
                     <span class="omr-sheet-title">ОТРЕНДЕРЕННЫЙ НОТНЫЙ СТАН</span>
                     <span id="omr-sheet-engine-badge" class="badge badge-grand">abcjs (Direct3D SVG)</span>
                   </div>
-                  <span id="omr-sheet-diagnostics" class="omr-sheet-status">Ожидание нот...</span>
+                  <div style="display: flex; align-items: center; gap: 10px;">
+                    <span id="omr-sheet-diagnostics" class="omr-sheet-status">Ожидание нот...</span>
+                    <button id="btn-toggle-score-theme" class="btn-action" style="padding: 2px 8px; font-size: 11px;" title="Переключить фон нотного листа (Бумага / Темный)">
+                      <span>Бумага: Белая</span>
+                    </button>
+                  </div>
                 </div>
-                <div id="omr-sheet-viewport" class="omr-sheet-viewport">
-                  <div id="omr-sheet-canvas" class="omr-sheet-canvas"></div>
+                <div id="omr-sheet-viewport" class="omr-sheet-viewport theme-paper">
+                  <div class="omr-sheet-paper">
+                    <div id="omr-sheet-canvas" class="omr-sheet-canvas"></div>
+                  </div>
                 </div>
               </div>
 

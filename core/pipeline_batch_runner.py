@@ -810,9 +810,13 @@ class PipelineBatchRunner:
 
             for cf, res in zip(valid_batch_files, results):
                 abc_content = res.get("abc", "")
+                kern_content = res.get("raw_kern", "")
                 if abc_content:
                     abc_file = crops_dir / f"{cf.stem}.abc"
                     abc_file.write_text(abc_content, encoding="utf-8")
+                if kern_content:
+                    kern_file = crops_dir / f"{cf.stem}.kern"
+                    kern_file.write_text(kern_content, encoding="utf-8")
                 crops_done_count += 1
 
             # Update checkpoint and HUD once per batch (instead of per single crop)

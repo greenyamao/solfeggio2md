@@ -259,6 +259,25 @@ class PipelineWorker:
                 abc_file = crops_dir / f"{cf.stem}.abc"
                 abc_txt = abc_file.read_text(encoding="utf-8", errors="replace").strip() if abc_file.is_file() else ""
 
+                kern_file = crops_dir / f"{cf.stem}.kern"
+                if kern_file.is_file():
+                    kern_txt = kern_file.read_text(encoding="utf-8", errors="replace").strip()
+                elif abc_txt:
+                    try:
+                        import verovio
+                        verovio.enableLog(False)
+                        tk = verovio.toolkit()
+                        tk.setOptions(json.dumps({"inputFrom": "abc"}))
+                        if tk.loadData(abc_txt):
+                            kern_txt = tk.getHumdrumBuffer()
+                            kern_file.write_text(kern_txt, encoding="utf-8")
+                        else:
+                            kern_txt = ""
+                    except Exception:
+                        kern_txt = ""
+                else:
+                    kern_txt = ""
+
                 deskew_file = crops_dir / f"{cf.stem}_deskew.png"
                 cf_bgr = cv2.imread(str(cf))
                 if cf_bgr is not None:
@@ -283,7 +302,7 @@ class PipelineWorker:
                     "width": w_c,
                     "height": h_c,
                     "abc": abc_txt,
-                    "kern": "",
+                    "kern": kern_txt,
                     "model_used": "OMR" if abc_txt else "Pending"
                 })
 
