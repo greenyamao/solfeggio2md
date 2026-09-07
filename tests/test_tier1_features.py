@@ -648,6 +648,66 @@ class TestTier1FeatureCoverage(unittest.TestCase):
         saved_chk = runner._read_checkpoint("throttle_book")
         self.assertEqual(saved_chk["phases"]["omr"]["crops_done"], 20)
 
+    def test_f8_06_transcribe_crops_batch_files_persists_disk(self):
+        """F8: Verify _transcribe_crops_batch_files invokes OMR and writes both .abc and .kern to disk."""
+        from unittest.mock import MagicMock
+        cfg_file = self.test_root / "config.json"
+        cfg_file.write_text(json.dumps(DEFAULT_CONFIG), encoding="utf-8")
+        runner = PipelineBatchRunner(config_path=cfg_file)
+
+        book_dir = runner._get_book_dir("test_pipelined_omr")
+        crops_dir = book_dir / "1_crops"
+        crops_dir.mkdir(parents=True, exist_ok=True)
+
+        crop_file = crops_dir / "test_P0001_S01_staff.png"
+        cv2.imwrite(str(crop_file), np.full((80, 400, 3), 255, dtype=np.uint8))
+
+        mock_omr = MagicMock()
+        mock_omr.transcribe_crops_batch.return_value = [
+            {"abc": "X:1\nK:C\nC D E F|]", "raw_kern": "**kern\n4c\n4d\n4e\n4f\n==\n*-", "model_used": "Transcoda-59M"}
+        ]
+        runner.omr_engine = mock_omr
+
+        saved = runner._transcribe_crops_batch_files(crops_dir, [crop_file])
+        self.assertEqual(saved, 1)
+        self.assertTrue((crops_dir / "test_P0001_S01_staff.abc").is_file())
+        self.assertTrue((crops_dir / "test_P0001_S01_staff.kern").is_file())
+        self.assertIn("C D E F", (crops_dir / "test_P0001_S01_staff.abc").read_text(encoding="utf-8"))
+
+    def test_f8_07_pipelined_phase1_2_fallback_routing(self):
+        """F8: Verify _process_book routes already sliced books to _phase_2_omr if slicing completed."""
+        from unittest.mock import MagicMock, patch
+        cfg_file = self.test_root / "config.json"
+        cfg_file.write_text(json.dumps(DEFAULT_CONFIG), encoding="utf-8")
+        runner = PipelineBatchRunner(config_path=cfg_file)
+
+        book_dir = runner._get_book_dir("test_routing_book")
+        book_dir.mkdir(parents=True, exist_ok=True)
+        (book_dir / "1_crops").mkdir(parents=True, exist_ok=True)
+        (book_dir / "2_masked_pages").mkdir(parents=True, exist_ok=True)
+        (book_dir / "3_raw_md").mkdir(parents=True, exist_ok=True)
+        (book_dir / "4_final_pages").mkdir(parents=True, exist_ok=True)
+
+        chk = {
+            "book_title": "test_routing_book",
+            "phases": {
+                "slicing": {"completed": True, "pages_done": 2, "total_pages": 2},
+                "omr": {"completed": False, "crops_done": 0, "total_crops": 0},
+                "vlm": {"completed": True, "pages_done": 0, "total_pages": 0},
+                "assembly": {"completed": True, "completed_at": ""}
+            }
+        }
+        runner._write_checkpoint("test_routing_book", chk)
+
+        pdf_path = self.test_root / "test_routing_book.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4 dummy")
+
+        with patch.object(runner, "_phase_1_and_2_pipelined", return_value=True) as mock_p12, \
+             patch.object(runner, "_phase_2_omr", return_value=True) as mock_p2:
+            runner._process_book(pdf_path, {"id": "test_1", "name": pdf_path.name})
+            mock_p12.assert_not_called()
+            mock_p2.assert_called_once()
+
     # =========================================================================
     # F9: Strict Isolation of LM Studio / Qwen VLM (>=5 tests)
     # =========================================================================

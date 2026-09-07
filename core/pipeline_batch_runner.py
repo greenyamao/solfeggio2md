@@ -582,28 +582,30 @@ class PipelineBatchRunner:
             detail="Готово" if p4_comp else "Ожидание",
         )
 
-        # ---------------- Phase 1: Slicing & Masking ---------------- #
-        if not chk["phases"]["slicing"]["completed"] or overwrite:
-            self._update_hud("Фаза 1/4: Нарезка и маскирование верстки (YOLO OLA v2.0)", 0.0)
-            ok = self._phase_1_slicing(pdf_path, crops_dir, masked_dir, chk, overwrite)
-            if not ok:
-                return False
-            chk["phases"]["slicing"]["completed"] = True
-            self._write_checkpoint(book_title, chk)
+        # ---------------- Phases 1 & 2: Pipelined Streaming (Slicing + OMR) ---------------- #
+        slicing_done = chk["phases"]["slicing"].get("completed", False) and not overwrite
+        omr_done = chk["phases"]["omr"].get("completed", False) and not overwrite
 
-        # ---------------- Inter-phase Memory Purge Barrier ---------------- #
-        self._purge_vram()
+        if not (slicing_done and omr_done):
+            if slicing_done:
+                # Slicing already done on disk; only run remaining OMR
+                self._update_hud("Фаза 2/4: Оптическое распознавание нот (Transcoda-59M)", 25.0)
+                ok = self._phase_2_omr(crops_dir, chk, overwrite)
+                if not ok:
+                    return False
+                chk["phases"]["omr"]["completed"] = True
+                self._write_checkpoint(book_title, chk)
+            else:
+                # Pipelined concurrent execution of Slicing and OMR
+                self._update_hud("Фазы 1-2: Потоковая нарезка и распознавание нот (YOLO + Transcoda)", 0.0)
+                ok = self._phase_1_and_2_pipelined(pdf_path, crops_dir, masked_dir, chk, overwrite)
+                if not ok:
+                    return False
+                chk["phases"]["slicing"]["completed"] = True
+                chk["phases"]["omr"]["completed"] = True
+                self._write_checkpoint(book_title, chk)
 
-        # ---------------- Phase 2: OMR Music Recognition ---------------- #
-        if not chk["phases"]["omr"]["completed"] or overwrite:
-            self._update_hud("Фаза 2/4: Оптическое распознавание нот (Transcoda-59M)", 25.0)
-            ok = self._phase_2_omr(crops_dir, chk, overwrite)
-            if not ok:
-                return False
-            chk["phases"]["omr"]["completed"] = True
-            self._write_checkpoint(book_title, chk)
-
-        # ---------------- VRAM Purge Barrier ---------------- #
+        # ---------------- VRAM Purge Barrier before VLM ---------------- #
         self._update_hud("Очистка VRAM GPU перед VLM...", 50.0)
         self._purge_vram()
 
@@ -676,6 +678,305 @@ class PipelineBatchRunner:
             self.metrics["book_progress_pct"] = round(book_pct, 1)
             if detail:
                 self.metrics["current_item_detail"] = detail
+
+    def _transcribe_crops_batch_files(self, crops_dir: Path, batch_files: List[Path]) -> int:
+        """Transcribes a batch of crop image files via self.omr_engine and persists .abc and .kern outputs."""
+        if not batch_files or self.omr_engine is None:
+            return 0
+
+        batch_crops_bgr = []
+        batch_classes = []
+        batch_titles = []
+        valid_batch_files = []
+
+        for cf in batch_files:
+            deskew_file = crops_dir / f"{cf.stem}_deskew.png"
+            crop_path_to_read = deskew_file if deskew_file.is_file() else cf
+            crop_bgr = cv2.imread(str(crop_path_to_read))
+            if crop_bgr is None:
+                continue
+
+            cls_name = "staff"
+            if "grand_staff" in cf.stem:
+                cls_name = "grand_staff"
+            elif "system" in cf.stem:
+                cls_name = "system"
+
+            batch_crops_bgr.append(crop_bgr)
+            batch_classes.append(cls_name)
+            batch_titles.append(cf.stem)
+            valid_batch_files.append(cf)
+
+        if not batch_crops_bgr:
+            return 0
+
+        results = self.omr_engine.transcribe_crops_batch(
+            crops_bgr=batch_crops_bgr,
+            notation_classes=batch_classes,
+            titles=batch_titles
+        )
+
+        saved_count = 0
+        for cf, res in zip(valid_batch_files, results):
+            abc_content = res.get("abc", "")
+            kern_content = res.get("raw_kern", "")
+            if abc_content:
+                abc_file = crops_dir / f"{cf.stem}.abc"
+                abc_file.write_text(abc_content, encoding="utf-8")
+            if kern_content:
+                kern_file = crops_dir / f"{cf.stem}.kern"
+                kern_file.write_text(kern_content, encoding="utf-8")
+            saved_count += 1
+
+        return saved_count
+
+    # ---------------- Streaming Pipelined Phase 1 & 2 ---------------- #
+
+    def _phase_1_and_2_pipelined(
+        self, pdf_path: Path, crops_dir: Path, masked_dir: Path, chk: Dict[str, Any], overwrite: bool
+    ) -> bool:
+        """
+        Pipelined streaming execution of Phase 1 (Slicing/Layout) and Phase 2 (OMR) concurrently.
+        Both models (YOLO OLA ~1GB + Transcoda ~1.1GB = ~2.1GB) fit comfortably in 8GB VRAM.
+        Crops produced by slicing are immediately transcribed in mini-batches, updating Phase 1
+        and Phase 2 progress simultaneously.
+        """
+        with fitz.open(pdf_path) as doc:
+            total_sheets = len(doc)
+
+            # Pre-compute sheet to book page mapping (two-page spreads produce 2 book pages)
+            sheet_mapping: List[Tuple[int, ...]] = []
+            cur_bp = 1
+            for s_idx in range(total_sheets):
+                p = doc[s_idx]
+                w, h = p.rect.width, p.rect.height
+                is_spread = (1.22 <= (w / float(max(1.0, h))) <= 2.2 and h >= 300)
+                if is_spread:
+                    sheet_mapping.append((cur_bp, cur_bp + 1))
+                    cur_bp += 2
+                else:
+                    sheet_mapping.append((cur_bp,))
+                    cur_bp += 1
+
+            total_book_pages = cur_bp - 1
+            chk["phases"]["slicing"]["total_pages"] = total_book_pages
+
+            existing_valid_pages = set()
+            if not overwrite:
+                for f in masked_dir.glob("page_*_masked.png"):
+                    m = re.search(r"page_(\d+)_masked", f.stem)
+                    if m and f.stat().st_size > 1000:
+                        existing_valid_pages.add(int(m.group(1)))
+
+            # Lazy init engines (LayoutDetector & OMREngine)
+            if self.layout_detector is None:
+                weights_path = ROOT_DIR / "weights" / "ola-layout-analysis-2.0-2025-03-09.pt"
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                self.layout_detector = LayoutDetector(weights_path=str(weights_path), device=device)
+
+            if self.omr_engine is None:
+                from core.omr_engine import OMREngine
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                self.omr_engine = OMREngine(
+                    device=device,
+                    enable_score_enhancer=self.config.get("enable_score_enhancer", True),
+                    enable_cugan=self.config.get("enable_cugan_sr", True)
+                )
+
+            section_filter = BookSectionFilter(
+                skip_front_matter=self.config.get("skip_front_matter", True),
+                skip_back_matter=self.config.get("skip_back_matter", True),
+            )
+            sections = section_filter.analyze_document_sections(pdf_path)
+
+            dpi = int(self.config.get("dpi", 200))
+            pages_done_count = len(existing_valid_pages)
+
+            existing_valid_abcs = set()
+            if not overwrite:
+                for f in crops_dir.glob("*.abc"):
+                    if f.stat().st_size > 0:
+                        existing_valid_abcs.add(f.stem)
+
+            # Queue of crops waiting for OMR mini-batch transcription
+            omr_crop_buffer: List[Path] = []
+
+            # If resuming with overwrite=False, enqueue any existing un-transcribed crops from disk
+            if not overwrite:
+                disk_crops = sorted([f for f in crops_dir.glob("*.png") if not f.name.endswith("_deskew.png")])
+                for dc in disk_crops:
+                    if dc.stem not in existing_valid_abcs:
+                        omr_crop_buffer.append(dc)
+
+            crops_done_count = len(existing_valid_abcs)
+            total_crops_estimated = max(1, crops_done_count + len(omr_crop_buffer))
+            chk["phases"]["omr"]["crops_done"] = crops_done_count
+            chk["phases"]["omr"]["total_crops"] = total_crops_estimated
+
+            # Update initial progress
+            p1_init_pct = round((pages_done_count / max(1, total_book_pages)) * 100.0, 1)
+            p2_init_pct = round((crops_done_count / max(1, total_crops_estimated)) * 100.0, 1)
+            self._update_phase_progress("phase1", p1_init_pct, pages_done_count, total_book_pages, "running", f"Стр. {pages_done_count}/{total_book_pages}")
+            self._update_phase_progress("phase2", p2_init_pct, crops_done_count, total_crops_estimated, "running", f"Станов: {crops_done_count}/{total_crops_estimated}")
+
+            for s_idx in range(total_sheets):
+                if self._stop_event.is_set():
+                    return False
+                self._check_pause()
+
+                book_pages = sheet_mapping[s_idx]
+                if not overwrite and all(bp in existing_valid_pages for bp in book_pages):
+                    continue
+
+                page = doc[s_idx]
+                pix = page.get_pixmap(dpi=dpi, alpha=False)
+                img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+                img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR if pix.n == 4 else cv2.COLOR_RGB2BGR)
+                del pix
+
+                # Persist original un-split sheet scan for UI inspection / Mode 1 comparison
+                sheet_file = masked_dir / f"sheet_{s_idx:04d}.png"
+                if not sheet_file.is_file() or overwrite:
+                    cv2.imwrite(str(sheet_file), img_bgr)
+
+                # Automated two-page spread splitting along central spine / gutter
+                split_pages = detect_and_split_spread(img_bgr)
+                if len(split_pages) != len(book_pages):
+                    if len(split_pages) == 1:
+                        split_pages = [(img_bgr, "single")]
+                        book_pages = (book_pages[0],)
+
+                for (sub_img, side), bp in zip(split_pages, book_pages):
+                    if self._stop_event.is_set():
+                        return False
+                    self._check_pause()
+
+                    mask_file = masked_dir / f"page_{bp:04d}_masked.png"
+                    if not overwrite and bp in existing_valid_pages:
+                        continue
+
+                    # Preprocess: individual book page deskew
+                    deskewed_bgr, _ = deskew_page(sub_img)
+
+                    # Layout detection (scale-adaptive, physical staff periodicity verification)
+                    detections = self.layout_detector.detect(deskewed_bgr)
+
+                    # Dynamic front/back matter skip
+                    should_skip, reason = section_filter.check_after_detection(
+                        bp, total_book_pages, len(detections), gray=cv2.cvtColor(deskewed_bgr, cv2.COLOR_BGR2GRAY)
+                    )
+                    if should_skip:
+                        pages_done_count += 1
+                        existing_valid_pages.add(bp)
+                        chk["phases"]["slicing"]["pages_done"] = pages_done_count
+                        self._write_checkpoint(pdf_path.stem, chk)
+
+                        # Write empty mask placeholder for physical disk tracking
+                        cv2.imwrite(str(mask_file), deskewed_bgr)
+                        raw_md_file = masked_dir.parent / "3_raw_md" / f"page_{bp:04d}_raw.md"
+                        if not raw_md_file.is_file() or overwrite:
+                            raw_md_file.parent.mkdir(parents=True, exist_ok=True)
+                            raw_md_file.write_text(f"## Страница {bp}\n\n<!-- Пропуск: {reason} -->\n", encoding="utf-8")
+
+                        pct_p1 = round((bp / max(1, total_book_pages)) * 100.0, 1)
+                        detail_msg = f"Стр. {bp}/{total_book_pages} • Пропуск: {reason}"
+                        self._update_phase_progress("phase1", pct_p1, bp, total_book_pages, "running", detail_msg)
+                        self._update_hud("Фаза 1-2: Потоковая нарезка и OMR", (bp / total_book_pages) * 25.0, detail_msg)
+                        continue
+
+                    # Whiteout and save crops
+                    masked_img, crops_data = self.layout_detector.mask_page(
+                        deskewed_bgr, detections, tag_prefix=f"{pdf_path.stem}_P{bp:04d}"
+                    )
+
+                    # Render and save debug image with YOLO bounding boxes for UI inspection
+                    debug_img = self.layout_detector.render_debug_image(deskewed_bgr, detections)
+                    debug_file = masked_dir / f"page_{bp:04d}_debug.png"
+                    cv2.imwrite(str(debug_file), debug_img)
+                    cv2.imwrite(str(mask_file), masked_img)
+
+                    for crop in crops_data:
+                        crop_name = f"{crop['stub_id']}.png"
+                        crop_path = crops_dir / crop_name
+                        if not crop_path.is_file() or overwrite:
+                            cv2.imwrite(str(crop_path), crop["crop_img"])
+
+                        # Normalize, dewarp, and 2x super-resolve staff for OMR (skip if already on disk)
+                        deskew_name = f"{crop['stub_id']}_deskew.png"
+                        deskew_path = crops_dir / deskew_name
+                        if not deskew_path.is_file() or overwrite:
+                            dewarped_bgr, _, _ = normalize_staff_crop(
+                                crop["crop_img"],
+                                notation_class=crop.get("class", "staff"),
+                                enhance_sr=self.config.get("enable_cugan_sr", True)
+                            )
+                            cv2.imwrite(str(deskew_path), dewarped_bgr)
+
+                        if overwrite or crop["stub_id"] not in existing_valid_abcs:
+                            omr_crop_buffer.append(crop_path)
+
+                    pages_done_count += 1
+                    existing_valid_pages.add(bp)
+                    chk["phases"]["slicing"]["pages_done"] = pages_done_count
+                    total_crops_estimated = max(total_crops_estimated, crops_done_count + len(omr_crop_buffer))
+                    chk["phases"]["omr"]["total_crops"] = total_crops_estimated
+                    self._write_checkpoint(pdf_path.stem, chk)
+
+                    pct_p1 = round((bp / max(1, total_book_pages)) * 100.0, 1)
+                    detail_msg = f"Стр. {bp}/{total_book_pages} ({side}) • Вырезано: {len(crops_data)}"
+                    self._update_phase_progress("phase1", pct_p1, bp, total_book_pages, "running", detail_msg)
+                    self._update_hud("Фаза 1-2: Потоковая нарезка и OMR", (bp / total_book_pages) * 25.0, detail_msg)
+
+                    # Pipelined OMR: process whenever buffer has >= 4 crops
+                    while len(omr_crop_buffer) >= 4:
+                        if self._stop_event.is_set():
+                            return False
+                        self._check_pause()
+
+                        batch_to_run = [omr_crop_buffer.pop(0) for _ in range(4)]
+                        saved = self._transcribe_crops_batch_files(crops_dir, batch_to_run)
+                        crops_done_count += saved
+                        chk["phases"]["omr"]["crops_done"] = crops_done_count
+                        self._write_checkpoint(pdf_path.stem, chk)
+
+                        pct_p2 = round((crops_done_count / max(1, total_crops_estimated)) * 100.0, 1)
+                        omr_detail = f"Стан {crops_done_count}/{total_crops_estimated} (OMR пачка 4)"
+                        self._update_phase_progress("phase2", pct_p2, crops_done_count, total_crops_estimated, "running", omr_detail)
+
+            # Slicing is 100% completed
+            chk["phases"]["slicing"]["completed"] = True
+            chk["phases"]["slicing"]["pages_done"] = total_book_pages
+            self._write_checkpoint(pdf_path.stem, chk)
+            self._update_phase_progress("phase1", 100.0, total_book_pages, total_book_pages, "completed", f"Все {total_book_pages} стр. нарезаны")
+
+            # Flush remaining crops in OMR buffer (e.g. last 1..3 crops)
+            while omr_crop_buffer:
+                if self._stop_event.is_set():
+                    return False
+                self._check_pause()
+
+                batch_size_cur = min(4, len(omr_crop_buffer))
+                batch_to_run = [omr_crop_buffer.pop(0) for _ in range(batch_size_cur)]
+                saved = self._transcribe_crops_batch_files(crops_dir, batch_to_run)
+                crops_done_count += saved
+                chk["phases"]["omr"]["crops_done"] = crops_done_count
+                self._write_checkpoint(pdf_path.stem, chk)
+
+                pct_p2 = round((crops_done_count / max(1, total_crops_estimated)) * 100.0, 1)
+                self._update_phase_progress("phase2", pct_p2, crops_done_count, total_crops_estimated, "running", f"Стан {crops_done_count}/{total_crops_estimated}")
+
+            # Recalculate actual total crops from physical files on disk
+            final_total_crops = len([f for f in crops_dir.glob("*.png") if not f.name.endswith("_deskew.png")])
+            chk["phases"]["omr"]["total_crops"] = final_total_crops
+            chk["phases"]["omr"]["crops_done"] = final_total_crops
+            chk["phases"]["omr"]["completed"] = True
+            self._write_checkpoint(pdf_path.stem, chk)
+            if final_total_crops > 0:
+                self._update_phase_progress("phase2", 100.0, final_total_crops, final_total_crops, "completed", f"Все {final_total_crops} станов распознаны")
+            else:
+                self._update_phase_progress("phase2", 100.0, 0, 0, "completed", "Нет станов для OMR")
+
+        return True
 
     # ---------------- Phase 1 Implementation ---------------- #
 
@@ -899,58 +1200,16 @@ class PipelineBatchRunner:
             self._check_pause()
 
             batch_files = pending_crops[b_start:b_start + batch_size]
-            batch_crops_bgr = []
-            batch_classes = []
-            batch_titles = []
-            valid_batch_files = []
-
-            for cf in batch_files:
-                deskew_file = crops_dir / f"{cf.stem}_deskew.png"
-                crop_path_to_read = deskew_file if deskew_file.is_file() else cf
-                crop_bgr = cv2.imread(str(crop_path_to_read))
-                if crop_bgr is None:
-                    continue
-
-                cls_name = "staff"
-                if "grand_staff" in cf.stem:
-                    cls_name = "grand_staff"
-                elif "system" in cf.stem:
-                    cls_name = "system"
-
-                batch_crops_bgr.append(crop_bgr)
-                batch_classes.append(cls_name)
-                batch_titles.append(cf.stem)
-                valid_batch_files.append(cf)
-
-            if not batch_crops_bgr:
-                continue
-
-            results = self.omr_engine.transcribe_crops_batch(
-                crops_bgr=batch_crops_bgr,
-                notation_classes=batch_classes,
-                titles=batch_titles
-            )
-
-            for cf, res in zip(valid_batch_files, results):
-                abc_content = res.get("abc", "")
-                kern_content = res.get("raw_kern", "")
-                if abc_content:
-                    abc_file = crops_dir / f"{cf.stem}.abc"
-                    abc_file.write_text(abc_content, encoding="utf-8")
-                if kern_content:
-                    kern_file = crops_dir / f"{cf.stem}.kern"
-                    kern_file.write_text(kern_content, encoding="utf-8")
-                crops_done_count += 1
+            saved = self._transcribe_crops_batch_files(crops_dir, batch_files)
+            crops_done_count += saved
 
             # Update checkpoint and HUD once per batch (instead of per single crop)
             chk["phases"]["omr"]["crops_done"] = crops_done_count
             self._write_checkpoint(crops_dir.parent.name, chk)
 
-            curr_idx = min(total_crops, len(existing_valid_abcs) + b_start + len(valid_batch_files))
+            curr_idx = min(total_crops, len(existing_valid_abcs) + b_start + len(batch_files))
             pct_p2 = round((curr_idx / max(1, total_crops)) * 100.0, 1)
-            last_cls = batch_classes[-1] if batch_classes else "staff"
-            last_model = results[-1].get("model_used", "OMR") if results else "OMR"
-            detail_msg = f"Стан {curr_idx}/{total_crops} ({last_cls}) • {last_model} [batch={len(valid_batch_files)}]"
+            detail_msg = f"Стан {curr_idx}/{total_crops} [batch={len(batch_files)}]"
             self._update_phase_progress("phase2", pct_p2, curr_idx, total_crops, "running", detail_msg)
             self._update_hud(
                 "Фаза 2/4: Распознавание нот (OMR)",
