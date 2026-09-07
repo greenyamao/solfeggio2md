@@ -226,6 +226,21 @@ class TestTier1FeatureCoverage(unittest.TestCase):
         enhancer.purge_gpu_memory()
         self.assertIsNone(enhancer.cugan_model)
 
+    def test_f2_08_score_enhancer_enhance_crops_batch_contract(self):
+        """F2: Verify ScoreEnhancer.enhance_crops_batch handles empty and multi-crop lists consistently."""
+        from core.score_enhancer import ScoreEnhancer
+        enhancer = ScoreEnhancer(device="cpu", enable_cugan=False)
+        self.assertEqual(enhancer.enhance_crops_batch([]), [])
+
+        crops = [
+            np.full((60, 200, 3), 180, dtype=np.uint8),
+            np.full((80, 250, 3), 190, dtype=np.uint8),
+        ]
+        results = enhancer.enhance_crops_batch(crops, run_sr=False)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0].shape, crops[0].shape)
+        self.assertEqual(results[1].shape, crops[1].shape)
+
     # =========================================================================
     # F3: OMR Dynamic Collation & Mini-Batching (>=5 tests)
     # =========================================================================

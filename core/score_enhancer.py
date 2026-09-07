@@ -454,6 +454,71 @@ class ScoreEnhancer:
         except Exception:
             return clean_bgr
 
+    def enhance_crops_batch(
+        self,
+        crops_bgr: list,
+        run_sr: bool = True
+    ) -> list:
+        """
+        Batched GPU enhancement and restoration pipeline:
+        1. Fast GPU Background Division across the entire batch (flattens yellowing and verso bleed-through).
+        2. Batched Real-CUGAN 2x Super-Resolution (pads to uniform spatial dims, executes a single
+           forward pass in UpCunet2x on GPU in FP16, and slices back to individual 2x crops).
+        """
+        if not crops_bgr:
+            return []
+
+        # If only 1 crop or CPU, fallback directly
+        if len(crops_bgr) == 1 or self.device != "cuda" or not torch.cuda.is_available():
+            return [self.enhance_crop(c, run_sr=run_sr) for c in crops_bgr]
+
+        try:
+            b_size = len(crops_bgr)
+            shapes = [c.shape[:2] for c in crops_bgr]
+            max_h = max(s[0] for s in shapes)
+            max_w = max(s[1] for s in shapes)
+            # Ensure spatial dimensions are even for UNet pooling/upsampling
+            max_h = ((max_h + 1) // 2) * 2
+            max_w = ((max_w + 1) // 2) * 2
+
+            # Pure white paper background (255) for padding
+            padded_np = np.full((b_size, max_h, max_w, 3), 255, dtype=np.uint8)
+            for i, crop in enumerate(crops_bgr):
+                h_i, w_i = shapes[i]
+                padded_np[i, :h_i, :w_i] = crop
+
+            t_dtype = torch.float16 if self.device == "cuda" else torch.float32
+            # Transfer batch to GPU normalized to [0, 1]
+            t_batch = torch.from_numpy(padded_np).permute(0, 3, 1, 2).to(device=self.device, dtype=torch.float32) / 255.0
+
+            # Pure GPU background division on the 4D tensor
+            t_clean = self.gpu_background_division_tensor(t_batch, kernel_size=31)
+
+            if run_sr and self.enable_cugan:
+                self._ensure_cugan_loaded()
+                if self.cugan_model is not None:
+                    t_in = t_clean.to(dtype=t_dtype)
+                    with torch.inference_mode():
+                        out_sr = self.cugan_model(t_in, 0)
+                    out_clamped = torch.clamp(out_sr.float(), 0.0, 1.0) * 255.0
+                    out_np = out_clamped.permute(0, 2, 3, 1).to(dtype=torch.uint8).cpu().numpy()
+                    results = []
+                    for i, (h_i, w_i) in enumerate(shapes):
+                        results.append(out_np[i, : 2 * h_i, : 2 * w_i].copy())
+                    return results
+
+            # If no SR requested or model unavailable
+            out_clamped = torch.clamp(t_clean * 255.0, 0.0, 255.0)
+            out_np = out_clamped.permute(0, 2, 3, 1).to(dtype=torch.uint8).cpu().numpy()
+            results = []
+            for i, (h_i, w_i) in enumerate(shapes):
+                results.append(out_np[i, :h_i, :w_i].copy())
+            return results
+
+        except Exception:
+            # Safe degradation to sequential enhance_crop
+            return [self.enhance_crop(c, run_sr=run_sr) for c in crops_bgr]
+
     def purge_gpu_memory(self) -> None:
         """
         Unloads Real-CUGAN from VRAM and triggers full CUDA garbage collection.

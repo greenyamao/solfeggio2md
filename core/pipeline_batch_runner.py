@@ -955,7 +955,7 @@ class PipelineBatchRunner:
             # ---------------- Consumer: OMR Worker ---------------- #
             def _consumer_omr() -> None:
                 try:
-                    batch_size = 4
+                    batch_size = 6
                     while not self._stop_event.is_set() and not thread_errors:
                         self._check_pause()
 
@@ -1254,7 +1254,7 @@ class PipelineBatchRunner:
                 pending_crops.append(crop_file)
 
         crops_done_count = len(existing_valid_abcs)
-        batch_size = 4  # Balanced mini-batch size for optimal Tensor Core saturation and low VRAM
+        batch_size = 6  # Balanced mini-batch size for optimal Tensor Core saturation and low VRAM
 
         for b_start in range(0, len(pending_crops), batch_size):
             if self._stop_event.is_set():
