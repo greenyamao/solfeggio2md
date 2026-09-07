@@ -106,8 +106,13 @@
     btnTabAbc: document.getElementById('btn-tab-abc'),
     btnTabKern: document.getElementById('btn-tab-kern'),
     btnCopyCode: document.getElementById('btn-copy-code'),
+    btnSynthPlay: document.getElementById('btn-synth-play'),
     omrCodeBox: document.getElementById('omr-code-box'),
     omrCopyStatus: document.getElementById('omr-copy-status'),
+    omrSheetCanvas: document.getElementById('omr-sheet-canvas'),
+    omrSheetDiagnostics: document.getElementById('omr-sheet-diagnostics'),
+    omrRenderTiming: document.getElementById('omr-render-timing'),
+    omrSheetEngineBadge: document.getElementById('omr-sheet-engine-badge'),
 
     // Mode 4: Book Final
     finalScanImg: document.getElementById('final-scan-img'),
@@ -629,6 +634,8 @@
     if (crops.length === 0) {
       DOM.omrCropImg.src = '';
       DOM.omrCodeBox.textContent = 'На странице не обнаружено станов.';
+      if (DOM.omrSheetCanvas) DOM.omrSheetCanvas.innerHTML = '';
+      if (DOM.omrSheetDiagnostics) DOM.omrSheetDiagnostics.textContent = 'Нет станов';
       return;
     }
 
@@ -649,6 +656,145 @@
     DOM.omrCropImg.src = activeCrop.deskew_url || activeCrop.raw_url;
     DOM.omrModelBadge.textContent = activeCrop.model_used;
     DOM.omrCodeBox.textContent = state.activeCodeTab === 'abc' ? activeCrop.abc : (activeCrop.kern || 'Нет kern данных');
+
+    // Immediately render visual score staves
+    renderVisualScore();
+  }
+
+  let currentTuneObject = null;
+  let codeDebounceTimer = null;
+  let isPlayingAudio = false;
+
+  async function renderVisualScore() {
+    if (!state.pageData || !state.pageData.crops || !DOM.omrSheetCanvas) return;
+    const crop = state.pageData.crops[state.selectedCropIndex];
+    if (!crop) return;
+
+    const t0 = performance.now();
+    const isAbcTab = state.activeCodeTab === 'abc';
+    const textContent = DOM.omrCodeBox.textContent.trim();
+
+    if (DOM.omrSheetEngineBadge) {
+      DOM.omrSheetEngineBadge.textContent = isAbcTab ? 'abcjs (Direct3D SVG)' : 'Verovio C++ (Native)';
+    }
+
+    if (!textContent) {
+      DOM.omrSheetCanvas.innerHTML = '<div style="color: var(--text-muted); font-size: 12px;">Нет нотных данных для отображения.</div>';
+      if (DOM.omrSheetDiagnostics) DOM.omrSheetDiagnostics.textContent = 'Пусто';
+      if (DOM.omrRenderTiming) DOM.omrRenderTiming.textContent = 'Рендер: 0 мс';
+      currentTuneObject = null;
+      return;
+    }
+
+    if (isAbcTab) {
+      if (typeof ABCJS !== 'undefined') {
+        try {
+          const containerWidth = DOM.omrSheetCanvas.clientWidth || 600;
+          const tunes = ABCJS.renderAbc(DOM.omrSheetCanvas, textContent, {
+            responsive: 'resize',
+            staffwidth: Math.max(300, containerWidth - 30),
+            add_classes: true,
+            selectTypes: ['note', 'rest'],
+            format: {
+              titlefont: 'sans-serif 12 bold',
+              gchordfont: 'sans-serif 10 italic'
+            }
+          });
+
+          const elapsed = performance.now() - t0;
+          if (DOM.omrRenderTiming) DOM.omrRenderTiming.textContent = `Рендер: ${elapsed.toFixed(1)} мс`;
+
+          currentTuneObject = (tunes && tunes[0]) ? tunes[0] : null;
+
+          if (currentTuneObject && typeof currentTuneObject.getWarnings === 'function') {
+            const warnings = currentTuneObject.getWarnings();
+            if (warnings && warnings.length > 0) {
+              DOM.omrSheetDiagnostics.textContent = `Синтаксис: исправлено ${warnings.length} замечаний`;
+              DOM.omrSheetDiagnostics.style.color = 'var(--accent-amber)';
+            } else {
+              DOM.omrSheetDiagnostics.textContent = 'Синтаксис корректен';
+              DOM.omrSheetDiagnostics.style.color = 'var(--accent-emerald)';
+            }
+          } else {
+            DOM.omrSheetDiagnostics.textContent = 'Отображение активно';
+            DOM.omrSheetDiagnostics.style.color = 'var(--accent-emerald)';
+          }
+        } catch (err) {
+          DOM.omrSheetDiagnostics.textContent = `Ошибка abcjs: ${err.message}`;
+          DOM.omrSheetDiagnostics.style.color = 'var(--accent-rose)';
+        }
+      } else {
+        DOM.omrSheetCanvas.innerHTML = '<div style="color: var(--accent-rose); font-size: 12px;">Библиотека abcjs не загружена.</div>';
+      }
+    } else {
+      // Humdrum **kern tab -> backend Verovio C++
+      DOM.omrSheetDiagnostics.textContent = 'Запрос к C++ Verovio...';
+      try {
+        const res = await api('/api/render_score', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ format: 'humdrum', text: textContent })
+        });
+        if (res.success && res.svg) {
+          DOM.omrSheetCanvas.innerHTML = res.svg;
+          if (DOM.omrRenderTiming) DOM.omrRenderTiming.textContent = `Verovio: ${res.latency_ms} мс`;
+          DOM.omrSheetDiagnostics.textContent = 'Humdrum отображен';
+          DOM.omrSheetDiagnostics.style.color = 'var(--accent-emerald)';
+        } else {
+          DOM.omrSheetCanvas.innerHTML = `<div style="color: var(--accent-rose); font-size: 12px;">${res.error || 'Ошибка парсинга Humdrum'}</div>`;
+          DOM.omrSheetDiagnostics.textContent = 'Ошибка Humdrum';
+          DOM.omrSheetDiagnostics.style.color = 'var(--accent-rose)';
+        }
+      } catch (err) {
+        DOM.omrSheetDiagnostics.textContent = `Сбой API: ${err.message}`;
+        DOM.omrSheetDiagnostics.style.color = 'var(--accent-rose)';
+      }
+    }
+  }
+
+  async function playCurrentTuneAudio() {
+    if (typeof ABCJS === 'undefined' || !ABCJS.synth || !ABCJS.synth.supportsAudio()) {
+      alert('Синтез звука не поддерживается в данном веб-окружении.');
+      return;
+    }
+    if (!currentTuneObject) {
+      alert('Сначала дождитесь отрисовки или введите корректный ABC-код.');
+      return;
+    }
+
+    if (isPlayingAudio) return;
+    isPlayingAudio = true;
+    DOM.btnSynthPlay.disabled = true;
+    const btnSpan = DOM.btnSynthPlay.querySelector('span');
+    if (btnSpan) btnSpan.textContent = 'Играет...';
+
+    try {
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioContext.state === 'suspended') {
+        await audioContext.resume();
+      }
+
+      const synth = new ABCJS.synth.CreateSynth();
+      await synth.init({
+        audioContext: audioContext,
+        visualObj: currentTuneObject,
+        millisecondsPerMeasure: 1600
+      });
+      await synth.prime();
+      await synth.start();
+
+      const durationMs = Math.min(20000, Math.max(3000, (synth.duration || 4) * 1000));
+      setTimeout(() => {
+        isPlayingAudio = false;
+        DOM.btnSynthPlay.disabled = false;
+        if (btnSpan) btnSpan.textContent = 'Прослушать';
+      }, durationMs);
+    } catch (err) {
+      console.warn('Audio synth playback error:', err);
+      isPlayingAudio = false;
+      DOM.btnSynthPlay.disabled = false;
+      if (btnSpan) btnSpan.textContent = 'Прослушать';
+    }
   }
 
   function renderMode4() {
@@ -667,20 +813,40 @@
 
       if (typeof marked !== 'undefined') {
         DOM.bookRenderedContent.innerHTML = marked.parse(d.markdown);
+        // Render embedded ABC sheet music in the book reader
+        if (typeof ABCJS !== 'undefined') {
+          const cardSheets = DOM.bookRenderedContent.querySelectorAll('.music-card-sheet');
+          cardSheets.forEach(sheetEl => {
+            const abcRaw = decodeURIComponent(sheetEl.dataset.abc || '');
+            if (abcRaw) {
+              try {
+                ABCJS.renderAbc(sheetEl, abcRaw, {
+                  responsive: 'resize',
+                  add_classes: true
+                });
+              } catch (e) {
+                console.warn('Book sheet render error:', e);
+              }
+            }
+          });
+        }
       } else {
         DOM.bookRenderedContent.innerHTML = `<pre>${d.markdown}</pre>`;
       }
     }
   }
 
-  // Setup Marked renderer with styled music card
+  // Setup Marked renderer with styled music card and embedded sheet
   function setupMarkedRenderer() {
     if (typeof marked === 'undefined') return;
     const renderer = new marked.Renderer();
     const origCode = renderer.code.bind(renderer);
+    let cardIdx = 0;
 
     renderer.code = function (code, lang) {
       if (lang === 'abc') {
+        cardIdx++;
+        const cardId = `book-score-${cardIdx}`;
         const lines = code.trim().split('\n');
         let title = 'Музыкальный фрагмент';
         let key = 'C';
@@ -701,7 +867,11 @@
                 <span class="badge badge-grand">Метр: ${meter}</span>
               </div>
             </div>
-            <pre class="music-card-code">${code}</pre>
+            <div class="music-card-sheet" id="${cardId}" data-abc="${encodeURIComponent(code)}"></div>
+            <details class="music-card-details">
+              <summary>Показать код ABC</summary>
+              <pre class="music-card-code">${code}</pre>
+            </details>
           </div>
         `;
       }
@@ -856,6 +1026,38 @@
         setTimeout(() => { DOM.omrCopyStatus.style.display = 'none'; }, 2000);
       });
     });
+
+    if (DOM.btnSynthPlay) {
+      DOM.btnSynthPlay.addEventListener('click', playCurrentTuneAudio);
+    }
+
+    if (DOM.omrCodeBox) {
+      DOM.omrCodeBox.addEventListener('input', () => {
+        clearTimeout(codeDebounceTimer);
+        codeDebounceTimer = setTimeout(() => {
+          if (state.pageData && state.pageData.crops) {
+            const crop = state.pageData.crops[state.selectedCropIndex];
+            if (crop) {
+              if (state.activeCodeTab === 'abc') {
+                crop.abc = DOM.omrCodeBox.textContent;
+              } else {
+                crop.kern = DOM.omrCodeBox.textContent;
+              }
+            }
+          }
+          renderVisualScore();
+        }, 40);
+      });
+    }
+
+    if (DOM.omrSheetCanvas && typeof ResizeObserver !== 'undefined') {
+      const scoreObserver = new ResizeObserver(() => {
+        if (state.activeMode === 3) {
+          renderVisualScore();
+        }
+      });
+      scoreObserver.observe(DOM.omrSheetCanvas);
+    }
 
     DOM.btnRerunOmr.addEventListener('click', async () => {
       if (!state.pageData || !state.pageData.crops) return;

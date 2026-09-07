@@ -315,17 +315,46 @@
             </div>
             <div class="omr-right-pane">
               <div class="omr-toolbar">
-                <div style="display: flex; gap: 8px;">
+                <div style="display: flex; gap: 8px; align-items: center;">
                   <button id="btn-tab-abc" class="btn-action active" style="font-weight: bold;">ABC Нотация</button>
                   <button id="btn-tab-kern" class="btn-action">Humdrum **kern</button>
+                  <span id="omr-render-timing" class="badge badge-staff" style="font-size: 11px;">Рендер: -- мс</span>
                 </div>
-                <button id="btn-copy-code" class="btn-action btn-primary">
-                  <span>Копировать ноты</span>
-                </button>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                  <button id="btn-synth-play" class="btn-action" title="Синтезировать звук через Web Audio API">
+                    <svg class="svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                    </svg>
+                    <span>Прослушать</span>
+                  </button>
+                  <button id="btn-copy-code" class="btn-action btn-primary">
+                    <svg class="svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                    </svg>
+                    <span>Копировать</span>
+                  </button>
+                </div>
               </div>
+
+              <!-- Interactive Visual Score Container -->
+              <div class="omr-sheet-wrapper">
+                <div class="omr-sheet-header">
+                  <div style="display: flex; align-items: center; gap: 8px;">
+                    <span class="omr-sheet-title">ОТРЕНДЕРЕННЫЙ НОТНЫЙ СТАН</span>
+                    <span id="omr-sheet-engine-badge" class="badge badge-grand">abcjs (Direct3D SVG)</span>
+                  </div>
+                  <span id="omr-sheet-diagnostics" class="omr-sheet-status">Ожидание нот...</span>
+                </div>
+                <div id="omr-sheet-viewport" class="omr-sheet-viewport">
+                  <div id="omr-sheet-canvas" class="omr-sheet-canvas"></div>
+                </div>
+              </div>
+
+              <!-- Bottom Code Editor Container -->
               <div class="code-editor-container">
                 <div class="code-editor-header">
-                  <span id="omr-code-meta" style="font-size: 12px; color: var(--text-secondary);">Синтаксис ABC 2.1 • Multi-Voice Support</span>
+                  <span id="omr-code-meta" style="font-size: 11px; color: var(--text-secondary);">Синтаксис ABC 2.1 • Живое редактирование с автообновлением</span>
                   <span id="omr-copy-status" style="font-size: 11px; color: var(--accent-green); display: none;">Скопировано в буфер</span>
                 </div>
                 <pre id="omr-code-box" class="code-box" contenteditable="true" spellcheck="false"></pre>
@@ -502,6 +531,7 @@
 
   <!-- Scripts -->
   <script src="/static/lib/marked.min.js"></script>
+  <script src="/static/lib/abcjs-basic-min.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

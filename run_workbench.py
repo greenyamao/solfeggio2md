@@ -37,6 +37,7 @@ from core.pipeline_worker import PipelineWorker
 from core.pipeline_batch_runner import PipelineBatchRunner
 from core.lmstudio_client import LMStudioClient
 from core.windows_perf import enable_windows_high_performance
+from core.abc_bridge import ABCBridge
 
 
 def find_available_port(start_port: int = 18492) -> int:
@@ -56,6 +57,8 @@ def create_app(worker: PipelineWorker, runner: PipelineBatchRunner) -> bottle.Bo
     # Auto-create all required directories if missing
     in_dir.mkdir(parents=True, exist_ok=True)
     production_output.mkdir(parents=True, exist_ok=True)
+    
+    bridge = ABCBridge()
     
     # ---------------- Static Asset Serving ---------------- #
     @app.route('/')
@@ -117,6 +120,36 @@ def create_app(worker: PipelineWorker, runner: PipelineBatchRunner) -> bottle.Bo
         except Exception as e:
             bottle.response.status = 500
             return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+    @app.route('/api/render_score', method='POST')
+    def api_render_score():
+        bottle.response.content_type = 'application/json; charset=utf-8'
+        try:
+            data = bottle.request.json or {}
+            fmt = str(data.get("format", "humdrum")).lower().strip()
+            score_text = str(data.get("text", "")).strip()
+            if not score_text:
+                return json.dumps({"success": False, "error": "Пустой текст нотации", "svg": ""}, ensure_ascii=False)
+
+            t0 = time.perf_counter()
+            svg = ""
+            if fmt in ("humdrum", "kern"):
+                svg = bridge.render_svg(score_text)
+            elif fmt == "abc":
+                bridge._tk.setOptions(json.dumps({"inputFrom": "abc"}))
+                if bridge._tk.loadData(score_text):
+                    svg = bridge._tk.renderToSVG(1)
+            else:
+                return json.dumps({"success": False, "error": f"Неподдерживаемый формат: {fmt}", "svg": ""}, ensure_ascii=False)
+
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            return json.dumps({
+                "success": bool(svg),
+                "svg": svg,
+                "latency_ms": round(elapsed_ms, 2)
+            }, ensure_ascii=False)
+        except Exception as e:
+            return json.dumps({"success": False, "error": str(e), "svg": ""}, ensure_ascii=False)
 
     # ---------------- Batch Pipeline Runner APIs ---------------- #
     @app.route('/api/queue', method='GET')
