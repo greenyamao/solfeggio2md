@@ -33,11 +33,21 @@ def is_valid_music_staff(crop_bgr: np.ndarray, cls_name: str, conf: float) -> bo
 
     # 1. Morphological horizontal line detection (minimum segment length 10% width)
     kernel_len = max(20, min(80, int(w * 0.10)))
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_len, 1))
-    lines_img = cv2.morphologyEx(bin_inv, cv2.MORPH_OPEN, kernel)
-
-    # Row projection of horizontal line segments
-    proj = np.sum(lines_img > 0, axis=1)
+    if torch.cuda.is_available() and w >= 200:
+        try:
+            t_bin = torch.from_numpy(bin_inv).cuda().float().unsqueeze(0).unsqueeze(0)
+            pad_k = kernel_len // 2
+            e = -torch.nn.functional.max_pool2d(-t_bin, kernel_size=(1, kernel_len), stride=1, padding=(0, pad_k))
+            d = torch.nn.functional.max_pool2d(e, kernel_size=(1, kernel_len), stride=1, padding=(0, pad_k))
+            proj = (d.squeeze() > 128).sum(dim=1).cpu().numpy()
+        except Exception:
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_len, 1))
+            lines_img = cv2.morphologyEx(bin_inv, cv2.MORPH_OPEN, kernel)
+            proj = np.sum(lines_img > 0, axis=1)
+    else:
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_len, 1))
+        lines_img = cv2.morphologyEx(bin_inv, cv2.MORPH_OPEN, kernel)
+        proj = np.sum(lines_img > 0, axis=1)
     min_row_coverage = max(20, int(w * 0.15))
     active_rows = np.where(proj >= min_row_coverage)[0]
 
@@ -493,11 +503,25 @@ class LayoutDetector:
 
         # Coarse pass: determine staff line vertical centers and spacing S across page
         k_len = max(35, int(img_w * 0.12))
-        k = cv2.getStructuringElement(cv2.MORPH_RECT, (k_len, 1))
-        lines = cv2.morphologyEx(bin_inv, cv2.MORPH_OPEN, k)
-
         mx = int(img_w * 0.05)
-        row_sums = np.sum(lines[:, mx:img_w - mx] > 0, axis=1)
+
+        use_cuda = torch.cuda.is_available()
+        t_bin_gpu = None
+        if use_cuda:
+            try:
+                t_bin_gpu = torch.from_numpy(bin_inv).cuda().float().unsqueeze(0).unsqueeze(0)
+                pad1 = k_len // 2
+                e1 = -torch.nn.functional.max_pool2d(-t_bin_gpu, kernel_size=(1, k_len), stride=1, padding=(0, pad1))
+                d1 = torch.nn.functional.max_pool2d(e1, kernel_size=(1, k_len), stride=1, padding=(0, pad1))
+                row_sums = (d1.squeeze()[:, mx:img_w - mx] > 128).sum(dim=1).cpu().numpy()
+            except Exception:
+                use_cuda = False
+                t_bin_gpu = None
+
+        if not use_cuda or t_bin_gpu is None:
+            k = cv2.getStructuringElement(cv2.MORPH_RECT, (k_len, 1))
+            lines = cv2.morphologyEx(bin_inv, cv2.MORPH_OPEN, k)
+            row_sums = np.sum(lines[:, mx:img_w - mx] > 0, axis=1)
 
         line_centers = []
         in_line = False
@@ -526,8 +550,18 @@ class LayoutDetector:
 
         # Fine pass: use localized kernel to trace curved/bent staff ends near gutter and margins
         k_len_fine = max(20, min(35, int(staff_s * 2.5)))
-        k_fine = cv2.getStructuringElement(cv2.MORPH_RECT, (k_len_fine, 1))
-        lines_fine = cv2.morphologyEx(bin_inv, cv2.MORPH_OPEN, k_fine)
+        if use_cuda and t_bin_gpu is not None:
+            try:
+                pad2 = k_len_fine // 2
+                e2 = -torch.nn.functional.max_pool2d(-t_bin_gpu, kernel_size=(1, k_len_fine), stride=1, padding=(0, pad2))
+                d2 = torch.nn.functional.max_pool2d(e2, kernel_size=(1, k_len_fine), stride=1, padding=(0, pad2))
+                lines_fine = (d2.squeeze() > 128).byte().cpu().numpy() * 255
+            except Exception:
+                k_fine = cv2.getStructuringElement(cv2.MORPH_RECT, (k_len_fine, 1))
+                lines_fine = cv2.morphologyEx(bin_inv, cv2.MORPH_OPEN, k_fine)
+        else:
+            k_fine = cv2.getStructuringElement(cv2.MORPH_RECT, (k_len_fine, 1))
+            lines_fine = cv2.morphologyEx(bin_inv, cv2.MORPH_OPEN, k_fine)
 
         tol = max(2.5, staff_s * 0.35)
         candidate_staves = []
