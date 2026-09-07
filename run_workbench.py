@@ -136,7 +136,21 @@ def create_app(worker: PipelineWorker, runner: PipelineBatchRunner) -> bottle.Bo
             if fmt in ("humdrum", "kern"):
                 svg = bridge.render_svg(score_text)
             elif fmt == "abc":
-                bridge._tk.setOptions(json.dumps({"inputFrom": "abc"}))
+                options = {
+                    "inputFrom": "abc",
+                    "pageWidth": 1200,
+                    "pageHeight": 220,
+                    "pageMarginTop": 10,
+                    "pageMarginBottom": 10,
+                    "pageMarginLeft": 15,
+                    "pageMarginRight": 15,
+                    "scale": 80,
+                    "adjustPageHeight": True,
+                    "breaks": "none",
+                    "header": "none",
+                    "footer": "none"
+                }
+                bridge._tk.setOptions(options)
                 if bridge._tk.loadData(score_text):
                     svg = bridge._tk.renderToSVG(1)
             else:

@@ -65,12 +65,26 @@ class ABCBridge:
         except Exception:
             return False
 
-    def render_svg(self, kern_text: str) -> str:
+    def render_svg(self, kern_text: str, scale: int = 80) -> str:
         """
         Renders musical score to SVG using Verovio C++ engine.
-        Useful for visual verification without audio playback.
+        Uses tight excerpt options so the staff fills the viewport rather than an empty A4 page.
         """
         normalized = self.normalize_humdrum(kern_text)
+        options = {
+            "pageWidth": 1200,
+            "pageHeight": 220,
+            "pageMarginTop": 10,
+            "pageMarginBottom": 10,
+            "pageMarginLeft": 15,
+            "pageMarginRight": 15,
+            "scale": scale,
+            "adjustPageHeight": True,
+            "breaks": "none",
+            "header": "none",
+            "footer": "none"
+        }
+        self._tk.setOptions(options)
         if self._tk.loadData(normalized):
             return self._tk.renderToSVG(1)
         return ""
