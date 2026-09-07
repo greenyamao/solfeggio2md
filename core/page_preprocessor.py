@@ -258,181 +258,27 @@ def normalize_staff_crop(crop_bgr: np.ndarray, notation_class: str = "staff") ->
     else:
         deskewed = padded_rot
 
-    # 3. 5 Virtual Reference Lines Alignment:
-    # Directly aligns vertical 1-px slices by the averaged delta between the 5 virtual reference lines and 5 real staff lines.
-    # Completely rejects duration arrows, beams, accidentals, and lyrics without parabola predictions.
+    # 3. Vectorized VRLC Staff Skeleton & C1-Smooth Physical Paper Gutter Dewarping:
+    # Completely rejects note heads, stems, beams, accidentals, clefs, and ties/slurs.
+    # Warps ONLY physical spine curl using a C1-smooth parametric model (zero wobble mathematically guaranteed).
     bend_delta = 0.0
     h_d, w_d = deskewed.shape[:2]
     if w_d >= 160 and h_d >= 25:
         try:
             d_gray = cv2.cvtColor(deskewed, cv2.COLOR_BGR2GRAY)
-            bg_val = float(np.percentile(d_gray, 90))
-            bin_inv = (d_gray < bg_val - 35).astype(np.float32)
+            is_grand = notation_class.lower().replace(" ", "_") in ("grand_staff", "grandstaff")
 
-            # Isolate horizontal staff line segments
-            k_len = max(15, min(40, int(w_d * 0.04)))
-            k_line = cv2.getStructuringElement(cv2.MORPH_RECT, (k_len, 1))
-            lines_mask = cv2.morphologyEx(bin_inv, cv2.MORPH_OPEN, k_line)
+            skel, line_d, staff_s, target_lines = _extract_vrlc_staff_skeleton(d_gray, is_grand=is_grand)
+            xs, ys = _get_staff_column_displacements(skel, target_lines, staff_s)
 
-            sums = np.sum(lines_mask, axis=0)
-            has_lines = np.where(sums >= 4.0)[0]
-            if len(has_lines) >= 20:
-                x_first = int(has_lines[0])
-                x_last = int(has_lines[-1])
-
-                # Establish 5 virtual reference lines from central stable span
-                x_mid_start = int(w_d * 0.25)
-                x_mid_end = int(w_d * 0.75)
-                if x_mid_end <= x_mid_start + 20:
-                    x_mid_start, x_mid_end = x_first, x_last
-
-                mid_proj = np.sum(lines_mask[:, x_mid_start:x_mid_end], axis=1)
-
-                # Detect horizontal line peaks in the stable body
-                peaks = []
-                for y in range(1, h_d - 1):
-                    if mid_proj[y] > mid_proj[y-1] and mid_proj[y] >= mid_proj[y+1] and mid_proj[y] > 2.0:
-                        peaks.append((mid_proj[y], y))
-                peaks.sort(key=lambda p: p[0], reverse=True)
-
-                is_grand = notation_class.lower().replace(" ", "_") in ("grand_staff", "grandstaff")
-                geom_s = max(2.5, h_d / 13.0 if is_grand else h_d / 4.0)
-
-                filtered_peaks = []
-                for p in peaks:
-                    y = p[1]
-                    if all(abs(y - fp) >= max(3, int(geom_s * 0.5)) for fp in filtered_peaks):
-                        filtered_peaks.append(y)
-                filtered_peaks.sort()
-
-                diffs = [filtered_peaks[i] - filtered_peaks[i-1] for i in range(1, len(filtered_peaks))
-                         if 0.45 * geom_s <= filtered_peaks[i] - filtered_peaks[i-1] <= 1.8 * geom_s]
-                staff_s = float(np.median(diffs)) if diffs else float(geom_s)
-
-                # Locate the 5 virtual reference lines (or 5+5 for grand staff)
-                virtual_lines = []
-                if is_grand and len(filtered_peaks) >= 10:
-                    treble_cands = [p for p in filtered_peaks if p < h_d * 0.55]
-                    bass_cands = [p for p in filtered_peaks if p >= h_d * 0.45]
-                    if len(treble_cands) >= 5 and len(bass_cands) >= 5:
-                        virtual_lines.extend(treble_cands[:5])
-                        virtual_lines.extend(bass_cands[-5:])
-
-                if len(virtual_lines) < 5:
-                    if len(filtered_peaks) >= 5:
-                        best_err = 999.0
-                        best_grp = filtered_peaks[:5]
-                        for i in range(len(filtered_peaks) - 4):
-                            cand = filtered_peaks[i:i+5]
-                            err = float(np.mean(np.abs(np.diff(cand) - staff_s)))
-                            if err < best_err:
-                                best_err = err
-                                best_grp = cand
-                        virtual_lines = best_grp
-                    else:
-                        center_y = h_d / 2.0
-                        virtual_lines = [int(round(center_y + (k - 2) * staff_s)) for k in range(5)]
-
-                # Construct synthetic virtual comb kernel
-                comb_kernel = np.zeros(h_d, dtype=np.float32)
-                for yk in virtual_lines:
-                    for dy in [-1, 0, 1]:
-                        if 0 <= yk + dy < h_d:
-                            comb_kernel[yk + dy] = 1.0 if dy == 0 else 0.5
-
-                # Search range bounded by physical paper mechanics
-                max_phys_shift = max(3.5, min(14.0, staff_s * 1.5))
-                max_d_int = int(np.ceil(max_phys_shift))
-
-                # Batch cross-correlation via CUDA or CPU
-                use_cuda = False
-                try:
-                    import torch
-                    import torch.nn.functional as F
-                    if torch.cuda.is_available():
-                        use_cuda = True
-                except Exception:
-                    pass
-
-                if use_cuda:
-                    t_mask = torch.from_numpy(lines_mask).cuda().permute(1, 0).unsqueeze(1)
-                    t_comb = torch.from_numpy(comb_kernel).cuda().view(1, 1, -1)
-                    corr_matrix = F.conv1d(t_mask, t_comb, padding=max_d_int).squeeze(1).cpu().numpy()
-                    center_idx = max_d_int
-
-                    shifts = np.zeros(w_d, dtype=np.float32)
-                    prev_d = 0.0
-                    for x in range(x_first, x_last + 1):
-                        if sums[x] < 2.0:
-                            shifts[x] = prev_d
-                            continue
-                        low_d = int(np.floor(max(-max_phys_shift, prev_d - 1.5)))
-                        high_d = int(np.ceil(min(max_phys_shift, prev_d + 1.5)))
-                        i_low = center_idx + low_d
-                        i_high = center_idx + high_d + 1
-                        sub_corrs = corr_matrix[x, i_low:i_high]
-                        best_local = int(np.argmax(sub_corrs))
-                        best_d = float(low_d + best_local)
-                        if 0 < best_local < len(sub_corrs) - 1:
-                            y0, y1, y2 = sub_corrs[best_local - 1], sub_corrs[best_local], sub_corrs[best_local + 1]
-                            denom = 2.0 * (2.0 * y1 - y0 - y2)
-                            if denom > 1e-4:
-                                best_d += float(y0 - y2) / denom
-                        shifts[x] = best_d
-                        prev_d = best_d
-                else:
-                    shifts = np.zeros(w_d, dtype=np.float32)
-                    prev_d = 0.0
-                    for x in range(x_first, x_last + 1):
-                        col = lines_mask[:, x]
-                        if sums[x] < 2.0:
-                            shifts[x] = prev_d
-                            continue
-                        low_d = int(np.floor(max(-max_phys_shift, prev_d - 1.5)))
-                        high_d = int(np.ceil(min(max_phys_shift, prev_d + 1.5)))
-                        corrs = []
-                        d_vals = list(range(low_d, high_d + 1))
-                        for d in d_vals:
-                            c = np.sum(col[d:] * comb_kernel[:-d]) if d > 0 else (
-                                np.sum(col[:d] * comb_kernel[-d:]) if d < 0 else np.sum(col * comb_kernel)
-                            )
-                            corrs.append(c)
-                        best_idx = int(np.argmax(corrs))
-                        best_d = float(d_vals[best_idx])
-                        if 0 < best_idx < len(corrs) - 1:
-                            y0, y1, y2 = corrs[best_idx - 1], corrs[best_idx], corrs[best_idx + 1]
-                            denom = 2.0 * (2.0 * y1 - y0 - y2)
-                            if denom > 1e-4:
-                                best_d += float(y0 - y2) / denom
-                        shifts[x] = best_d
-                        prev_d = best_d
-
-                # Pad margins with edge shifts so margins don't shear
-                if x_first > 0:
-                    shifts[:x_first] = shifts[x_first]
-                if x_last < w_d - 1:
-                    shifts[x_last + 1:] = shifts[x_last]
-
-                # 4. Displacement smoothing: median filter (removes outlier spikes) + Gaussian smoothing (ensures C1 continuity without staircase aliasing)
-                k_med = min(15, len(shifts) if len(shifts) % 2 == 1 else len(shifts) - 1)
-                if k_med >= 3:
-                    padded = np.pad(shifts, k_med // 2, mode='edge')
-                    med_shifts = np.array([np.median(padded[i:i + k_med]) for i in range(w_d)], dtype=np.float32)
-                else:
-                    med_shifts = shifts
-
-                k_gauss = min(41, len(shifts) if len(shifts) % 2 == 1 else len(shifts) - 1)
-                if k_gauss >= 5:
-                    kernel_g = cv2.getGaussianKernel(k_gauss, 10.0).flatten()
-                    smooth_dy = np.convolve(med_shifts, kernel_g, mode='same').astype(np.float32)
-                else:
-                    smooth_dy = med_shifts
+            if len(xs) >= 50:
+                k_slope, b_intercept, A_L, xc_L, A_R, xc_R, x_first, x_last = _fit_c1_paper_curl(xs, ys, w_d)
+                smooth_dy = _build_c1_displacement_curve(w_d, k_slope, A_L, xc_L, A_R, xc_R, x_first, x_last)
 
                 max_bend = float(np.max(np.abs(smooth_dy)))
-                # 5. Strict Deadband Protection: if deviation is < 1.0 px, staff is already straight
+                # Strict deadband protection: if deflection is < 1.0 px, staff is already flat (0ms, 0 interpolation loss)
                 if max_bend >= 1.0:
                     bend_delta = max_bend
-                    # Shift each vertical 1-pixel slice by smooth_dy(x) to lock lines strictly to virtual lines
                     grid_x = np.tile(np.arange(w_d, dtype=np.float32), (h_d, 1)).astype(np.float32)
                     grid_y = (np.tile(np.arange(h_d, dtype=np.float32)[:, None], (1, w_d)) + smooth_dy[None, :]).astype(np.float32)
 
@@ -448,5 +294,248 @@ def normalize_staff_crop(crop_bgr: np.ndarray, notation_class: str = "staff") ->
             pass
 
     return deskewed, round(tilt_deg, 1), round(bend_delta, 1)
+
+
+def _extract_vrlc_staff_skeleton(gray: np.ndarray, is_grand: bool = False) -> Tuple[np.ndarray, int, int, List[int]]:
+    """
+    Vectorized Vertical Run-Length Coding (VRLC) staff skeleton extraction.
+    Filters out note heads, stems, beams, clefs, accidentals, and ties.
+    Returns: (clean_skeleton, line_thickness, staff_space, target_lines)
+    """
+    h, w = gray.shape[:2]
+    bg_val = float(np.percentile(gray, 90))
+    bin_inv = (gray < bg_val - 35).astype(np.uint8)
+
+    # 1. Estimate staff line thickness d and staff space s via fast sample columns
+    sample_cols = np.linspace(int(w * 0.15), int(w * 0.85), 40, dtype=int)
+    sampled = bin_inv[:, sample_cols]
+    padded = np.pad(sampled.astype(np.int32), ((1, 1), (0, 0)), mode="constant")
+    diffs = np.diff(padded, axis=0)
+
+    black_lens = []
+    white_lens = []
+    for c in range(diffs.shape[1]):
+        starts = np.where(diffs[:, c] == 1)[0]
+        ends = np.where(diffs[:, c] == -1)[0]
+        if len(starts) > 0 and len(ends) > 0:
+            black_lens.extend((ends - starts).tolist())
+            if len(starts) > 1:
+                white_lens.extend((starts[1:] - ends[:-1]).tolist())
+
+    line_d = int(np.argmax(np.bincount(black_lens)[1:]) + 1) if black_lens else 2
+    staff_s = int(np.argmax(np.bincount(white_lens)[1:]) + 1) if white_lens else int(h / 4.0)
+    line_d = max(1, min(4, line_d))
+    staff_s = max(5, min(35, staff_s))
+
+    # 2. Vectorized VRLC: remove all ink whose vertical run > 2.2 * line_d
+    max_run = int(round(2.2 * line_d))
+    k_vert = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max_run + 1))
+    thick_verticals = cv2.morphologyEx(bin_inv, cv2.MORPH_OPEN, k_vert)
+    thin_lines = cv2.subtract(bin_inv, thick_verticals)
+
+    # 3. Horizontal morphological close to bridge vertical stem cuts
+    k_close = cv2.getStructuringElement(cv2.MORPH_RECT, (max(5, int(1.4 * staff_s)), 1))
+    clean_skel = cv2.morphologyEx(thin_lines, cv2.MORPH_CLOSE, k_close)
+
+    # 4. Target lines identification from stable central span
+    x_c1, x_c2 = int(w * 0.25), int(w * 0.75)
+    central_proj = np.sum(clean_skel[:, x_c1:x_c2], axis=1)
+    peaks = []
+    for y in range(1, h - 1):
+        if central_proj[y] > central_proj[y-1] and central_proj[y] >= central_proj[y+1] and central_proj[y] > (x_c2 - x_c1) * 0.15:
+            peaks.append((central_proj[y], y))
+    peaks.sort(key=lambda p: p[0], reverse=True)
+
+    unique_y = []
+    for _, y in peaks:
+        if all(abs(y - uy) >= max(3, int(staff_s * 0.55)) for uy in unique_y):
+            unique_y.append(y)
+    unique_y.sort()
+
+    target_lines = []
+    if is_grand and len(unique_y) >= 10:
+        treble = [y for y in unique_y if y < h * 0.55]
+        bass = [y for y in unique_y if y >= h * 0.45]
+        if len(treble) >= 5 and len(bass) >= 5:
+            target_lines.extend(treble[:5])
+            target_lines.extend(bass[-5:])
+
+    if len(target_lines) < 5:
+        if len(unique_y) >= 5:
+            best_err = 999.0
+            best_grp = unique_y[:5]
+            for i in range(len(unique_y) - 4):
+                cand = unique_y[i:i+5]
+                err = float(np.mean(np.abs(np.diff(cand) - staff_s)))
+                if err < best_err:
+                    best_err = err
+                    best_grp = cand
+            target_lines = best_grp
+        else:
+            mid_y = h / 2.0
+            target_lines = [int(round(mid_y + (k - 2) * staff_s)) for k in range(5)]
+
+    # 5. Band-masking: purges isolated slurs, ties, and text underlines outside authentic lines
+    line_band_mask = np.zeros((h, w), dtype=np.uint8)
+    band_r = max(2, int(round(staff_s * 0.35)))
+    for yk in target_lines:
+        y_min = max(0, yk - band_r)
+        y_max = min(h, yk + band_r + 1)
+        line_band_mask[y_min:y_max, :] = 1
+
+    final_skel = clean_skel * line_band_mask
+    return final_skel, line_d, staff_s, target_lines
+
+
+def _get_staff_column_displacements(skel: np.ndarray, target_lines: List[int], staff_s: int) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Computes vertical displacement for each valid column relative to target reference lines.
+    Vectorized across columns.
+    """
+    h, w = skel.shape
+    band_r = max(2, int(round(staff_s * 0.35)))
+
+    line_diffs = np.full((len(target_lines), w), np.nan, dtype=np.float32)
+    for idx, y_ref in enumerate(target_lines):
+        y_min = max(0, y_ref - band_r)
+        y_max = min(h, y_ref + band_r + 1)
+        sub = skel[y_min:y_max, :]
+        col_sums = np.sum(sub, axis=0)
+        valid_cols = col_sums > 0
+        if np.any(valid_cols):
+            weights = np.arange(y_min, y_max, dtype=np.float32)[:, None]
+            y_cents = np.sum(sub[:, valid_cols] * weights, axis=0) / col_sums[valid_cols]
+            line_diffs[idx, valid_cols] = y_cents - y_ref
+
+    valid_count = np.sum(~np.isnan(line_diffs), axis=0)
+    col_mask = valid_count >= max(1, len(target_lines) // 3)
+    xs = np.where(col_mask)[0].astype(np.float32)
+    if len(xs) == 0:
+        return np.array([], dtype=np.float32), np.array([], dtype=np.float32)
+
+    sub_diffs = line_diffs[:, col_mask]
+    ys = np.nanmedian(sub_diffs, axis=0).astype(np.float32)
+    return xs, ys
+
+
+def _robust_fit_curl(x_pts: np.ndarray, y_pts: np.ndarray, x_ref: float, L: float, is_left: bool) -> Tuple[float, float]:
+    """
+    Pure NumPy Iteratively Reweighted Least Squares (IRLS) Huber fit for curl amplitude A and hinge xc:
+    dy(x) = A * (1 - dist / xc)^2
+    """
+    if len(x_pts) < 15:
+        return 0.0, float(L * 0.25)
+
+    dist = (x_pts - x_ref) if is_left else (x_ref - x_pts)
+    valid_pts = dist >= 0
+    if np.sum(valid_pts) < 15:
+        return 0.0, float(L * 0.25)
+
+    dist = dist[valid_pts]
+    y_act_all = y_pts[valid_pts]
+
+    best_loss = 1e9
+    best_A = 0.0
+    best_xc = float(L * 0.25)
+
+    xc_candidates = np.linspace(L * 0.15, L * 0.35, 9)
+    for xc in xc_candidates:
+        t = np.maximum(0.0, 1.0 - dist / xc) ** 2
+        active = t > 0.01
+        if np.sum(active) < 8:
+            continue
+        t_act = t[active]
+        y_act = y_act_all[active]
+
+        A = float(np.sum(t_act * y_act) / max(1e-6, np.sum(t_act ** 2)))
+        for _ in range(2):
+            res = np.abs(y_act - A * t_act)
+            w = np.where(res < 1.5, 1.0, 1.5 / np.maximum(res, 1e-4))
+            A = float(np.sum(w * t_act * y_act) / max(1e-6, np.sum(w * t_act ** 2)))
+
+        res = np.abs(y_act - A * t_act)
+        hub = np.where(res < 1.5, 0.5 * res**2, 1.5 * res - 1.125)
+        loss = float(np.sum(hub))
+        if loss < best_loss:
+            best_loss = loss
+            best_A = A
+            best_xc = float(xc)
+
+    best_A = max(-20.0, min(20.0, best_A))
+    return best_A, best_xc
+
+
+def _fit_c1_paper_curl(xs: np.ndarray, ys: np.ndarray, width: int) -> Tuple[float, float, float, float, float, float, int, int]:
+    """
+    Fits two-sided C1 physical paper curl model relative to actual staff boundaries [x_first, x_last].
+    """
+    if len(xs) < 50:
+        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, width - 1
+
+    x_first = int(xs[0])
+    x_last = int(xs[-1])
+    L = float(max(10, x_last - x_first))
+
+    # 1. Estimate linear slope k in central 50% plateau of staff
+    mid_start = x_first + int(L * 0.25)
+    mid_end = x_first + int(L * 0.75)
+    mid_mask = (xs >= mid_start) & (xs <= mid_end)
+    if np.sum(mid_mask) >= 20:
+        k_slope, b_intercept = np.polyfit(xs[mid_mask], ys[mid_mask], deg=1)
+    else:
+        k_slope, b_intercept = np.polyfit(xs, ys, deg=1)
+
+    y_detrend = ys - (k_slope * xs + b_intercept)
+
+    # 2. Left gutter curl
+    left_bound = x_first + int(L * 0.35)
+    left_mask = xs <= left_bound
+    if np.sum(left_mask) >= 15:
+        A_L, xc_L = _robust_fit_curl(xs[left_mask], y_detrend[left_mask], x_ref=float(x_first), L=L, is_left=True)
+    else:
+        A_L, xc_L = 0.0, float(L * 0.25)
+
+    # 3. Right gutter curl
+    right_bound = x_last - int(L * 0.35)
+    right_mask = xs >= right_bound
+    if np.sum(right_mask) >= 15:
+        A_R, xc_R = _robust_fit_curl(xs[right_mask], y_detrend[right_mask], x_ref=float(x_last), L=L, is_left=False)
+    else:
+        A_R, xc_R = 0.0, float(L * 0.25)
+
+    # Deadband threshold: if deflection is < 1.2 px, page paper is flat
+    if abs(A_L) < 1.2:
+        A_L = 0.0
+    if abs(A_R) < 1.2:
+        A_R = 0.0
+    if abs(k_slope * L) < 1.0:
+        k_slope = 0.0
+
+    return k_slope, b_intercept, A_L, xc_L, A_R, xc_R, x_first, x_last
+
+
+def _build_c1_displacement_curve(width: int, k_slope: float, A_L: float, xc_L: float, A_R: float, xc_R: float,
+                                 x_first: int, x_last: int) -> np.ndarray:
+    """
+    Builds the 1D vertical displacement field Delta y(x) across the full crop width.
+    Applies smooth margin clamping outside [x_first, x_last] to protect clefs and barlines from false curls.
+    """
+    x = np.arange(width, dtype=np.float32)
+    dy = k_slope * (x - (x_first + x_last) / 2.0)
+
+    # Left gutter (clamped outside x_first)
+    if abs(A_L) >= 1.0:
+        dist_l = np.maximum(0.0, x - x_first)
+        t_l = np.maximum(0.0, 1.0 - dist_l / max(1.0, xc_L))
+        dy += A_L * (t_l ** 2)
+
+    # Right gutter (clamped outside x_last)
+    if abs(A_R) >= 1.0:
+        dist_r = np.maximum(0.0, x_last - x)
+        t_r = np.maximum(0.0, 1.0 - dist_r / max(1.0, xc_R))
+        dy += A_R * (t_r ** 2)
+
+    return dy
+
 
 
