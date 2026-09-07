@@ -28,6 +28,7 @@ if str(ROOT_DIR) not in sys.path:
 from core.lmstudio_client import LMStudioClient
 from core.page_preprocessor import PagePreprocessor, deskew_page, normalize_staff_crop
 from core.layout_detector import LayoutDetector
+from core.book_section_filter import BookSectionFilter
 
 
 DEFAULT_CONFIG_FILE = ROOT_DIR / "config.json"
@@ -49,6 +50,9 @@ DEFAULT_CONFIG = {
     "smt_model": "antoniorv6/smt-grandstaff",
     "overwrite": False,
     "smt_device": "cuda" if torch.cuda.is_available() else "cpu",
+    "skip_vlm": True,
+    "skip_front_matter": True,
+    "skip_back_matter": True,
     "system_prompt": (
         "Ты — строгий OCR-транскрибатор. Перенеси весь печатный текст страницы в чистый Markdown дословно.\n"
         "Сохраняй иерархию заголовков (#, ##, ###), таблицы и списки.\n"
@@ -565,6 +569,12 @@ class PipelineBatchRunner:
                 device = "cuda" if torch.cuda.is_available() else "cpu"
                 self.layout_detector = LayoutDetector(weights_path=str(weights_path), device=device)
 
+            section_filter = BookSectionFilter(
+                skip_front_matter=self.config.get("skip_front_matter", True),
+                skip_back_matter=self.config.get("skip_back_matter", True),
+            )
+            sections = section_filter.analyze_document_sections(pdf_path)
+
             dpi = int(self.config.get("dpi", 200))
             pages_done_count = len(existing_valid_pages)
 
@@ -572,6 +582,19 @@ class PipelineBatchRunner:
                 if self._stop_event.is_set():
                     return False
                 self._check_pause()
+
+                sec_info = sections.get(p_idx, {})
+                if sec_info.get("skip", False):
+                    pages_done_count += 1
+                    chk["phases"]["slicing"]["pages_done"] = pages_done_count
+                    self._write_checkpoint(pdf_path.stem, chk)
+                    pct = (p_idx / total_pages) * 25.0
+                    self._update_hud(
+                        "Фаза 1/4: Нарезка и маскирование",
+                        pct,
+                        f"Стр. {p_idx}/{total_pages} • Пропуск: {sec_info.get('reason', 'служебная страница')}",
+                    )
+                    continue
 
                 mask_file = masked_dir / f"page_{p_idx:04d}_masked.png"
                 if not overwrite and p_idx in existing_valid_pages:
@@ -588,6 +611,22 @@ class PipelineBatchRunner:
 
                 # Layout detection
                 detections = self.layout_detector.detect(deskewed_bgr)
+
+                # Check dynamic front/back matter skip
+                should_skip, reason = section_filter.check_after_detection(
+                    p_idx, total_pages, len(detections), gray=cv2.cvtColor(deskewed_bgr, cv2.COLOR_BGR2GRAY)
+                )
+                if should_skip:
+                    pages_done_count += 1
+                    chk["phases"]["slicing"]["pages_done"] = pages_done_count
+                    self._write_checkpoint(pdf_path.stem, chk)
+                    pct = (p_idx / total_pages) * 25.0
+                    self._update_hud(
+                        "Фаза 1/4: Нарезка и маскирование",
+                        pct,
+                        f"Стр. {p_idx}/{total_pages} • Пропуск: {reason}",
+                    )
+                    continue
 
                 # Whiteout and save crops
                 masked_img, crops_data = self.layout_detector.mask_page(
@@ -727,6 +766,15 @@ class PipelineBatchRunner:
             self._update_hud("Фаза 3/4: Текст VLM уже извлечен на диске", 90.0, f"Все {total_masks} стр. готовы")
             return True
 
+        # Check if VLM is explicitly skipped by configuration
+        if self.config.get("skip_vlm", False):
+            self._vlm_fallback_mode(mask_files, raw_md_dir, chk)
+            chk["phases"]["vlm"]["completed"] = True
+            chk["phases"]["vlm"]["pages_done"] = total_masks
+            self._write_checkpoint(masked_dir.parent.name, chk)
+            self._update_hud("Фаза 3/4: VLM OCR пропущен (skip_vlm=True)", 90.0, "Текстовый VLM отключен в настройках")
+            return True
+
         # Check LM Studio availability
         is_online, msg = self.lm_client.check_connection()
         if not is_online:
@@ -793,14 +841,30 @@ class PipelineBatchRunner:
         return True
 
     def _vlm_fallback_mode(self, mask_files: List[Path], raw_md_dir: Path, chk: Dict[str, Any]) -> bool:
-        """Creates clean structured markdown files if LM Studio is offline."""
+        """Creates clean structured markdown files with preserved MUSIC_STUB_ID tags if LM Studio is offline/skipped."""
+        crops_dir = raw_md_dir.parent / "1_crops"
+        overwrite = self.config.get("overwrite", False)
+
         for m_idx, mask_file in enumerate(mask_files, start=1):
             p_num_str = re.search(r"page_(\d+)_masked", mask_file.stem)
             p_num = p_num_str.group(1) if p_num_str else f"{m_idx:04d}"
             raw_md_file = raw_md_dir / f"page_{p_num}_raw.md"
-            if not raw_md_file.is_file():
-                txt = f"## Страница {int(p_num)}\n\n<!-- Текст ожидает распознавания в LM Studio -->\n"
-                raw_md_file.write_text(txt, encoding="utf-8")
+            if not raw_md_file.is_file() or overwrite:
+                stubs = []
+                if crops_dir.is_dir():
+                    stubs = sorted([
+                        f.stem for f in crops_dir.glob(f"*_P{p_num}_S*.png")
+                        if not f.name.endswith("_deskew.png")
+                    ])
+
+                lines = [f"## Страница {int(p_num)}\n"]
+                if stubs:
+                    for stub_id in stubs:
+                        lines.append(f"<!-- MUSIC_STUB_ID:{stub_id} -->\n")
+                else:
+                    lines.append("<!-- Страница без нотного материала -->\n")
+
+                raw_md_file.write_text("\n".join(lines), encoding="utf-8")
         return True
 
     # ---------------- Phase 4 Implementation ---------------- #

@@ -15,5 +15,8 @@
   "smt_model": "antoniorv6/smt-grandstaff",
   "overwrite": false,
   "smt_device": "cuda",
+  "skip_vlm": true,
+  "skip_front_matter": true,
+  "skip_back_matter": true,
   "system_prompt": "Ты — строгий OCR-транскрибатор. Перенеси весь текст страницы книги в Markdown дословно.\nСохраняй заголовки, списки и таблицы.\nВАЖНО: Если на странице встречаются технические метки вида <!-- MUSIC_STUB_ID:XXXX -->, ОБЯЗАТЕЛЬНО оставь их в тексте на тех же местах без изменений. Ничего не додумывай."
 }

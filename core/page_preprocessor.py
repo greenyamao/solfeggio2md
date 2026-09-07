@@ -156,11 +156,12 @@ class PagePreprocessor:
 def normalize_staff_crop(crop_bgr: np.ndarray) -> Tuple[np.ndarray, float, float]:
     """
     High-precision music staff crop normalization:
-    1. Determines precise rotational tilt angle using 2D-DFT (2D Discrete Fourier Transform).
+    1. Determines precise rotational tilt angle using 2D-DFT (jdeskew).
     2. Performs high-quality rotational deskew with border padding so no notes are clipped.
-    3. Analyzes genuine 5-line staff straightness across vertical slices (immune to notes/beams).
-    4. Applies subpixel dewarping ONLY when true multi-line physical spine arching (>= 3.5 px) is present.
-    
+    3. Continuously tracks the 5-line staff structure outwards from the flat central region
+       to the page boundaries (immune to note beams, ledger lines, and dense chords).
+    4. Applies subpixel dewarping to eliminate spine gutter curvature (bend_delta >= 2.0 px).
+
     Returns:
         (normalized_crop_bgr, tilt_angle_degrees, bend_delta_pixels)
     """
@@ -181,9 +182,9 @@ def normalize_staff_crop(crop_bgr: np.ndarray) -> Tuple[np.ndarray, float, float
     except Exception:
         tilt_deg = 0.0
 
-    # 2. Rotate to exact horizontal orientation
+    # 2. Rotate to exact horizontal orientation with margin padding
     angle_rad = abs(np.radians(tilt_deg))
-    pad_rot = int(np.ceil(w_orig * np.sin(angle_rad) / 2.0)) + 2 if abs(tilt_deg) >= 0.1 else 0
+    pad_rot = int(np.ceil(w_orig * np.sin(angle_rad) / 2.0)) + 4 if abs(tilt_deg) >= 0.1 else 0
 
     if pad_rot > 0:
         padded_rot = cv2.copyMakeBorder(crop_bgr, pad_rot, pad_rot, 0, 0, cv2.BORDER_CONSTANT, value=(255, 255, 255))
@@ -203,96 +204,115 @@ def normalize_staff_crop(crop_bgr: np.ndarray) -> Tuple[np.ndarray, float, float
     else:
         deskewed = padded_rot
 
-    # 3. Detect 5-line staff line structures across slices to measure curvature
+    # 3. Continuous 5-line staff structure tracking across columns
     gray_deskewed = cv2.cvtColor(deskewed, cv2.COLOR_BGR2GRAY)
-    _, binary = cv2.threshold(gray_deskewed, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    flat_x1 = int(w_rot * 0.30)
+    flat_x2 = int(w_rot * 0.80)
+    if flat_x2 <= flat_x1 + 20:
+        return deskewed, round(tilt_deg, 1), 0.0
 
-    k_len = max(20, w_rot // 25)
-    horiz_k = cv2.getStructuringElement(cv2.MORPH_RECT, (k_len, 1))
-    lines_only = cv2.morphologyEx(binary, cv2.MORPH_OPEN, horiz_k)
+    flat_strip = gray_deskewed[:, flat_x1:flat_x2]
+    proj_flat = np.sum(255.0 - flat_strip, axis=1)
 
-    num_slices = min(15, max(7, w_rot // 45))
-    slice_xs = np.linspace(w_rot * 0.10, w_rot * 0.90, num_slices)
-    col_hw = max(4, int(w_rot * 0.02))
+    # For grand staff (tall crop), locate upper staff in upper half
+    mid_y = h_rot // 2
+    peaks = []
+    search_range = range(2, mid_y - 2) if h_rot > 120 else range(2, h_rot - 2)
+    for y in search_range:
+        if proj_flat[y] > proj_flat[y-1] and proj_flat[y] >= proj_flat[y+1]:
+            peaks.append((proj_flat[y], y))
+    peaks.sort(key=lambda p: p[0], reverse=True)
+    top5 = sorted([p[1] for p in peaks[:5]])
 
-    sample_x = []
-    sample_y = []
+    if len(top5) < 5:
+        # Fallback to full height search
+        peaks_all = []
+        for y in range(2, h_rot - 2):
+            if proj_flat[y] > proj_flat[y-1] and proj_flat[y] >= proj_flat[y+1]:
+                peaks_all.append((proj_flat[y], y))
+        peaks_all.sort(key=lambda p: p[0], reverse=True)
+        top5 = sorted([p[1] for p in peaks_all[:5]])
 
-    for sx in slice_xs:
-        x1 = max(0, int(sx - col_hw))
-        x2 = min(w_rot, int(sx + col_hw))
-        sl = lines_only[:, x1:x2]
-        proj = np.sum(sl, axis=1)
+    if len(top5) < 5:
+        return deskewed, round(tilt_deg, 1), 0.0
 
-        peaks = []
-        for y in range(1, h_rot - 1):
-            if proj[y] > (x2 - x1) * 255 * 0.35 and proj[y] >= proj[y-1] and proj[y] >= proj[y+1]:
-                peaks.append(y)
+    ref_y = float(np.mean(top5))
+    diffs = np.diff(top5)
+    staff_spacing = float(np.mean(diffs))
+    if not (5.0 <= staff_spacing <= 25.0):
+        return deskewed, round(tilt_deg, 1), 0.0
 
-        filtered = []
-        for p in peaks:
-            if not filtered or p - filtered[-1] > 3:
-                filtered.append(p)
-            elif proj[p] > proj[filtered[-1]]:
-                filtered[-1] = p
+    # Build 5-line comb filter template
+    template = np.zeros(int(staff_spacing * 4) + 15, dtype=np.float32)
+    tmpl_center = len(template) // 2
+    for k in range(-2, 3):
+        idx = int(round(tmpl_center + k * staff_spacing))
+        if 0 <= idx < len(template):
+            template[idx] = 1.0
+            if idx > 0:
+                template[idx-1] = 0.5
+            if idx + 1 < len(template):
+                template[idx+1] = 0.5
 
-        # 5-line staff pattern: 5 equidistant peaks with spacing S in [5, 25] px
-        if len(filtered) >= 5:
-            for i in range(len(filtered) - 4):
-                grp = filtered[i:i+5]
-                diffs = np.diff(grp)
-                mean_s = np.mean(diffs)
-                if 5 <= mean_s <= 25 and np.max(np.abs(diffs - mean_s)) <= 3.0:
-                    sample_x.append(float(sx))
-                    sample_y.append(float(np.mean(grp)))
+    # Outward continuous tracking from seed point
+    seed_x = (flat_x1 + flat_x2) // 2
+    track_y = np.full(w_rot, ref_y, dtype=np.float32)
+    step_w = 11
 
-    bend_delta = 0.0
-    if len(sample_x) >= 6:
-        sx_arr = np.array(sample_x)
-        sy_arr = np.array(sample_y)
+    # Track LEFT towards gutter/margin
+    curr_y = ref_y
+    for x in range(seed_x, -1, -1):
+        x1 = max(0, x - step_w // 2)
+        x2 = min(w_rot, x + step_w // 2 + 1)
+        col_proj = np.sum(255.0 - gray_deskewed[:, x1:x2], axis=1)
+        corr = np.correlate(col_proj, template, mode='same')
+        s_y1 = max(0, int(round(curr_y - 6)))
+        s_y2 = min(h_rot, int(round(curr_y + 7)))
+        if s_y2 > s_y1:
+            best_offset = int(np.argmax(corr[s_y1:s_y2]))
+            best_y = s_y1 + best_offset
+            curr_y = float(np.clip(best_y, curr_y - 1.5, curr_y + 1.5))
+        track_y[x] = curr_y
 
-        # Separate grand staff staves cleanly by image vertical midpoint
-        mid_y = h_rot / 2.0
-        upper_mask = sy_arr < mid_y
-        lower_mask = sy_arr >= mid_y
+    # Track RIGHT towards gutter/margin
+    curr_y = ref_y
+    for x in range(seed_x, w_rot):
+        x1 = max(0, x - step_w // 2)
+        x2 = min(w_rot, x + step_w // 2 + 1)
+        col_proj = np.sum(255.0 - gray_deskewed[:, x1:x2], axis=1)
+        corr = np.correlate(col_proj, template, mode='same')
+        s_y1 = max(0, int(round(curr_y - 6)))
+        s_y2 = min(h_rot, int(round(curr_y + 7)))
+        if s_y2 > s_y1:
+            best_offset = int(np.argmax(corr[s_y1:s_y2]))
+            best_y = s_y1 + best_offset
+            curr_y = float(np.clip(best_y, curr_y - 1.5, curr_y + 1.5))
+        track_y[x] = curr_y
 
-        if np.sum(upper_mask) >= 5:
-            fit_x, fit_y = sx_arr[upper_mask], sy_arr[upper_mask]
-        elif np.sum(lower_mask) >= 5:
-            fit_x, fit_y = sx_arr[lower_mask], sy_arr[lower_mask]
-        else:
-            fit_x, fit_y = sx_arr, sy_arr
+    # Smooth tracked curve with Gaussian filter
+    smooth_curve = cv2.GaussianBlur(track_y.reshape(1, -1), (51, 1), 15).flatten()
+    target_y = float(np.median(smooth_curve))
+    delta_y = smooth_curve - target_y
+    max_bend = float(np.max(np.abs(delta_y)))
 
-        if len(fit_x) >= 5:
-            poly = np.polyfit(fit_x, fit_y, 2)
-            xs_all = np.arange(w_rot)
-            curve_y = np.polyval(poly, xs_all)
-            chord = np.linspace(curve_y[0], curve_y[-1], w_rot)
-            bend_delta = float(np.max(np.abs(curve_y - chord)))
+    # Apply dewarping only if genuine physical curvature exists (>= 2.0 px)
+    if max_bend >= 2.0:
+        pad_v = max(20, int(max_bend * 1.5) + 10)
+        padded_dewarp = cv2.copyMakeBorder(deskewed, pad_v, pad_v, 0, 0, cv2.BORDER_CONSTANT, value=(255, 255, 255))
+        h_pw, w_pw = padded_dewarp.shape[:2]
 
-            # Only dewarp if genuine physical curvature is >= 3.5 px
-            if bend_delta >= 3.5:
-                pad_warp = max(12, int(bend_delta * 1.5))
-                padded_warp = cv2.copyMakeBorder(deskewed, pad_warp, pad_warp, 0, 0, cv2.BORDER_CONSTANT, value=(255, 255, 255))
-                h_pw, w_pw = padded_warp.shape[:2]
+        map_x = np.tile(np.arange(w_pw, dtype=np.float32), (h_pw, 1))
+        map_y = np.empty((h_pw, w_pw), dtype=np.float32)
+        for y in range(h_pw):
+            map_y[y, :] = np.float32(y + delta_y)
 
-                poly_pw = np.polyfit(fit_x, fit_y + pad_warp, 2)
-                curve_pw = np.polyval(poly_pw, np.arange(w_pw))
-                target_y = float(np.mean(curve_pw))
-                shift_y = curve_pw - target_y
+        deskewed = cv2.remap(
+            padded_dewarp,
+            map_x,
+            map_y,
+            interpolation=cv2.INTER_CUBIC,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(255, 255, 255)
+        )
 
-                map_x = np.tile(np.arange(w_pw, dtype=np.float32), (h_pw, 1))
-                map_y = np.empty((h_pw, w_pw), dtype=np.float32)
-                for y in range(h_pw):
-                    map_y[y, :] = np.float32(y + shift_y)
-
-                deskewed = cv2.remap(
-                    padded_warp,
-                    map_x,
-                    map_y,
-                    interpolation=cv2.INTER_CUBIC,
-                    borderMode=cv2.BORDER_CONSTANT,
-                    borderValue=(255, 255, 255)
-                )
-
-    return deskewed, round(tilt_deg, 1), round(bend_delta, 1)
+    return deskewed, round(tilt_deg, 1), round(max_bend, 1)

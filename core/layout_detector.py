@@ -222,34 +222,106 @@ class LayoutDetector:
 
         selected_candidates = accepted_grand + accepted_staves + accepted_systems
 
+        # Convert to grayscale for ink analysis
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+
+        # Sort candidates top-to-bottom by raw y1
+        selected_candidates.sort(key=lambda item: item["box"][1])
+
         filtered = []
-        for d in selected_candidates:
+        num_cands = len(selected_candidates)
+
+        for idx_cand, d in enumerate(selected_candidates):
             cls_name = d["class"]
             x1, y1, x2, y2 = d["box"]
             bw = x2 - x1
             bh = y2 - y1
-            
+
+            # Staff spacing S estimate (distance between 2 adjacent staff lines)
             if cls_name == "grand_staff":
-                pad_l = max(15, int(bw * 0.12))  # Left accolade and clefs
-                pad_r = max(10, int(bw * 0.05))
-                pad_t = max(10, int(bh * 0.06))
-                pad_b = max(10, int(bh * 0.06))
-            elif cls_name == "staff":
-                pad_l = max(15, int(bw * 0.10))  # Clef, key signature
-                pad_r = max(10, int(bw * 0.05))
-                pad_t = max(8, int(bh * 0.08))
-                pad_b = max(12, int(bh * 0.14))  # Lyrics and harmony annotations
-            else:  # system
-                pad_l = max(15, int(bw * 0.10))
-                pad_r = max(10, int(bw * 0.05))
-                pad_t = max(10, int(bh * 0.06))
-                pad_b = max(10, int(bh * 0.06))
-                
+                s_est = max(8, min(18, bh // 10))
+            else:
+                s_est = max(8, min(18, bh // 4))
+
+            # Horizontal expansion:
+            # Grand staff needs room for accolade/brace on the left (at least 38 px)
+            # Single staff needs room for clef and key signature (at least 32 px)
+            if cls_name == "grand_staff":
+                pad_l = max(38, int(bw * 0.05) + 20)
+                pad_r = max(25, int(bw * 0.03) + 15)
+            else:
+                pad_l = max(32, int(bw * 0.04) + 15)
+                pad_r = max(25, int(bw * 0.03) + 15)
+
             px1 = max(0, x1 - pad_l)
-            py1 = max(0, y1 - pad_t)
             px2 = min(img_w, x2 + pad_r)
-            py2 = min(img_h, y2 + pad_b)
-            
+
+            # Vertical expansion via ink profile
+            staff_strip = gray[y1:y2, x1:x2]
+            bg_val = float(np.percentile(staff_strip, 90)) if staff_strip.size > 0 else 250.0
+            ink_thresh = bg_val - 45.0
+
+            inside_ink = np.sum(gray[y1:y2, px1:px2] < ink_thresh, axis=1)
+            median_inside_ink = float(np.median(inside_ink)) if len(inside_ink) > 0 else 100.0
+            noise_thresh = max(3, int(median_inside_ink * 0.03))
+
+            # Upward expansion limit: don't cross midpoint to previous candidate
+            prev_y2 = selected_candidates[idx_cand - 1]["box"][3] if idx_cand > 0 else None
+            max_up = int(s_est * 5.0)
+            if prev_y2 is not None and prev_y2 < y1:
+                avail_up = max(8, (y1 - prev_y2) // 2)
+                max_up = min(max_up, avail_up)
+            max_up = min(max_up, y1)
+
+            zero_run_up = 0
+            best_up = 0
+            for dy in range(1, max_up + 1):
+                y_curr = y1 - dy
+                row = gray[y_curr, px1:px2]
+                cnt = int(np.sum(row < ink_thresh))
+                if cnt > noise_thresh:
+                    best_up = dy
+                    zero_run_up = 0
+                else:
+                    zero_run_up += 1
+                    if zero_run_up >= 8:
+                        break
+
+            # Place top margin safely in whitespace
+            pad_t = max(int(s_est * 1.5), best_up + min(int(s_est * 1.0), 10))
+            if prev_y2 is not None and prev_y2 < y1:
+                pad_t = min(pad_t, max(6, y1 - prev_y2 - 6))
+            pad_t = min(pad_t, y1)
+            py1 = y1 - pad_t
+
+            # Downward expansion limit: don't cross midpoint to next candidate
+            next_y1 = selected_candidates[idx_cand + 1]["box"][1] if idx_cand + 1 < num_cands else None
+            max_down = int(s_est * 5.0)
+            if next_y1 is not None and next_y1 > y2:
+                avail_down = max(8, (next_y1 - y2) // 2)
+                max_down = min(max_down, avail_down)
+            max_down = min(max_down, img_h - y2)
+
+            zero_run_down = 0
+            best_down = 0
+            for dy in range(1, max_down + 1):
+                y_curr = y2 + dy
+                row = gray[y_curr, px1:px2]
+                cnt = int(np.sum(row < ink_thresh))
+                if cnt > noise_thresh:
+                    best_down = dy
+                    zero_run_down = 0
+                else:
+                    zero_run_down += 1
+                    if zero_run_down >= 8:
+                        break
+
+            pad_b = max(int(s_est * 1.6), best_down + min(int(s_est * 1.0), 10))
+            if next_y1 is not None and next_y1 > y2:
+                pad_b = min(pad_b, max(6, next_y1 - y2 - 6))
+            pad_b = min(pad_b, img_h - y2)
+            py2 = y2 + pad_b
+
             filtered.append({
                 "class": cls_name,
                 "confidence": d["confidence"],
@@ -258,7 +330,7 @@ class LayoutDetector:
                 "width": px2 - px1,
                 "height": py2 - py1,
             })
-            
+
         # Sort top-to-bottom
         filtered.sort(key=lambda item: item["padded_box"][1])
         return filtered
