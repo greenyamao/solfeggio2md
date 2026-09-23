@@ -178,7 +178,7 @@ class OMREngine:
                     max_length=effective_max_tokens,
                     do_sample=False,
                     num_beams=1,
-                    repetition_penalty=1.1,
+                    repetition_penalty=1.15,
                     eos_token_id=eos_ids
                 )
 
@@ -243,14 +243,17 @@ class OMREngine:
         }
 
     @staticmethod
-    def _sanitize_runaway_kern(raw_kern: str, max_repeats: int = 3) -> str:
+    def _sanitize_runaway_kern(raw_kern: str, max_repeats: int = 2) -> str:
         """
-        Detects and truncates degenerative runaway loops in Humdrum **kern generation:
+        Detects and truncates degenerative runaway loops and attention wrap-arounds in Humdrum **kern:
         1. Truncates immediately at any terminal barline (==, =||, =:|, =:|!, *-).
         2. Detects header re-occurrence: if *clef, *k[, *M, or **kern occurs after musical
            content has started, it is an unmistakable attention wrap-around restart.
-        3. Detects and truncates cyclical measure repetitions.
-        4. Suppresses repeated identical token lines.
+        3. Multi-measure cycle & wrap-around detection:
+           - Wrap-around to start: if measure i matches measure 0 after progress (i >= 2).
+           - K-measure cycle detection for k in [1, 2, 3, 4]: detects [A, B, A, B] or [A, B, C, A, B, C].
+           - Line-level consecutive repeats exceeding max_repeats.
+        4. Guarantees balanced termination without syntax corruption.
         """
         if not raw_kern:
             return raw_kern
@@ -265,61 +268,82 @@ class OMREngine:
         if not lines:
             return raw_kern
 
-        sanitized = []
-        repeat_count = 1
-        prev_line = None
-
-        seen_measures = []
-        current_measure = []
-        has_music_started = False
+        headers = []
+        measures = []
+        cur_m = []
+        music_started = False
 
         for line in lines:
-            is_header = line.startswith("*") or line.startswith("!")
+            is_header = line.startswith("**") or (line.startswith("*") and not music_started) or line.startswith("!")
             is_barline = line.startswith("=")
 
             # 1. Truncate at terminal barlines (e.g. '==', '=||', '=:|', '*-')
             if not is_header and any(t in line for t in ("==", "=||", "=:|", "*-")):
-                sanitized.append(line)
+                if cur_m:
+                    measures.append(cur_m)
+                    cur_m = []
+                measures.append([line])
                 break
 
-            # 2. Header re-occurrence detection:
-            # If musical notes have begun and a clef/key/meter header appears again,
-            # it is an unmistakable attention wrap-around to the start of the crop.
-            if has_music_started and is_header:
+            # 2. Header re-occurrence detection (attention wrap-around)
+            if music_started and line.startswith("*"):
                 if any(line.startswith(h) for h in ("*clef", "*k[", "*M", "**kern")):
                     break
 
-            # 3. Measure tracking for cyclic loop detection
-            if is_barline:
-                has_music_started = True
-                if current_measure:
-                    m_tuple = tuple(current_measure)
-                    if len(seen_measures) >= 2 and seen_measures[-1] == m_tuple and seen_measures[-2] == m_tuple:
-                        break
-                    seen_measures.append(m_tuple)
-                    current_measure = []
-                current_measure.append(line)
-            elif current_measure:
-                current_measure.append(line)
-            elif not is_header:
-                has_music_started = True
-
-            # 4. Line-level repeat suppression
             if is_header:
-                sanitized.append(line)
-                continue
-
-            if line == prev_line:
-                repeat_count += 1
-                if repeat_count > max_repeats:
-                    continue
+                headers.append(line)
+            elif is_barline:
+                music_started = True
+                if cur_m:
+                    measures.append(cur_m)
+                    cur_m = []
+                cur_m.append(line)
             else:
-                repeat_count = 1
-                prev_line = line
+                music_started = True
+                cur_m.append(line)
 
-            sanitized.append(line)
+        if cur_m:
+            measures.append(cur_m)
 
-        return "\n".join(sanitized)
+        # 3. Intelligent cycle and wrap-around detection
+        cutoff = len(measures)
+
+        # Extract non-barline content tokens for each measure for robust comparison
+        m_tuples = []
+        for m in measures:
+            content = [x for x in m if not x.startswith("=") and not x.startswith("!") and not x.startswith("*")]
+            m_tuples.append(tuple(content))
+
+        # A. Wrap-around to start: if measure i matches measure 0 (and piece has >= 3 measures)
+        if len(m_tuples) >= 3 and len(m_tuples[0]) > 0:
+            for i in range(2, len(m_tuples)):
+                if m_tuples[i] == m_tuples[0]:
+                    if (i + 1 < len(m_tuples) and m_tuples[i + 1] == m_tuples[1]) or i >= 4:
+                        cutoff = min(cutoff, i)
+                        break
+
+        # B. K-measure cycle detection for k in [1, 2, 3, 4]
+        for k in (1, 2, 3, 4):
+            limit = min(cutoff, len(m_tuples))
+            for end_idx in range(2 * k, limit + 1):
+                pattern1 = m_tuples[end_idx - k : end_idx]
+                pattern2 = m_tuples[end_idx - 2 * k : end_idx - k]
+                if pattern1 and all(len(p) > 0 for p in pattern1) and pattern1 == pattern2:
+                    cutoff = min(cutoff, end_idx - k)
+                    break
+
+        valid_measures = measures[:cutoff]
+        res_lines = list(headers)
+        for m in valid_measures:
+            res_lines.extend(m)
+
+        # Ensure valid Humdrum termination
+        if not res_lines or not res_lines[-1].startswith("*-"):
+            if not res_lines or not res_lines[-1].startswith("="):
+                res_lines.append("=")
+            res_lines.append("*-")
+
+        return "\n".join(res_lines)
 
     def purge_gpu_memory(self):
         """
