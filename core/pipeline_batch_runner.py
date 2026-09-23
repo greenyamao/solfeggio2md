@@ -391,6 +391,11 @@ class PipelineBatchRunner:
     def stop(self) -> None:
         self._stop_event.set()
         self._pause_event.set()  # Unblock if paused
+        if hasattr(self, "lm_client") and getattr(self.lm_client, "was_loaded_by_client", False):
+            try:
+                self.lm_client.unload_model()
+            except Exception:
+                pass
         with self._lock:
             self.is_running = False
             self.is_paused = False
@@ -464,6 +469,11 @@ class PipelineBatchRunner:
                 self.metrics["last_log"] = f"Исключение: {str(e)}"
         finally:
             self._purge_vram()
+            if hasattr(self, "lm_client") and getattr(self.lm_client, "was_loaded_by_client", False):
+                try:
+                    self.lm_client.unload_model()
+                except Exception:
+                    pass
             with self._lock:
                 self.is_running = False
                 self.is_paused = False

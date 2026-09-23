@@ -20,6 +20,8 @@ class LMStudioClient:
         self.host = host.strip()
         self.port = str(port).strip()
         self.timeout = timeout
+        self.active_instance_id: Optional[str] = None
+        self.was_loaded_by_client: bool = False
 
     @property
     def base_url(self) -> str:
@@ -67,6 +69,35 @@ class LMStudioClient:
         except Exception:
             return []
 
+    def get_loaded_instance(self, model_name: Optional[str] = None) -> Optional[str]:
+        """
+        Returns the instance_id if model_name (or any active model) is already loaded.
+        Prevents spawning duplicate model instances in LM Studio VRAM.
+        """
+        try:
+            models = self.list_models()
+            target = (model_name or "").strip().lower()
+
+            if target and target != "default":
+                for m in models:
+                    key = str(m.get("key", "")).strip().lower()
+                    display = str(m.get("display_name", "")).strip().lower()
+                    instances = m.get("loaded_instances", [])
+                    if instances:
+                        inst_ids = [str(inst.get("id", "")).strip().lower() for inst in instances]
+                        if target == key or target == display or any(target == iid for iid in inst_ids):
+                            return instances[0].get("id") or m.get("key")
+                        if target in key or key in target:
+                            return instances[0].get("id") or m.get("key")
+
+            for m in models:
+                instances = m.get("loaded_instances", [])
+                if instances:
+                    return instances[0].get("id") or m.get("key")
+        except Exception:
+            pass
+        return None
+
     def load_model(
         self,
         model_name: str,
@@ -77,7 +108,13 @@ class LMStudioClient:
     ) -> Dict[str, Any]:
         """
         Loads specified model into VRAM via native LM Studio API.
+        Idempotent: if model is already loaded, reuses existing instance without spawning duplicates.
         """
+        existing_inst = self.get_loaded_instance(model_name)
+        if existing_inst:
+            self.active_instance_id = existing_inst
+            return {"instance_id": existing_inst, "status": "already_loaded"}
+
         payload = {
             "model": model_name,
             "context_length": int(context_length),
@@ -86,16 +123,25 @@ class LMStudioClient:
             "offload_kv_cache_to_gpu": bool(offload_kv_cache),
             "echo_load_config": True,
         }
-        return self._post("/api/v1/models/load", payload, timeout=180)
+        res = self._post("/api/v1/models/load", payload, timeout=180)
+        self.active_instance_id = res.get("instance_id") or model_name
+        self.was_loaded_by_client = True
+        return res
 
-    def unload_model(self, instance_id: str) -> Optional[Dict[str, Any]]:
+    def unload_model(self, instance_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         Unloads model instance from VRAM.
+        If instance_id is None, unloads the active instance.
         """
-        if not instance_id:
+        target_id = instance_id or self.active_instance_id
+        if not target_id:
             return None
         try:
-            return self._post("/api/v1/models/unload", {"instance_id": instance_id}, timeout=60)
+            res = self._post("/api/v1/models/unload", {"instance_id": target_id}, timeout=60)
+            if target_id == self.active_instance_id:
+                self.active_instance_id = None
+                self.was_loaded_by_client = False
+            return res
         except Exception:
             return None
 
