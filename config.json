@@ -17,8 +17,8 @@
   "smt_device": "cuda",
   "enable_score_enhancer": true,
   "enable_cugan_sr": true,
-  "skip_vlm": true,
-  "skip_front_matter": true,
-  "skip_back_matter": true,
+  "skip_vlm": false,
+  "skip_front_matter": false,
+  "skip_back_matter": false,
   "system_prompt": "Ты — строгий OCR-транскрибатор. Перенеси весь текст страницы книги в Markdown дословно.\nСохраняй заголовки, списки и таблицы.\nВАЖНО: Если на странице встречаются технические метки вида <!-- MUSIC_STUB_ID:XXXX -->, ОБЯЗАТЕЛЬНО оставь их в тексте на тех же местах без изменений. Ничего не додумывай."
 }
