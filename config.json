@@ -1,7 +1,7 @@
 {
   "lm_host": "127.0.0.1",
   "lm_port": "1234",
-  "lm_model": "qwen/qwen3.5-9b",
+  "lm_model": "qwen3.5-9b",
   "lm_temperature": 0.1,
   "lm_max_tokens": 8192,
   "output_dir": "output",
