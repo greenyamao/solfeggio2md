@@ -24,7 +24,8 @@
     selectedCropIndex: 0,
     activeCodeTab: 'abc',
     isRawMarkdownView: false,
-    showYoloDebugMode1: true
+    showYoloDebugMode1: true,
+    finalLeftView: 'orig'
   };
 
   // DOM Elements Cache
@@ -126,6 +127,11 @@
 
     // Mode 4: Book Final
     finalScanImg: document.getElementById('final-scan-img'),
+    finalLeftTitle: document.getElementById('final-left-title'),
+    finalLeftBadge: document.getElementById('final-left-badge'),
+    btnFinalViewOrig: document.getElementById('btn-final-view-orig'),
+    btnFinalViewMask: document.getElementById('btn-final-view-mask'),
+    btnFinalViewDebug: document.getElementById('btn-final-view-debug'),
     bookRenderedContent: document.getElementById('book-rendered-content'),
     bookRawEditor: document.getElementById('book-raw-editor'),
     btnToggleMdRaw: document.getElementById('btn-toggle-md-raw'),
@@ -893,9 +899,41 @@
     }
   }
 
+  function updateFinalLeftScan() {
+    const d = state.pageData;
+    if (!d) return;
+
+    if (DOM.btnFinalViewOrig) DOM.btnFinalViewOrig.classList.toggle('active', state.finalLeftView === 'orig');
+    if (DOM.btnFinalViewMask) DOM.btnFinalViewMask.classList.toggle('active', state.finalLeftView === 'mask');
+    if (DOM.btnFinalViewDebug) DOM.btnFinalViewDebug.classList.toggle('active', state.finalLeftView === 'debug');
+
+    if (state.finalLeftView === 'mask') {
+      DOM.finalScanImg.src = d.mask_url || d.original_url;
+      if (DOM.finalLeftTitle) DOM.finalLeftTitle.textContent = 'Маскированная страница для VLM';
+      if (DOM.finalLeftBadge) {
+        DOM.finalLeftBadge.textContent = 'Заплатки <!-- MUSIC_STUB_ID -->';
+        DOM.finalLeftBadge.className = 'badge badge-grand';
+      }
+    } else if (state.finalLeftView === 'debug') {
+      DOM.finalScanImg.src = d.debug_url || d.original_url;
+      if (DOM.finalLeftTitle) DOM.finalLeftTitle.textContent = 'Разметка YOLO OLA v2.0';
+      if (DOM.finalLeftBadge) {
+        DOM.finalLeftBadge.textContent = 'Детекция станов';
+        DOM.finalLeftBadge.className = 'badge badge-staff';
+      }
+    } else {
+      DOM.finalScanImg.src = d.original_url || d.debug_url;
+      if (DOM.finalLeftTitle) DOM.finalLeftTitle.textContent = 'Оригинальный скан страницы';
+      if (DOM.finalLeftBadge) {
+        DOM.finalLeftBadge.textContent = 'Контрольный эталон';
+        DOM.finalLeftBadge.className = 'badge badge-staff';
+      }
+    }
+  }
+
   function renderMode4() {
     const d = state.pageData;
-    DOM.finalScanImg.src = d.original_url || d.debug_url;
+    updateFinalLeftScan();
 
     if (state.isRawMarkdownView) {
       DOM.bookRenderedContent.style.display = 'none';
@@ -1198,6 +1236,25 @@
         DOM.btnRerunOmr.textContent = 'Перераспознать стан';
       }
     });
+
+    if (DOM.btnFinalViewOrig) {
+      DOM.btnFinalViewOrig.addEventListener('click', () => {
+        state.finalLeftView = 'orig';
+        updateFinalLeftScan();
+      });
+    }
+    if (DOM.btnFinalViewMask) {
+      DOM.btnFinalViewMask.addEventListener('click', () => {
+        state.finalLeftView = 'mask';
+        updateFinalLeftScan();
+      });
+    }
+    if (DOM.btnFinalViewDebug) {
+      DOM.btnFinalViewDebug.addEventListener('click', () => {
+        state.finalLeftView = 'debug';
+        updateFinalLeftScan();
+      });
+    }
 
     DOM.btnToggleMdRaw.addEventListener('click', () => {
       state.isRawMarkdownView = !state.isRawMarkdownView;

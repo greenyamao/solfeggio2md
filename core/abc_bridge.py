@@ -45,6 +45,13 @@ class ABCBridge:
         if not lines:
             raise ValueError("Notation contains no valid lines")
 
+        # Strip trailing dangling spine manipulation lines before end that lack following notes/events
+        while lines and all(t.startswith("*") and not t.startswith("*-") for t in lines[-1].split("\t")):
+            lines.pop()
+
+        if not lines:
+            raise ValueError("Notation contains no valid data lines")
+
         # Check if header exists
         if not any(line.startswith("**") for line in lines):
             first_cols = len(lines[0].split("\t"))
@@ -62,13 +69,20 @@ class ABCBridge:
             if all(t.startswith("*") for t in tokens):
                 if any(t == "*^" or t == "*v" for t in tokens):
                     next_count = 0
-                    for t in tokens:
+                    i = 0
+                    while i < len(tokens):
+                        t = tokens[i]
                         if t == "*^":
                             next_count += 2
+                            i += 1
                         elif t == "*v":
+                            # Merge consecutive *v into 1 spine
                             next_count += 1
+                            while i < len(tokens) and tokens[i] == "*v":
+                                i += 1
                         else:
                             next_count += 1
+                            i += 1
                     active_spines = max(1, next_count)
                     fixed_lines.append(line)
                     continue

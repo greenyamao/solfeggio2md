@@ -417,8 +417,15 @@
           <div class="split-container">
             <div class="split-column" style="flex: 4.5;">
               <div class="panel-header">
-                <span class="panel-title">Оригинальный скан страницы</span>
-                <span class="badge badge-staff">Контрольный эталон</span>
+                <div class="panel-title-group">
+                  <span id="final-left-title" class="panel-title">Оригинальный скан страницы</span>
+                  <span id="final-left-badge" class="badge badge-staff">Контрольный эталон</span>
+                </div>
+                <div style="display: flex; gap: 4px;">
+                  <button id="btn-final-view-orig" class="btn-action active" style="padding: 2px 8px; font-size: 11px;">Скан</button>
+                  <button id="btn-final-view-mask" class="btn-action" style="padding: 2px 8px; font-size: 11px;">Маска VLM</button>
+                  <button id="btn-final-view-debug" class="btn-action" style="padding: 2px 8px; font-size: 11px;">YOLO</button>
+                </div>
               </div>
               <div class="panel-canvas">
                 <img id="final-scan-img" class="fit-image" alt="Оригинальный скан" src="" />

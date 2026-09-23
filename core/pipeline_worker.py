@@ -342,14 +342,67 @@ class PipelineWorker:
                     "model_used": "OMR" if abc_txt else "Pending"
                 })
 
-        md_file = book_dir / "4_final_pages" / f"page_{p_num:04d}_final.md"
-        if not md_file.is_file():
-            md_file = book_dir / "3_raw_md" / f"page_{p_num:04d}_raw.md"
+        # 1. Check for assembled final page first
+        final_candidates = [
+            book_dir / "4_final_pages" / f"page_{p_num:04d}_final.md",
+            book_dir / "4_final_pages" / f"page_{p_num:04d}.md",
+            book_dir / "4_final_pages" / f"page_{p_num}.md",
+        ]
+        md_file = next((f for f in final_candidates if f.is_file()), None)
 
-        if md_file.is_file():
+        if md_file:
             markdown_text = md_file.read_text(encoding="utf-8", errors="replace")
         else:
-            markdown_text = f"*(Текст страницы еще не распознан. Запустите пакетную обработку в Панели управления)*\n"
+            raw_candidates = [
+                book_dir / "3_raw_md" / f"page_{p_num:04d}_raw.md",
+                book_dir / "3_raw_md" / f"page_{p_num}_raw.md",
+                book_dir / "3_raw_md" / f"page_{p_num:04d}.md",
+            ]
+            raw_file = next((f for f in raw_candidates if f.is_file()), None)
+            if raw_file:
+                markdown_text = raw_file.read_text(encoding="utf-8", errors="replace")
+            else:
+                markdown_text = "*(Текст страницы еще не распознан. Запустите пакетную обработку в Панели управления)*\n"
+
+        # 2. Dynamic music stub injection: if markdown contains stubs <!-- MUSIC_STUB_ID: ... -->,
+        # substitute them with actual ABC notation so Mode 4 renders interactive music cards seamlessly.
+        crops_dir = book_dir / "1_crops"
+        if "MUSIC_STUB_ID" in markdown_text and crops_dir.is_dir():
+            injected_stubs = set()
+
+            def inject_abc(match):
+                cid = match.group(1).strip()
+                injected_stubs.add(cid)
+                abc_file = crops_dir / f"{cid}.abc"
+                if abc_file.is_file():
+                    abc = abc_file.read_text(encoding="utf-8", errors="replace").strip()
+                    if abc and not abc.startswith("% [OMR Conversion Error"):
+                        return f"\n\n```abc\n{abc}\n```\n\n"
+                    elif abc.startswith("% [OMR Conversion Error"):
+                        err_clean = abc.replace("%", "").strip()
+                        return f"\n\n> [!WARNING]\n> **Ноты ({cid})**: {err_clean}\n\n"
+                return f"\n\n> [!NOTE]\n> **Заплатка нот ({cid})**: Ожидает распознавания OMR\n\n"
+
+            assembled = re.sub(r"<!--\s*MUSIC_STUB_ID:\s*(.*?)\s*-->", inject_abc, markdown_text)
+
+            # Recover any crops detected on this page that weren't cited in the text
+            page_stubs = sorted([
+                f.stem for f in crops_dir.glob(f"*_P{p_num:04d}_S*.png")
+                if not f.name.endswith("_deskew.png")
+            ])
+            missing_stubs = [s for s in page_stubs if s not in injected_stubs]
+            if missing_stubs:
+                recovered = []
+                for ms in missing_stubs:
+                    abc_file = crops_dir / f"{ms}.abc"
+                    if abc_file.is_file():
+                        abc = abc_file.read_text(encoding="utf-8", errors="replace").strip()
+                        if abc and not abc.startswith("% [OMR Conversion Error"):
+                            recovered.append(f"\n\n```abc\n{abc}\n```\n")
+                if recovered:
+                    assembled += "\n\n<!-- ДОПОЛНИТЕЛЬНЫЕ НОТЫ -->\n" + "\n".join(recovered)
+
+            markdown_text = assembled
 
         sheet_info = self._get_sheet_info_for_page(book_name, p_num)
         mask_rel = f"/output/{book_name}/2_masked_pages/page_{p_num:04d}_masked.png"

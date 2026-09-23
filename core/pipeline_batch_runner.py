@@ -1480,9 +1480,13 @@ class PipelineBatchRunner:
             injected_stubs.add(cid)
             abc_file = crops_dir / f"{cid}.abc"
             if abc_file.is_file():
-                abc = abc_file.read_text(encoding="utf-8").strip()
-                return f"\n\n```abc\n{abc}\n```\n\n"
-            return f"\n\n% [Ноты {cid} не найдены]\n\n"
+                abc = abc_file.read_text(encoding="utf-8", errors="replace").strip()
+                if abc and not abc.startswith("% [OMR Conversion Error"):
+                    return f"\n\n```abc\n{abc}\n```\n\n"
+                elif abc.startswith("% [OMR Conversion Error"):
+                    err_clean = abc.replace("%", "").strip()
+                    return f"\n\n> [!WARNING]\n> **Ноты ({cid})**: {err_clean}\n\n"
+            return f"\n\n> [!NOTE]\n> **Заплатка нот ({cid})**: Ожидает распознавания OMR\n\n"
 
         for r_idx, r_file in enumerate(raw_files, start=1):
             p_num_str = re.search(r"page_(\d+)_raw", r_file.stem)
@@ -1510,12 +1514,17 @@ class PipelineBatchRunner:
                 for ms in missing_stubs:
                     abc_file = crops_dir / f"{ms}.abc"
                     if abc_file.is_file():
-                        abc = abc_file.read_text(encoding="utf-8").strip()
-                        recovered_blocks.append(f"\n\n```abc\n{abc}\n```\n")
+                        abc = abc_file.read_text(encoding="utf-8", errors="replace").strip()
+                        if abc and not abc.startswith("% [OMR Conversion Error"):
+                            recovered_blocks.append(f"\n\n```abc\n{abc}\n```\n")
                 if recovered_blocks:
                     final_text += "\n\n<!-- RECOVERED_MUSIC_STUBS -->\n" + "\n".join(recovered_blocks)
 
             final_file.write_text(final_text, encoding="utf-8")
+            try:
+                (final_dir / f"page_{int(p_num):04d}_final.md").write_text(final_text, encoding="utf-8")
+            except Exception:
+                pass
             all_pages_content.append(f"<!-- PAGE {p_num} -->\n" + final_text)
 
             pct_p4 = round(10.0 + (r_idx / max(1, total_raw)) * 80.0, 1)
