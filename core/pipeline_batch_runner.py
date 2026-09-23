@@ -1371,7 +1371,7 @@ class PipelineBatchRunner:
         # Attempt to load model
         try:
             self.lm_client.load_model(
-                model_name=self.config.get("lm_model", "qwen/qwen3.5-9b"),
+                model_name=self.config.get("lm_model", "qwen3.5-9b"),
                 context_length=int(self.config.get("qwen_context_length", 16196)),
                 eval_batch_size=int(self.config.get("qwen_eval_batch_size", 2048)),
                 flash_attention=bool(self.config.get("qwen_flash_attention", True)),
@@ -1401,7 +1401,7 @@ class PipelineBatchRunner:
                 extracted_text = self.lm_client.request_ocr(
                     image_bytes=img_bytes,
                     system_prompt=system_prompt,
-                    model_name=self.config.get("lm_model", "default"),
+                    model_name=self.config.get("lm_model", "qwen3.5-9b"),
                     temperature=float(self.config.get("lm_temperature", 0.1)),
                     max_tokens=int(self.config.get("lm_max_tokens", 8192)),
                     context_length=int(self.config.get("qwen_context_length", 16196)),

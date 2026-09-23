@@ -159,8 +159,10 @@ class LMStudioClient:
         Forces reasoning: "off" to avoid token waste and latency.
         """
         b64 = base64.b64encode(image_bytes).decode("utf-8")
+        # Always route to the active or already loaded instance to prevent LM Studio JIT duplication
+        target_model = self.active_instance_id or self.get_loaded_instance(model_name) or model_name or "default"
         payload = {
-            "model": model_name,
+            "model": target_model,
             "system_prompt": system_prompt,
             "input": [
                 {"type": "text", "content": "Распознай печатный текст на этой странице."},
@@ -169,7 +171,6 @@ class LMStudioClient:
             "reasoning": "off",
             "temperature": float(temperature),
             "max_output_tokens": int(max_tokens),
-            "context_length": int(context_length),
             "stream": False,
             "store": False,
         }
