@@ -1009,6 +1009,17 @@
           </div>
         `;
       }
+      if (lang === 'kern' || lang === 'humdrum') {
+        return `
+          <div class="music-card" style="margin: 10px 0;">
+            <div class="music-card-header" style="background: var(--bg-surface-elevated);">
+              <span class="music-card-title">Нотация Humdrum **kern</span>
+              <span class="badge badge-staff">Машиночитаемый формат</span>
+            </div>
+            <pre class="code-box" style="margin: 0; padding: 10px; max-height: 220px; overflow-y: auto; font-size: 12px; line-height: 1.4;">${code}</pre>
+          </div>
+        `;
+      }
       return origCode(code, lang);
     };
 

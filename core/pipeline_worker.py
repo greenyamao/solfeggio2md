@@ -12,6 +12,7 @@ import pymupdf as fitz
 
 from core.page_preprocessor import deskew_page, PagePreprocessor, normalize_staff_crop, detect_and_split_spread
 from core.layout_detector import LayoutDetector
+from core.abc_bridge import ABCBridge
 
 
 class PipelineWorker:
@@ -26,6 +27,7 @@ class PipelineWorker:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         (self.root_dir / "in").mkdir(parents=True, exist_ok=True)
         
+        self.bridge = ABCBridge()
         self.omr_engine = None
         self.layout_detector = None
         self.preprocessor = None
@@ -364,26 +366,39 @@ class PipelineWorker:
             else:
                 markdown_text = "*(Текст страницы еще не распознан. Запустите пакетную обработку в Панели управления)*\n"
 
-        # 2. Dynamic music stub injection: if markdown contains stubs <!-- MUSIC_STUB_ID: ... -->,
-        # substitute them with actual ABC notation so Mode 4 renders interactive music cards seamlessly.
+        # 2. Dynamic music stub injection: inject BOTH ABC and Humdrum **kern blocks for LLM reading
         crops_dir = book_dir / "1_crops"
         if "MUSIC_STUB_ID" in markdown_text and crops_dir.is_dir():
             injected_stubs = set()
 
-            def inject_abc(match):
+            def inject_music_blocks(match):
                 cid = match.group(1).strip()
                 injected_stubs.add(cid)
                 abc_file = crops_dir / f"{cid}.abc"
+                kern_file = crops_dir / f"{cid}.kern"
+
+                blocks = []
+                # 1. ABC Notation Block
                 if abc_file.is_file():
                     abc = abc_file.read_text(encoding="utf-8", errors="replace").strip()
                     if abc and not abc.startswith("% [OMR Conversion Error"):
-                        return f"\n\n```abc\n{abc}\n```\n\n"
-                    elif abc.startswith("% [OMR Conversion Error"):
-                        err_clean = abc.replace("%", "").strip()
-                        return f"\n\n> [!WARNING]\n> **Ноты ({cid})**: {err_clean}\n\n"
-                return f"\n\n> [!NOTE]\n> **Заплатка нот ({cid})**: Ожидает распознавания OMR\n\n"
+                        blocks.append(f"```abc\n{abc}\n```")
 
-            assembled = re.sub(r"<!--\s*MUSIC_STUB_ID:\s*(.*?)\s*-->", inject_abc, markdown_text)
+                # 2. Humdrum **kern Notation Block (with spine healing)
+                if kern_file.is_file():
+                    raw_kern = kern_file.read_text(encoding="utf-8", errors="replace").strip()
+                    if raw_kern:
+                        try:
+                            healed_kern = self.bridge.normalize_humdrum(raw_kern)
+                            blocks.append(f"```kern\n{healed_kern}\n```")
+                        except Exception:
+                            blocks.append(f"```kern\n{raw_kern}\n```")
+
+                if blocks:
+                    return "\n\n" + "\n\n".join(blocks) + "\n\n"
+                return f"\n\n<!-- MUSIC_STUB_ID:{cid} (Ожидает OMR) -->\n\n"
+
+            assembled = re.sub(r"<!--\s*MUSIC_STUB_ID:\s*(.*?)\s*-->", inject_music_blocks, markdown_text)
 
             # Recover any crops detected on this page that weren't cited in the text
             page_stubs = sorted([
@@ -395,12 +410,21 @@ class PipelineWorker:
                 recovered = []
                 for ms in missing_stubs:
                     abc_file = crops_dir / f"{ms}.abc"
+                    kern_file = crops_dir / f"{ms}.kern"
                     if abc_file.is_file():
                         abc = abc_file.read_text(encoding="utf-8", errors="replace").strip()
                         if abc and not abc.startswith("% [OMR Conversion Error"):
-                            recovered.append(f"\n\n```abc\n{abc}\n```\n")
+                            recovered.append(f"```abc\n{abc}\n```")
+                    if kern_file.is_file():
+                        raw_kern = kern_file.read_text(encoding="utf-8", errors="replace").strip()
+                        if raw_kern:
+                            try:
+                                healed_kern = self.bridge.normalize_humdrum(raw_kern)
+                                recovered.append(f"```kern\n{healed_kern}\n```")
+                            except Exception:
+                                recovered.append(f"```kern\n{raw_kern}\n```")
                 if recovered:
-                    assembled += "\n\n<!-- ДОПОЛНИТЕЛЬНЫЕ НОТЫ -->\n" + "\n".join(recovered)
+                    assembled += "\n\n<!-- RECOVERED_MUSIC_STUBS -->\n\n" + "\n\n".join(recovered) + "\n"
 
             markdown_text = assembled
 

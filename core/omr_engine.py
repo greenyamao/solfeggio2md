@@ -151,9 +151,9 @@ class OMREngine:
         try:
             self._ensure_transcoda_loaded()
 
-            # Record original widths for music density token bounding
+            # Record original widths for music density token bounding without artificial early cutoffs
             widest_crop_px = max(c.shape[1] for c in crops_bgr) if crops_bgr else 1000
-            effective_max_tokens = min(max_tokens, min(224, max(80, int(widest_crop_px * 0.25))))
+            effective_max_tokens = min(int(max_tokens), max(256, int(widest_crop_px * 0.75)))
 
             # Neural stroke restoration & GPU background division (avoiding double-SR if already 2x)
             if self.enable_score_enhancer and self.enhancer is not None:

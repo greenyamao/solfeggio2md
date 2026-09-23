@@ -1475,18 +1475,30 @@ class PipelineBatchRunner:
         all_pages_content = []
         injected_stubs = set()
 
-        def inject_abc(match):
+        def inject_music_blocks(match):
             cid = match.group(1).strip()
             injected_stubs.add(cid)
             abc_file = crops_dir / f"{cid}.abc"
+            kern_file = crops_dir / f"{cid}.kern"
+
+            blocks = []
             if abc_file.is_file():
                 abc = abc_file.read_text(encoding="utf-8", errors="replace").strip()
                 if abc and not abc.startswith("% [OMR Conversion Error"):
-                    return f"\n\n```abc\n{abc}\n```\n\n"
-                elif abc.startswith("% [OMR Conversion Error"):
-                    err_clean = abc.replace("%", "").strip()
-                    return f"\n\n> [!WARNING]\n> **Ноты ({cid})**: {err_clean}\n\n"
-            return f"\n\n> [!NOTE]\n> **Заплатка нот ({cid})**: Ожидает распознавания OMR\n\n"
+                    blocks.append(f"```abc\n{abc}\n```")
+
+            if kern_file.is_file():
+                raw_kern = kern_file.read_text(encoding="utf-8", errors="replace").strip()
+                if raw_kern:
+                    try:
+                        healed_kern = self.bridge.normalize_humdrum(raw_kern)
+                        blocks.append(f"```kern\n{healed_kern}\n```")
+                    except Exception:
+                        blocks.append(f"```kern\n{raw_kern}\n```")
+
+            if blocks:
+                return "\n\n" + "\n\n".join(blocks) + "\n\n"
+            return f"\n\n<!-- MUSIC_STUB_ID:{cid} (Ожидает OMR) -->\n\n"
 
         for r_idx, r_file in enumerate(raw_files, start=1):
             p_num_str = re.search(r"page_(\d+)_raw", r_file.stem)
@@ -1505,7 +1517,7 @@ class PipelineBatchRunner:
                 ])
 
             injected_stubs.clear()
-            final_text = re.sub(r"<!--\s*MUSIC_STUB_ID:\s*(.*?)\s*-->", inject_abc, raw_text)
+            final_text = re.sub(r"<!--\s*MUSIC_STUB_ID:\s*(.*?)\s*-->", inject_music_blocks, raw_text)
 
             # Fallback recovery: if any stubs were omitted by VLM, append them cleanly to the bottom
             missing_stubs = [s for s in page_stubs if s not in injected_stubs]
@@ -1513,12 +1525,21 @@ class PipelineBatchRunner:
                 recovered_blocks = []
                 for ms in missing_stubs:
                     abc_file = crops_dir / f"{ms}.abc"
+                    kern_file = crops_dir / f"{ms}.kern"
                     if abc_file.is_file():
                         abc = abc_file.read_text(encoding="utf-8", errors="replace").strip()
                         if abc and not abc.startswith("% [OMR Conversion Error"):
-                            recovered_blocks.append(f"\n\n```abc\n{abc}\n```\n")
+                            recovered_blocks.append(f"```abc\n{abc}\n```")
+                    if kern_file.is_file():
+                        raw_kern = kern_file.read_text(encoding="utf-8", errors="replace").strip()
+                        if raw_kern:
+                            try:
+                                healed_kern = self.bridge.normalize_humdrum(raw_kern)
+                                recovered_blocks.append(f"```kern\n{healed_kern}\n```")
+                            except Exception:
+                                recovered_blocks.append(f"```kern\n{raw_kern}\n```")
                 if recovered_blocks:
-                    final_text += "\n\n<!-- RECOVERED_MUSIC_STUBS -->\n" + "\n".join(recovered_blocks)
+                    final_text += "\n\n<!-- RECOVERED_MUSIC_STUBS -->\n\n" + "\n\n".join(recovered_blocks) + "\n"
 
             final_file.write_text(final_text, encoding="utf-8")
             try:

@@ -24,22 +24,53 @@ class ABCBridge:
             pass
         self._tk = verovio.toolkit()
 
+    @staticmethod
+    def check_spines_valid(norm_text: str) -> bool:
+        """
+        Pure Python mathematical verification of Humdrum spine consistency.
+        Guarantees that every line matches the active column count before passing to C++ Verovio.
+        """
+        lines = [l.strip() for l in norm_text.splitlines() if l.strip() and not l.startswith("!")]
+        if not lines or not any(l.startswith("**") for l in lines):
+            return False
+        s = len(lines[0].split("\t"))
+        for line in lines[1:]:
+            tokens = line.split("\t")
+            if len(tokens) != s:
+                return False
+            if any(t in ("*^", "*v") for t in tokens):
+                if not all(t.startswith("*") for t in tokens):
+                    return False
+                next_count = 0
+                i = 0
+                while i < len(tokens):
+                    if tokens[i] == "*^":
+                        next_count += 2
+                        i += 1
+                    elif tokens[i] == "*v":
+                        next_count += 1
+                        while i < len(tokens) and tokens[i] == "*v":
+                            i += 1
+                    else:
+                        next_count += 1
+                        i += 1
+                s = max(1, next_count)
+        return True
+
     def normalize_humdrum(self, raw_kern: str) -> str:
         """
         Ensures Humdrum text has valid spines, headers (**kern), and balanced column counts.
         Tracks active spine splits (*^) and merges (*v), padding missing fields to prevent Verovio C++ crashes.
         """
-        text = raw_kern.strip()
-        if not text:
-            raise ValueError("Empty notation received")
-
-        # Replace SMT/Transcoda token separators if present
         text = (
-            text.replace("<s>", " ")
+            raw_kern.strip()
+            .replace("<s>", " ")
             .replace("</s>", "")
             .replace("<t>", "\t")
             .replace("<b>", "\n")
         )
+        if not text:
+            raise ValueError("Empty notation received")
 
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         if not lines:
@@ -54,29 +85,38 @@ class ABCBridge:
 
         # Check if header exists
         if not any(line.startswith("**") for line in lines):
-            first_cols = len(lines[0].split("\t"))
+            first_cols = max(1, len(lines[0].split("\t")))
             header = "\t".join(["**kern"] * first_cols)
             lines = [header] + lines
 
-        # Dynamically track active spine count and pad/truncate inconsistent records
         active_spines = len(lines[0].split("\t"))
-        fixed_lines = []
+        fixed_lines = [lines[0]]
 
-        for line in lines:
+        for line in lines[1:]:
             tokens = line.split("\t")
 
             # Check for spine manipulation lines
-            if all(t.startswith("*") for t in tokens):
-                if any(t == "*^" or t == "*v" for t in tokens):
+            has_spine_op = any(t in ("*^", "*v") for t in tokens)
+            if has_spine_op:
+                if all(t.startswith("*") for t in tokens):
+                    # Spine manipulation line itself MUST have active_spines columns
+                    if len(tokens) < active_spines:
+                        tokens = tokens + ["*"] * (active_spines - len(tokens))
+                    elif len(tokens) > active_spines:
+                        tokens = tokens[:active_spines]
+
+                    # Validate *v: merging only makes sense if at least two *v appear and active_spines >= 2
+                    v_count = tokens.count("*v")
+                    if v_count < 2 or active_spines < 2:
+                        tokens = ["*" if t == "*v" else t for t in tokens]
+
                     next_count = 0
                     i = 0
                     while i < len(tokens):
-                        t = tokens[i]
-                        if t == "*^":
+                        if tokens[i] == "*^":
                             next_count += 2
                             i += 1
-                        elif t == "*v":
-                            # Merge consecutive *v into 1 spine
+                        elif tokens[i] == "*v":
                             next_count += 1
                             while i < len(tokens) and tokens[i] == "*v":
                                 i += 1
@@ -84,8 +124,11 @@ class ABCBridge:
                             next_count += 1
                             i += 1
                     active_spines = max(1, next_count)
-                    fixed_lines.append(line)
+                    fixed_lines.append("\t".join(tokens))
                     continue
+                else:
+                    # Strip misplaced spine operators from regular data lines
+                    tokens = [t if t not in ("*^", "*v") else "." for t in tokens]
 
             # Ensure data lines, barlines, interpretations match active spine count
             if len(tokens) < active_spines:
@@ -96,8 +139,14 @@ class ABCBridge:
 
             fixed_lines.append("\t".join(tokens))
 
+        # Remove trailing spine ops before terminator
+        while fixed_lines and all(t.startswith("*") and not t.startswith("*-") for t in fixed_lines[-1].split("\t")):
+            fixed_lines.pop()
+            if fixed_lines:
+                active_spines = len(fixed_lines[-1].split("\t"))
+
         # Check terminating *-
-        if not fixed_lines[-1].startswith("*-"):
+        if not fixed_lines or not fixed_lines[-1].startswith("*-"):
             terminator = "\t".join(["*-"] * active_spines)
             fixed_lines.append(terminator)
 
@@ -106,11 +155,14 @@ class ABCBridge:
     def validate_with_verovio(self, kern_text: str) -> bool:
         """
         Uses Verovio toolkit to validate whether the Humdrum syntax is well-formed.
+        Strictly guards against C++ exit(1) by verifying spine consistency in Python first.
         """
         if not kern_text or kern_text.startswith("% [OMR"):
             return False
         try:
             norm = self.normalize_humdrum(kern_text)
+            if not self.check_spines_valid(norm):
+                return False
             return bool(self._tk.loadData(norm))
         except Exception:
             return False
@@ -124,6 +176,8 @@ class ABCBridge:
             return ""
         try:
             normalized = self.normalize_humdrum(kern_text)
+            if not self.check_spines_valid(normalized):
+                return ""
             options = {
                 "pageWidth": 1200,
                 "pageHeight": 220,
