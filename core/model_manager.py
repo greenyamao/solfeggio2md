@@ -202,6 +202,11 @@ class ModelManager:
 
         return st
 
+    def get_download_state(self) -> Dict[str, Any]:
+        """Returns a snapshot of the current background download state."""
+        with self._lock:
+            return dict(self.download_state)
+
     def start_download(
         self,
         repo: str = "lmstudio-community/Qwen3.5-9B-GGUF",

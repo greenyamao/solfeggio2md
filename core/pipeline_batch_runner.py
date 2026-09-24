@@ -135,6 +135,7 @@ class PipelineBatchRunner:
             "last_page_seconds": 0.0,
             "last_page_tokens": 0,
             "current_page_image_url": "",
+            "current_page_image_path": "",
             "phase_progress": {
                 "phase1": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Ожидание"},
                 "phase2": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Ожидание"},
@@ -156,6 +157,8 @@ class PipelineBatchRunner:
             port=self.config.get("lm_port", "1234"),
         )
         self.bridge = ABCBridge()
+        self.on_log_event: Optional[Any] = None
+        self.on_frame_update: Optional[Any] = None
 
         # Log initial event
         self.log_event("SYSTEM", "Система инициализирована. Готова к обработке очереди.")
@@ -175,6 +178,12 @@ class PipelineBatchRunner:
         with self._lock:
             self._log_history.append(entry)
             self.metrics["last_log"] = f"[{tag}] {msg}"
+        if self.on_log_event is not None:
+            try:
+                self.on_log_event(entry)
+            except Exception:
+                pass
+
 
     def load_config(self) -> Dict[str, Any]:
         cfg = dict(DEFAULT_CONFIG)
@@ -347,6 +356,17 @@ class PipelineBatchRunner:
         with self._lock:
             self._sync_with_in_dir()
             return [dict(q) for q in self.queue]
+
+    def scan_inputs(self) -> List[Dict[str, Any]]:
+        """Scans the in/ folder and refreshes the file queue."""
+        return self.get_queue()
+
+    def get_queue_summary(self) -> Dict[str, Any]:
+        """Returns consolidated queue and status dictionary."""
+        q = self.get_queue()
+        m = self.get_metrics()
+        return {"queue": q, "metrics": m}
+
 
     def get_metrics(self) -> Dict[str, Any]:
         with self._lock:
@@ -976,6 +996,15 @@ class PipelineBatchRunner:
                                 rel_dbg = debug_file.relative_to(self.output_root).as_posix()
                                 with self._lock:
                                     self.metrics["current_page_image_url"] = f"/output/{rel_dbg}"
+                                    self.metrics["current_page_image_path"] = str(debug_file)
+                                if self.on_frame_update is not None:
+                                    self.on_frame_update(debug_img, {
+                                        "path": str(debug_file),
+                                        "stage": "phase1",
+                                        "book": pdf_path.stem,
+                                        "page": bp,
+                                        "title": f"Стр. {bp} ({side}) — BBox разметка",
+                                    })
                             except Exception:
                                 pass
                             self.log_event("YOLO", f"Стр. {bp} ({side}): найдено {len(crops_data)} станов")
@@ -1107,6 +1136,15 @@ class PipelineBatchRunner:
                                 rel_crop = batch[-1].relative_to(self.output_root).as_posix()
                                 with self._lock:
                                     self.metrics["current_page_image_url"] = f"/output/{rel_crop}"
+                                    self.metrics["current_page_image_path"] = str(batch[-1])
+                                if self.on_frame_update is not None:
+                                    self.on_frame_update(None, {
+                                        "path": str(batch[-1]),
+                                        "stage": "phase2",
+                                        "book": pdf_path.stem,
+                                        "page": cd,
+                                        "title": f"Стан {cd}/{tc} — OMR распознавание",
+                                    })
                             except Exception:
                                 pass
                             self.log_event("OMR", f"Распознана пачка ({saved} станов, всего: {cd}/{tc})")
@@ -1498,6 +1536,15 @@ class PipelineBatchRunner:
                 rel_mask = mask_file.relative_to(self.output_root).as_posix()
                 with self._lock:
                     self.metrics["current_page_image_url"] = f"/output/{rel_mask}"
+                    self.metrics["current_page_image_path"] = str(mask_file)
+                if self.on_frame_update is not None:
+                    self.on_frame_update(None, {
+                        "path": str(mask_file),
+                        "stage": "phase3",
+                        "book": pdf_path.stem,
+                        "page": page_num,
+                        "title": f"Стр. {page_num} — VLM маскированная страница",
+                    })
             except Exception:
                 pass
 
