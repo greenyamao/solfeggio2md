@@ -259,9 +259,9 @@ class PipelineView(QWidget):
         return card
 
     def _setup_timer(self) -> None:
-        """Polls status queue and shared memory frame buffer every 50 ms."""
+        """Polls status queue and shared memory frame buffer every 100 ms."""
         self._timer = QTimer(self)
-        self._timer.setInterval(50)
+        self._timer.setInterval(100)
         self._timer.timeout.connect(self._on_tick)
         self._timer.start()
 
@@ -278,7 +278,7 @@ class PipelineView(QWidget):
                 meta = msg.get("meta", {})
                 path = meta.get("path", "")
                 title = meta.get("title", "")
-                if title:
+                if title and self.lbl_mon_title.text() != f"ЖИВОЙ МОНИТОР: {title}":
                     self.lbl_mon_title.setText(f"ЖИВОЙ МОНИТОР: {title}")
 
                 if path and path != self._current_image_path and os.path.isfile(path):
@@ -303,26 +303,34 @@ class PipelineView(QWidget):
 
         if is_running:
             if is_paused:
-                self.lbl_bar_status.setText("Пауза")
-                self.lbl_bar_status.setStyleSheet("color: #fb923c; font-weight: 600;")
-                self.btn_pause.setText("Продолжить")
+                if self.lbl_bar_status.text() != "Пауза":
+                    self.lbl_bar_status.setText("Пауза")
+                    self.lbl_bar_status.setStyleSheet("color: #fb923c; font-weight: 600;")
+                if self.btn_pause.text() != "Продолжить":
+                    self.btn_pause.setText("Продолжить")
             else:
-                self.lbl_bar_status.setText("Выполняется...")
-                self.lbl_bar_status.setStyleSheet("color: #4ade80; font-weight: 600;")
-                self.btn_pause.setText("Пауза")
+                if self.lbl_bar_status.text() != "Выполняется...":
+                    self.lbl_bar_status.setText("Выполняется...")
+                    self.lbl_bar_status.setStyleSheet("color: #4ade80; font-weight: 600;")
+                if self.btn_pause.text() != "Пауза":
+                    self.btn_pause.setText("Пауза")
         else:
-            self.lbl_bar_status.setText("Остановлен / Готов")
-            self.lbl_bar_status.setStyleSheet("color: #38bdf8; font-weight: 600;")
+            if self.lbl_bar_status.text() != "Остановлен / Готов":
+                self.lbl_bar_status.setText("Остановлен / Готов")
+                self.lbl_bar_status.setStyleSheet("color: #38bdf8; font-weight: 600;")
 
         # Active book
         book_name = metrics.get("current_book_name", "")
-        if book_name:
+        if book_name and self.lbl_book_title.text() != book_name:
             self.lbl_book_title.setText(book_name)
         phase_name = metrics.get("current_phase_name", "Ожидание")
-        self.badge_stage.setText(f"ФАЗА: {phase_name.upper()}")
+        phase_str = f"ФАЗА: {phase_name.upper()}"
+        if self.badge_stage.text() != phase_str:
+            self.badge_stage.setText(phase_str)
 
-        pct = float(metrics.get("book_progress_pct", 0.0))
-        self.book_progress_bar.setValue(int(pct))
+        pct = int(float(metrics.get("book_progress_pct", 0.0)))
+        if self.book_progress_bar.value() != pct:
+            self.book_progress_bar.setValue(pct)
 
         # 4 phases
         phases = metrics.get("phase_progress", {})
@@ -339,9 +347,12 @@ class PipelineView(QWidget):
             self.canvas_view.load_file(img_path)
 
     def _update_queue_table(self, queue_items: List[Dict[str, Any]]) -> None:
-        if self.queue_table.rowCount() != len(queue_items):
-            self.queue_table.setRowCount(len(queue_items))
+        sig = tuple((it.get("name", ""), it.get("pages", 0), it.get("status", "")) for it in queue_items)
+        if getattr(self, "_last_queue_sig", None) == sig:
+            return
+        self._last_queue_sig = sig
 
+        self.queue_table.setRowCount(len(queue_items))
         for row, item in enumerate(queue_items):
             name = item.get("name", "")
             pages = str(item.get("pages", 0))
@@ -356,6 +367,7 @@ class PipelineView(QWidget):
             self.queue_table.setItem(row, 2, item_status)
 
     def _on_start_clicked(self) -> None:
+
         self.worker_client.send_command("start")
 
     def _on_pause_clicked(self) -> None:

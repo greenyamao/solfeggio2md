@@ -83,6 +83,10 @@ class MainWindow(FluentWindow):
         self.resize(1340, 840)
         self.setMinimumSize(1100, 720)
         self.setWindowTitle("PDF to Markdown Music — Windows 11 Native Workbench")
+        # Disable sliding transition animation to prevent stutter and visual tearing
+        if hasattr(self, "stackedWidget"):
+            self.stackedWidget.setAnimationEnabled(False)
+
 
     def closeEvent(self, event) -> None:
         """Gracefully terminates worker child process and unlinks shared memory."""

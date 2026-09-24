@@ -54,9 +54,15 @@ class InspectorView(QWidget):
         self._books: List[str] = []
         self._current_page: int = 1
         self._max_page: int = 1
+        self._book_page_counts: Dict[str, int] = {}
 
         self._init_ui()
-        self.refresh_books()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if not self._books:
+            self.refresh_books()
+
 
     def _init_ui(self) -> None:
         self.setObjectName("InspectorView")
@@ -207,16 +213,21 @@ class InspectorView(QWidget):
         book_dir = self.output_root / book_title
         raw_pages_dir = book_dir / "1_raw_pages"
 
-        # Count pages
-        pages = list(raw_pages_dir.glob("page_*_raw.png"))
-        if not pages:
-            pages = list(raw_pages_dir.glob("page_*.png"))
+        # Count pages (cached)
+        if book_title in self._book_page_counts:
+            self._max_page = self._book_page_counts[book_title]
+        else:
+            pages = list(raw_pages_dir.glob("page_*_raw.png"))
+            if not pages:
+                pages = list(raw_pages_dir.glob("page_*.png"))
+            self._max_page = max(1, len(pages))
+            self._book_page_counts[book_title] = self._max_page
 
-        self._max_page = max(1, len(pages))
         self.spin_page.blockSignals(True)
         self.spin_page.setMaximum(self._max_page)
         self.spin_page.setValue(1)
         self.spin_page.blockSignals(False)
+
         self.lbl_max_page.setText(f"/ {self._max_page}")
 
         self._current_page = 1

@@ -49,17 +49,27 @@ class ModelManager:
             "error_message": "",
         }
 
+        # Discovery caches to prevent repeated multi-gigabyte disk scans
+        self._disk_cache: Dict[str, Optional[Path]] = {}
+        self._resolved_cache: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+
     def _discover_local_cache(self, filename: str) -> Optional[Path]:
         """
         Scans known system directories (e.g. LM Studio models, HuggingFace cache)
         to find already-downloaded weights without re-downloading gigabytes of data.
+        Caches results in memory to guarantee 0 ms repeated lookups.
         """
-        candidates: List[Path] = []
+        if filename in self._disk_cache:
+            cached = self._disk_cache[filename]
+            if cached is not None and cached.is_file():
+                return cached
 
         # 1. Project-local models directory
         for p in self.models_dir.rglob(filename):
             if p.is_file() and p.stat().st_size > 1024 * 1024:
+                self._disk_cache[filename] = p
                 return p
+
 
         # 2. Check ~/.lmstudio/settings.json downloadsFolder
         try:
@@ -72,6 +82,7 @@ class ModelManager:
                     p_dl = Path(dl_folder)
                     for f in p_dl.rglob(filename):
                         if f.is_file() and f.stat().st_size > 1024 * 1024:
+                            self._disk_cache[filename] = f
                             return f
         except Exception:
             pass
@@ -83,6 +94,7 @@ class ModelManager:
             if lms_models.is_dir():
                 for f in lms_models.rglob(filename):
                     if f.is_file() and f.stat().st_size > 1024 * 1024:
+                        self._disk_cache[filename] = f
                         return f
         except Exception:
             pass
@@ -96,6 +108,7 @@ class ModelManager:
                 for m in matches:
                     p = Path(m)
                     if p.is_file() and p.stat().st_size > 1024 * 1024:
+                        self._disk_cache[filename] = p
                         return p
         except Exception:
             pass
@@ -106,10 +119,12 @@ class ModelManager:
             if hf_cache.is_dir():
                 for f in hf_cache.rglob(filename):
                     if f.is_file() and f.stat().st_size > 1024 * 1024:
+                        self._disk_cache[filename] = f
                         return f
         except Exception:
             pass
 
+        self._disk_cache[filename] = None
         return None
 
     def resolve_model_files(
@@ -121,10 +136,17 @@ class ModelManager:
         """
         Resolves physical disk paths for both model and vision projector.
         If found in external cache, creates hardlink/symlink to models_dir if possible,
-        or returns direct path.
+        or returns direct path. Caches results in memory for 0 ms repeated lookups.
         """
+        cache_key = (repo, model_file, mmproj_file)
+        if cache_key in self._resolved_cache:
+            cached_res = self._resolved_cache[cache_key]
+            if cached_res.get("ready"):
+                return cached_res
+
         target_dir = self.models_dir / repo.replace("/", "_")
         target_dir.mkdir(parents=True, exist_ok=True)
+
 
         res: Dict[str, Any] = {
             "repo": repo,
@@ -181,7 +203,9 @@ class ModelManager:
                 res["mmproj_exists"] = True
 
         res["ready"] = bool(res["model_exists"] and res["mmproj_exists"])
+        self._resolved_cache[cache_key] = res
         return res
+
 
     def get_status(
         self,

@@ -242,19 +242,11 @@ class SettingsView(QWidget):
 
     def _setup_timer(self) -> None:
         self._timer = QTimer(self)
-        self._timer.setInterval(200)
+        self._timer.setInterval(1000)
         self._timer.timeout.connect(self._check_status)
         self._timer.start()
 
     def _check_status(self) -> None:
-        # Check model file status
-        st = self.model_manager.get_status(
-            repo=self.edit_repo.text().strip(),
-            model_file=self.edit_model.text().strip(),
-            mmproj_file=self.edit_mmproj.text().strip(),
-        )
-
-
         dl_state = self.model_manager.get_download_state()
         status_str = dl_state.get("status", "idle")
 
@@ -274,19 +266,39 @@ class SettingsView(QWidget):
             self.lbl_dl_detail.setText(
                 f"Прогресс: {pct:.1f}% | Скорость: {spd:.1f} МБ/с | Осталось: ~{int(eta)} с"
             )
+            return
+
+        # Idle mode: only re-check if inputs changed or model not yet ready
+        cur_sig = (
+            self.edit_repo.text().strip(),
+            self.edit_model.text().strip(),
+            self.edit_mmproj.text().strip(),
+        )
+        if getattr(self, "_last_status_ready", False) and cur_sig == getattr(self, "_last_status_sig", None):
+            return
+
+        self._last_status_sig = cur_sig
+        st = self.model_manager.get_status(
+            repo=cur_sig[0],
+            model_file=cur_sig[1],
+            mmproj_file=cur_sig[2],
+        )
+
+        self.btn_cancel_dl.setEnabled(False)
+        self.btn_download.setEnabled(True)
+        if st.get("ready", False):
+            self._last_status_ready = True
+            self.lbl_model_status.setText("Файлы модели найдены и готовы к работе")
+            self.lbl_model_status.setStyleSheet("color: #4ade80; font-weight: 700;")
+            self.dl_progress_bar.setValue(100)
+            self.lbl_dl_detail.setText(f"Модель: {st.get('model_path', '')}")
         else:
-            self.btn_cancel_dl.setEnabled(False)
-            self.btn_download.setEnabled(True)
-            if st.get("ready", False):
-                self.lbl_model_status.setText("Файлы модели найдены и готовы к работе")
-                self.lbl_model_status.setStyleSheet("color: #4ade80; font-weight: 700;")
-                self.dl_progress_bar.setValue(100)
-                self.lbl_dl_detail.setText(f"Модель: {st.get('model_path', '')}")
-            else:
-                missing = st.get("missing", [])
-                self.lbl_model_status.setText(f"Файлы не найдены ({len(missing)} шт.)")
-                self.lbl_model_status.setStyleSheet("color: #fb923c; font-weight: 600;")
-                self.lbl_dl_detail.setText("Нажмите 'Скачать с Hugging Face' для автозагрузки весов")
+            self._last_status_ready = False
+            missing = st.get("missing", [])
+            self.lbl_model_status.setText(f"Файлы не найдены ({len(missing)} шт.)")
+            self.lbl_model_status.setStyleSheet("color: #fb923c; font-weight: 600;")
+            self.lbl_dl_detail.setText("Нажмите 'Скачать с Hugging Face' для автозагрузки весов")
+
 
     def _on_download_clicked(self) -> None:
         self.worker_client.send_command(
