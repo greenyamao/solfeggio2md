@@ -125,9 +125,9 @@ class LMStudioClient:
             current_parallel = int(inst_cfg.get("parallel", 1))
             current_ctx = int(inst_cfg.get("context_length", 4096))
 
-            # If the loaded model has suboptimal configuration (parallel > 1 or ctx > 6144),
-            # automatically unload it to free bloated KV cache from VRAM.
-            if current_parallel > int(parallel) or current_ctx > max(int(context_length), 6144):
+            # If the loaded model has different configuration (parallel != target or ctx != target),
+            # automatically unload it to enforce optimal parameters.
+            if current_parallel != int(parallel) or current_ctx != int(context_length):
                 self.unload_model(inst_id)
             else:
                 self.active_instance_id = inst_id
