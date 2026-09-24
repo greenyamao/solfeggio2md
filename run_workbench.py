@@ -299,17 +299,53 @@ def create_app(worker: PipelineWorker, runner: PipelineBatchRunner) -> bottle.Bo
             bottle.response.status = 500
             return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
 
+    @app.route('/api/pipeline/logs', method='GET')
+    def api_pipeline_logs():
+        bottle.response.content_type = 'application/json; charset=utf-8'
+        return json.dumps({"logs": list(runner._log_history)}, ensure_ascii=False)
+
+    @app.route('/api/model/status', method='GET')
+    def api_model_status():
+        bottle.response.content_type = 'application/json; charset=utf-8'
+        repo = runner.config.get("vlm_model_repo", "lmstudio-community/Qwen3.5-9B-GGUF")
+        model_file = runner.config.get("vlm_model_file", "Qwen3.5-9B-Q4_K_M.gguf")
+        mmproj_file = runner.config.get("vlm_mmproj_file", "mmproj-Qwen3.5-9B-BF16.gguf")
+        st = runner.model_manager.get_status(repo=repo, model_file=model_file, mmproj_file=mmproj_file)
+        return json.dumps(st, ensure_ascii=False)
+
+    @app.route('/api/model/download', method='POST')
+    def api_model_download():
+        bottle.response.content_type = 'application/json; charset=utf-8'
+        try:
+            data = bottle.request.json or {}
+            repo = data.get("repo") or runner.config.get("vlm_model_repo", "lmstudio-community/Qwen3.5-9B-GGUF")
+            model_file = data.get("model_file") or runner.config.get("vlm_model_file", "Qwen3.5-9B-Q4_K_M.gguf")
+            mmproj_file = data.get("mmproj_file") or runner.config.get("vlm_mmproj_file", "mmproj-Qwen3.5-9B-BF16.gguf")
+            started = runner.model_manager.start_download(repo=repo, model_file=model_file, mmproj_file=mmproj_file)
+            return json.dumps({"status": "started" if started else "already_running"}, ensure_ascii=False)
+        except Exception as e:
+            bottle.response.status = 500
+            return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+    @app.route('/api/model/cancel_download', method='POST')
+    def api_model_cancel_download():
+        bottle.response.content_type = 'application/json; charset=utf-8'
+        runner.model_manager.cancel_download()
+        return json.dumps({"status": "cancelled"}, ensure_ascii=False)
+
     @app.route('/api/lmstudio/test', method='GET')
     def api_lmstudio_test():
         bottle.response.content_type = 'application/json; charset=utf-8'
+        backend = runner.config.get("vlm_backend", "embedded")
+        port = runner.config.get("vlm_embedded_port", 1234) if backend == "embedded" else runner.config.get("lm_port", "1234")
         client = LMStudioClient(
             host=runner.config.get("lm_host", "127.0.0.1"),
-            port=runner.config.get("lm_port", "1234"),
+            port=str(port),
         )
         online, message = client.check_connection()
         models = client.list_models() if online else []
         return json.dumps(
-            {"online": online, "message": message, "models": models}, ensure_ascii=False
+            {"online": online, "message": message, "models": models, "backend": backend}, ensure_ascii=False
         )
 
     return app

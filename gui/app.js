@@ -25,7 +25,9 @@
     activeCodeTab: 'abc',
     isRawMarkdownView: false,
     showYoloDebugMode1: true,
-    finalLeftView: 'orig'
+    finalLeftView: 'orig',
+    autoScrollLogs: true,
+    renderedLogCount: 0
   };
 
   // DOM Elements Cache
@@ -67,7 +69,14 @@
     livePreviewImg: document.getElementById('live-preview-img'),
     liveEmptyBanner: document.getElementById('live-empty-banner'),
     liveBookBadge: document.getElementById('live-book-badge'),
+    liveStageBadge: document.getElementById('live-stage-badge'),
+    telemVlmSpeed: document.getElementById('telem-vlm-speed'),
+    telemLastTime: document.getElementById('telem-last-time'),
+    telemVram: document.getElementById('telem-vram'),
+    telemTokens: document.getElementById('telem-tokens'),
     logConsoleBox: document.getElementById('log-console-box'),
+    btnToggleAutoscroll: document.getElementById('btn-toggle-autoscroll'),
+    btnClearLogs: document.getElementById('btn-clear-logs'),
 
     // Workbench Navigation & Modes
     btnPrevPage: document.getElementById('btn-prev-page'),
@@ -153,6 +162,16 @@
     lmstudioTestResult: document.getElementById('lmstudio-test-result'),
 
     // Settings Fields
+    cfgVlmBackend: document.getElementById('cfg-vlm-backend'),
+    cfgVlmModelRepo: document.getElementById('cfg-vlm-model-repo'),
+    cfgVlmModelFile: document.getElementById('cfg-vlm-model-file'),
+    cfgVlmMmprojFile: document.getElementById('cfg-vlm-mmproj-file'),
+    modelStatusBadge: document.getElementById('model-status-badge'),
+    btnDownloadModel: document.getElementById('btn-download-model'),
+    modelDownloadProgressContainer: document.getElementById('model-download-progress-container'),
+    modelDlBar: document.getElementById('model-dl-bar'),
+    modelDlStatusText: document.getElementById('model-dl-status-text'),
+    modelDlSpeedText: document.getElementById('model-dl-speed-text'),
     cfgLmHost: document.getElementById('cfg-lm-host'),
     cfgLmPort: document.getElementById('cfg-lm-port'),
     cfgLmModel: document.getElementById('cfg-lm-model'),
@@ -351,12 +370,58 @@
         DOM.btnPipelineStart.querySelector('span').textContent = 'Запустить конвейер';
       }
 
-      // Log Appending
-      if (data.last_log && data.last_log !== DOM.logConsoleBox.dataset.lastLog) {
+      // Update Live Preview Image & Badges
+      if (data.current_page_image_url) {
+        if (DOM.livePreviewImg.dataset.lastUrl !== data.current_page_image_url) {
+          DOM.livePreviewImg.dataset.lastUrl = data.current_page_image_url;
+          DOM.livePreviewImg.src = data.current_page_image_url;
+          DOM.livePreviewImg.style.display = 'block';
+          if (DOM.liveEmptyBanner) DOM.liveEmptyBanner.style.display = 'none';
+        }
+      } else if (!data.is_running && !DOM.livePreviewImg.dataset.lastUrl) {
+        DOM.livePreviewImg.style.display = 'none';
+        if (DOM.liveEmptyBanner) DOM.liveEmptyBanner.style.display = 'flex';
+      }
+
+      if (DOM.liveBookBadge) {
+        DOM.liveBookBadge.textContent = data.current_book_name || (data.is_running ? 'В обработке' : 'Режим ожидания');
+      }
+      if (DOM.liveStageBadge) {
+        DOM.liveStageBadge.textContent = data.current_phase_name || 'Ожидание';
+      }
+
+      // Update Live Telemetry Ribbon
+      if (DOM.telemVlmSpeed) {
+        DOM.telemVlmSpeed.textContent = (data.vlm_tok_per_sec || 0).toFixed(1) + ' tok/s';
+      }
+      if (DOM.telemLastTime) {
+        DOM.telemLastTime.textContent = (data.last_page_seconds || 0).toFixed(1) + 's';
+      }
+      if (DOM.telemVram) {
+        DOM.telemVram.textContent = Math.round(data.vram_allocated_mb || 0) + ' MB';
+      }
+      if (DOM.telemTokens) {
+        DOM.telemTokens.textContent = (data.last_page_tokens || 0).toString();
+      }
+
+      // Rich Log Appending
+      if (Array.isArray(data.logs)) {
+        if (data.logs.length !== state.renderedLogCount) {
+          const newEntries = data.logs.slice(state.renderedLogCount);
+          for (const entry of newEntries) {
+            appendLogLine(entry);
+          }
+          state.renderedLogCount = data.logs.length;
+          if (state.autoScrollLogs && DOM.logConsoleBox) {
+            DOM.logConsoleBox.scrollTop = DOM.logConsoleBox.scrollHeight;
+          }
+        }
+      } else if (data.last_log && data.last_log !== DOM.logConsoleBox.dataset.lastLog) {
         DOM.logConsoleBox.dataset.lastLog = data.last_log;
-        const timestamp = new Date().toLocaleTimeString();
-        DOM.logConsoleBox.textContent += `[${timestamp}] ${data.last_log}\n`;
-        DOM.logConsoleBox.scrollTop = DOM.logConsoleBox.scrollHeight;
+        appendLogLine({ time: new Date().toLocaleTimeString(), tag: 'INFO', msg: data.last_log });
+        if (state.autoScrollLogs && DOM.logConsoleBox) {
+          DOM.logConsoleBox.scrollTop = DOM.logConsoleBox.scrollHeight;
+        }
       }
 
       // Update Status Bar with Process-Isolated Telemetry
@@ -446,17 +511,132 @@
   }
 
   // ========================================================================
-  // Settings Modal & Diagnostics
+  // Terminal Log Console & Styling
   // ========================================================================
+  function appendLogLine(entry) {
+    if (!DOM.logConsoleBox) return;
+    const tag = (entry.tag || 'INFO').toUpperCase();
+    let tagClass = 'pipeline';
+    if (tag.includes('YOLO') || tag.includes('OLA')) tagClass = 'yolo';
+    else if (tag.includes('OMR')) tagClass = 'omr';
+    else if (tag.includes('VLM')) tagClass = 'vlm';
+    else if (tag.includes('ASSEMBLY') || tag.includes('ASM')) tagClass = 'assembly';
+    else if (tag.includes('SYS')) tagClass = 'system';
+    else if (tag.includes('WARN')) tagClass = 'warn';
+    else if (tag.includes('ERR')) tagClass = 'error';
+
+    const row = document.createElement('div');
+    row.className = 'log-line';
+
+    const timeSpan = document.createElement('span');
+    timeSpan.className = 'log-time';
+    timeSpan.textContent = `[${entry.time || ''}]`;
+
+    const tagSpan = document.createElement('span');
+    tagSpan.className = `log-tag log-tag-${tagClass}`;
+    tagSpan.textContent = entry.tag || 'INFO';
+
+    const textSpan = document.createElement('span');
+    textSpan.className = 'log-text';
+    textSpan.textContent = entry.msg || '';
+
+    row.appendChild(timeSpan);
+    row.appendChild(tagSpan);
+    row.appendChild(textSpan);
+    DOM.logConsoleBox.appendChild(row);
+  }
+
+  // ========================================================================
+  // Settings Modal & Model Management
+  // ========================================================================
+  let modelPollTimer = null;
+
+  async function checkModelStatus() {
+    try {
+      const res = await api('/api/model/status');
+      if (res.model_info && res.model_info.ready) {
+        DOM.modelStatusBadge.className = 'badge badge-completed';
+        DOM.modelStatusBadge.textContent = 'Готова к работе (на диске)';
+        if (DOM.btnDownloadModel) {
+          DOM.btnDownloadModel.querySelector('span').textContent = 'Файлы проверены (OK)';
+          DOM.btnDownloadModel.disabled = false;
+        }
+        if (DOM.modelDownloadProgressContainer) DOM.modelDownloadProgressContainer.style.display = 'none';
+        if (modelPollTimer) {
+          clearInterval(modelPollTimer);
+          modelPollTimer = null;
+        }
+      } else if (res.status === 'downloading') {
+        DOM.modelStatusBadge.className = 'badge badge-processing';
+        DOM.modelStatusBadge.textContent = 'Скачивание...';
+        if (DOM.modelDownloadProgressContainer) DOM.modelDownloadProgressContainer.style.display = 'flex';
+        if (DOM.modelDlBar) DOM.modelDlBar.style.width = `${res.percent}%`;
+        const mbDone = (res.bytes_downloaded / (1024 * 1024)).toFixed(1);
+        const mbTot = (res.total_bytes / (1024 * 1024)).toFixed(1);
+        if (DOM.modelDlStatusText) {
+          DOM.modelDlStatusText.textContent = `${res.current_file} • ${res.percent}% (${mbDone}/${mbTot} MB)`;
+        }
+        if (DOM.modelDlSpeedText) {
+          DOM.modelDlSpeedText.textContent = `${res.speed_mb_s} MB/s • ETA: ${res.eta_seconds}s`;
+        }
+        if (!modelPollTimer) {
+          modelPollTimer = setInterval(checkModelStatus, 800);
+        }
+      } else {
+        DOM.modelStatusBadge.className = 'badge badge-processing';
+        DOM.modelStatusBadge.textContent = 'Не найдена на диске';
+        if (DOM.btnDownloadModel) {
+          DOM.btnDownloadModel.querySelector('span').textContent = 'Скачать модель с Hugging Face';
+          DOM.btnDownloadModel.disabled = false;
+        }
+        if (DOM.modelDownloadProgressContainer) DOM.modelDownloadProgressContainer.style.display = 'none';
+        if (modelPollTimer) {
+          clearInterval(modelPollTimer);
+          modelPollTimer = null;
+        }
+      }
+    } catch (e) {
+      if (DOM.modelStatusBadge) DOM.modelStatusBadge.textContent = 'Ошибка статуса';
+    }
+  }
+
+  async function downloadModel() {
+    if (!DOM.btnDownloadModel) return;
+    DOM.btnDownloadModel.disabled = true;
+    if (DOM.modelDownloadProgressContainer) DOM.modelDownloadProgressContainer.style.display = 'flex';
+    if (DOM.modelDlStatusText) DOM.modelDlStatusText.textContent = 'Инициализация загрузки...';
+    try {
+      await api('/api/model/download', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          repo: DOM.cfgVlmModelRepo ? DOM.cfgVlmModelRepo.value.trim() : '',
+          model_file: DOM.cfgVlmModelFile ? DOM.cfgVlmModelFile.value.trim() : '',
+          mmproj_file: DOM.cfgVlmMmprojFile ? DOM.cfgVlmMmprojFile.value.trim() : '',
+        })
+      });
+      if (modelPollTimer) clearInterval(modelPollTimer);
+      modelPollTimer = setInterval(checkModelStatus, 800);
+    } catch (e) {
+      if (DOM.modelDlStatusText) DOM.modelDlStatusText.textContent = 'Ошибка старта: ' + e.message;
+      DOM.btnDownloadModel.disabled = false;
+    }
+  }
+
   async function openSettings() {
     try {
       const cfg = await api('/api/config');
+      if (DOM.cfgVlmBackend) DOM.cfgVlmBackend.value = cfg.vlm_backend || 'embedded';
+      if (DOM.cfgVlmModelRepo) DOM.cfgVlmModelRepo.value = cfg.vlm_model_repo || 'lmstudio-community/Qwen3.5-9B-GGUF';
+      if (DOM.cfgVlmModelFile) DOM.cfgVlmModelFile.value = cfg.vlm_model_file || 'Qwen3.5-9B-Q4_K_M.gguf';
+      if (DOM.cfgVlmMmprojFile) DOM.cfgVlmMmprojFile.value = cfg.vlm_mmproj_file || 'mmproj-Qwen3.5-9B-BF16.gguf';
+
       DOM.cfgLmHost.value = cfg.lm_host || '127.0.0.1';
       DOM.cfgLmPort.value = cfg.lm_port || '1234';
-      DOM.cfgLmModel.value = cfg.lm_model || 'qwen/qwen3.5-9b';
+      DOM.cfgLmModel.value = cfg.lm_model || 'qwen3.5-9b';
       DOM.cfgLmTemp.value = cfg.lm_temperature !== undefined ? cfg.lm_temperature : 0.1;
-      DOM.cfgLmTokens.value = cfg.lm_max_tokens || 8192;
-      DOM.cfgQwenContext.value = cfg.qwen_context_length || 16196;
+      DOM.cfgLmTokens.value = cfg.lm_max_tokens || 2048;
+      DOM.cfgQwenContext.value = cfg.qwen_context_length || 4096;
       DOM.cfgQwenBatch.value = cfg.qwen_eval_batch_size || 2048;
       DOM.cfgFlashAtt.checked = cfg.qwen_flash_attention !== false;
       DOM.cfgDpi.value = cfg.dpi || 200;
@@ -467,6 +647,7 @@
 
       DOM.lmstudioTestResult.textContent = '';
       DOM.modalSettings.style.display = 'flex';
+      checkModelStatus();
     } catch (e) {
       alert('Ошибка чтения конфигурации: ' + e.message);
     }
@@ -474,10 +655,18 @@
 
   function closeSettings() {
     DOM.modalSettings.style.display = 'none';
+    if (modelPollTimer) {
+      clearInterval(modelPollTimer);
+      modelPollTimer = null;
+    }
   }
 
   async function saveSettings() {
     const payload = {
+      vlm_backend: DOM.cfgVlmBackend ? DOM.cfgVlmBackend.value : 'embedded',
+      vlm_model_repo: DOM.cfgVlmModelRepo ? DOM.cfgVlmModelRepo.value.trim() : 'lmstudio-community/Qwen3.5-9B-GGUF',
+      vlm_model_file: DOM.cfgVlmModelFile ? DOM.cfgVlmModelFile.value.trim() : 'Qwen3.5-9B-Q4_K_M.gguf',
+      vlm_mmproj_file: DOM.cfgVlmMmprojFile ? DOM.cfgVlmMmprojFile.value.trim() : 'mmproj-Qwen3.5-9B-BF16.gguf',
       lm_host: DOM.cfgLmHost.value.trim(),
       lm_port: DOM.cfgLmPort.value.trim(),
       lm_model: DOM.cfgLmModel.value.trim(),
@@ -506,14 +695,14 @@
   }
 
   async function testLMStudio() {
-    DOM.lmstudioTestResult.textContent = 'Проверка связи с LM Studio...';
+    DOM.lmstudioTestResult.textContent = 'Проверка связи с VLM...';
     DOM.lmstudioTestResult.style.color = 'var(--text-secondary)';
 
     try {
       const res = await api('/api/lmstudio/test');
       if (res.online) {
         DOM.lmstudioTestResult.style.color = 'var(--accent-emerald)';
-        DOM.lmstudioTestResult.textContent = `Успешно! ${res.message}`;
+        DOM.lmstudioTestResult.textContent = `Успешно! ${res.message} [Режим: ${res.backend}]`;
       } else {
         DOM.lmstudioTestResult.style.color = 'var(--accent-rose)';
         DOM.lmstudioTestResult.textContent = res.message;
@@ -1104,12 +1293,30 @@
       await refreshQueue();
     });
 
-    // Settings Modal
+    // Settings Modal & Model Downloader
     DOM.btnOpenSettings.addEventListener('click', openSettings);
     DOM.btnCloseSettings.addEventListener('click', closeSettings);
     DOM.btnCancelSettings.addEventListener('click', closeSettings);
     DOM.btnSaveSettings.addEventListener('click', saveSettings);
     DOM.btnTestLmstudio.addEventListener('click', testLMStudio);
+    if (DOM.btnDownloadModel) {
+      DOM.btnDownloadModel.addEventListener('click', downloadModel);
+    }
+
+    // Neural Console Action Buttons
+    if (DOM.btnClearLogs) {
+      DOM.btnClearLogs.addEventListener('click', () => {
+        if (DOM.logConsoleBox) DOM.logConsoleBox.innerHTML = '';
+        state.renderedLogCount = 0;
+      });
+    }
+    if (DOM.btnToggleAutoscroll) {
+      DOM.btnToggleAutoscroll.addEventListener('click', () => {
+        state.autoScrollLogs = !state.autoScrollLogs;
+        DOM.btnToggleAutoscroll.classList.toggle('active', state.autoScrollLogs);
+        DOM.btnToggleAutoscroll.querySelector('span').textContent = state.autoScrollLogs ? 'Автоскролл: Вкл' : 'Автоскролл: Выкл';
+      });
+    }
 
     // Workbench Navigation
     DOM.btnPrevPage.addEventListener('click', () => {

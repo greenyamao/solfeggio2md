@@ -47,27 +47,37 @@ class LMStudioClient:
 
     def check_connection(self) -> Tuple[bool, str]:
         """
-        Checks if LM Studio server is reachable.
+        Checks if LM Studio or standalone llama-server is reachable.
         Returns: (is_online, message)
         """
         try:
             res = self._get("/api/v1/models", timeout=5)
             models = res.get("models", [])
             return True, f"Сервер доступен (моделей в списке: {len(models)})"
-        except urllib.error.URLError as e:
-            return False, f"Ошибка подключения к {self.base_url}: {e.reason}"
-        except Exception as e:
-            return False, f"Не удалось связаться с сервером: {str(e)}"
+        except Exception:
+            try:
+                res = self._get("/v1/models", timeout=5)
+                models = res.get("data", [])
+                return True, f"VLM сервер доступен (моделей в списке: {len(models)})"
+            except urllib.error.URLError as e:
+                return False, f"Ошибка подключения к {self.base_url}: {e.reason}"
+            except Exception as e:
+                return False, f"Не удалось связаться с сервером: {str(e)}"
 
     def list_models(self) -> List[Dict[str, Any]]:
         """
-        Returns list of all available models in LM Studio.
+        Returns list of all available models in LM Studio or llama-server.
         """
         try:
             res = self._get("/api/v1/models", timeout=10)
             return res.get("models", [])
         except Exception:
-            return []
+            try:
+                res = self._get("/v1/models", timeout=10)
+                data = res.get("data", [])
+                return [{"key": d.get("id"), "display_name": d.get("id")} for d in data]
+            except Exception:
+                return []
 
     def get_loaded_instance_info(self, model_name: Optional[str] = None) -> Optional[Tuple[str, Dict[str, Any]]]:
         """
@@ -203,30 +213,83 @@ class LMStudioClient:
 
         b64 = base64.b64encode(processed_bytes).decode("utf-8")
         target_model = self.active_instance_id or self.get_loaded_instance(model_name) or model_name or "default"
-        payload = {
-            "model": target_model,
-            "system_prompt": system_prompt,
-            "input": [
-                {"type": "text", "content": "Распознай печатный текст на этой странице."},
-                {"type": "image", "data_url": f"data:image/jpeg;base64,{b64}"},
-            ],
-            "reasoning": "off",
-            "temperature": float(temperature),
-            "max_output_tokens": int(max_tokens),
-            "stream": False,
-            "store": False,
-        }
+        t_start = time.time()
+        raw_text = ""
+        stats: Dict[str, Any] = {}
+        result: Dict[str, Any] = {}
 
-        result = self._post("/api/v1/chat", payload)
-        output = [item.get("content", "") for item in result.get("output", []) if item.get("type") == "message"]
-        raw_text = "\n".join(output).strip()
+        # 1. Try LM Studio API (/api/v1/chat)
+        try:
+            payload = {
+                "model": target_model,
+                "system_prompt": system_prompt,
+                "input": [
+                    {"type": "text", "content": "Распознай печатный текст на этой странице."},
+                    {"type": "image", "data_url": f"data:image/jpeg;base64,{b64}"},
+                ],
+                "reasoning": "off",
+                "temperature": float(temperature),
+                "max_output_tokens": int(max_tokens),
+                "stream": False,
+                "store": False,
+            }
+            result = self._post("/api/v1/chat", payload)
+            output = [item.get("content", "") for item in result.get("output", []) if item.get("type") == "message"]
+            raw_text = "\n".join(output).strip()
+            stats = result.get("stats", {})
+        except Exception:
+            # 2. Fallback to standard OpenAI /v1/chat/completions (standalone llama-server)
+            openai_payload = {
+                "model": target_model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Распознай печатный текст на этой странице."},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                        ],
+                    },
+                ],
+                "temperature": float(temperature),
+                "max_tokens": int(max_tokens),
+                "stream": False,
+            }
+            result = self._post("/v1/chat/completions", openai_payload)
+            choices = result.get("choices", [])
+            if choices:
+                raw_text = choices[0].get("message", {}).get("content", "").strip()
+            usage = result.get("usage", {})
+            timings = result.get("timings", {})
+            stats = {
+                "tokens_per_second": timings.get("predicted_per_second", 0.0),
+                "num_output_tokens": usage.get("completion_tokens", 0),
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+            }
+
+        t_end = time.time()
+        duration = max(0.01, t_end - t_start)
         cleaned_text = self._strip_markdown_fences(raw_text)
+
+        tok_per_sec = float(stats.get("tokens_per_second") or 0.0)
+        num_tokens = int(stats.get("num_output_tokens") or 0)
+        if num_tokens <= 0 and cleaned_text:
+            num_tokens = int(len(cleaned_text) / 3.5)
+        if tok_per_sec <= 0.0 and duration > 0 and num_tokens > 0:
+            tok_per_sec = round(num_tokens / duration, 1)
+
+        stats["tokens_per_second"] = round(tok_per_sec, 1)
+        stats["duration_seconds"] = round(duration, 2)
+        stats["num_output_tokens"] = num_tokens
 
         return {
             "text": cleaned_text,
-            "stats": result.get("stats", {}),
+            "stats": stats,
             "model_instance_id": result.get("model_instance_id", target_model),
             "response_id": result.get("response_id", ""),
+            "duration": round(duration, 2),
+            "tokens_per_second": round(tok_per_sec, 1),
+            "tokens_count": num_tokens,
         }
 
     def request_ocr(

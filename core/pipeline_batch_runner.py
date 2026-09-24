@@ -4,6 +4,7 @@ Sequential Batch Passes: Slicing -> OMR -> VRAM Purge Barrier -> VLM (LM Studio)
 Resumable via atomic checkpoints (checkpoint.json) across 20+ books.
 """
 
+import collections
 import gc
 import json
 import os
@@ -33,6 +34,8 @@ from core.book_section_filter import BookSectionFilter
 from core.windows_perf import enable_windows_high_performance
 from core.process_telemetry import get_process_telemetry
 from core.abc_bridge import ABCBridge
+from core.model_manager import ModelManager
+from core.embedded_llama_runner import EmbeddedLlamaRunner
 
 
 DEFAULT_CONFIG_FILE = ROOT_DIR / "config.json"
@@ -40,7 +43,12 @@ QUEUE_STATE_FILE = ROOT_DIR / "queue_state.json"
 DEFAULT_CONFIG = {
     "lm_host": "127.0.0.1",
     "lm_port": "1234",
-    "lm_model": "qwen/qwen3.5-9b",
+    "lm_model": "qwen3.5-9b",
+    "vlm_backend": "embedded",
+    "vlm_model_repo": "lmstudio-community/Qwen3.5-9B-GGUF",
+    "vlm_model_file": "Qwen3.5-9B-Q4_K_M.gguf",
+    "vlm_mmproj_file": "mmproj-Qwen3.5-9B-BF16.gguf",
+    "vlm_embedded_port": 1234,
     "lm_temperature": 0.1,
     "lm_max_tokens": 2048,
     "output_dir": str(ROOT_DIR / "output"),
@@ -107,6 +115,7 @@ class PipelineBatchRunner:
         self._start_time: float = 0.0
 
         # Real-time HUD Metrics
+        self._log_history: collections.deque = collections.deque(maxlen=300)
         self.metrics: Dict[str, Any] = {
             "is_running": False,
             "is_paused": False,
@@ -121,6 +130,11 @@ class PipelineBatchRunner:
             "estimated_remaining_seconds": 0.0,
             "vram_allocated_mb": 0.0,
             "last_log": "Инициализация выполнена",
+            "logs": [],
+            "vlm_tok_per_sec": 0.0,
+            "last_page_seconds": 0.0,
+            "last_page_tokens": 0,
+            "current_page_image_url": "",
             "phase_progress": {
                 "phase1": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Ожидание"},
                 "phase2": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Ожидание"},
@@ -132,14 +146,35 @@ class PipelineBatchRunner:
         # Lazy engines
         self.layout_detector: Optional[LayoutDetector] = None
         self.omr_engine = None
+        self.model_manager = ModelManager()
+        self.embedded_runner = EmbeddedLlamaRunner(
+            port=int(self.config.get("vlm_embedded_port", 1234)),
+            log_callback=lambda tag, msg: self.log_event(tag, msg),
+        )
         self.lm_client = LMStudioClient(
             host=self.config.get("lm_host", "127.0.0.1"),
             port=self.config.get("lm_port", "1234"),
         )
         self.bridge = ABCBridge()
 
+        # Log initial event
+        self.log_event("SYSTEM", "Система инициализирована. Готова к обработке очереди.")
+
         # Initial queue population and directory sync
         self._load_existing_queue()
+
+    def log_event(self, tag: str, msg: str, level: str = "INFO") -> None:
+        """Appends a structured event to the real-time circular log buffer."""
+        now_str = datetime.now().strftime("%H:%M:%S")
+        entry = {
+            "time": now_str,
+            "tag": tag,
+            "msg": msg,
+            "level": level,
+        }
+        with self._lock:
+            self._log_history.append(entry)
+            self.metrics["last_log"] = f"[{tag}] {msg}"
 
     def load_config(self) -> Dict[str, Any]:
         cfg = dict(DEFAULT_CONFIG)
@@ -317,6 +352,7 @@ class PipelineBatchRunner:
         with self._lock:
             m = dict(self.metrics)
             m["total_books"] = len(self.queue)
+            m["logs"] = list(self._log_history)
             if self.is_running and self._start_time > 0:
                 m["elapsed_seconds"] = round(time.time() - self._start_time, 1)
 
@@ -395,6 +431,11 @@ class PipelineBatchRunner:
     def stop(self) -> None:
         self._stop_event.set()
         self._pause_event.set()  # Unblock if paused
+        if hasattr(self, "embedded_runner"):
+            try:
+                self.embedded_runner.stop()
+            except Exception:
+                pass
         if hasattr(self, "lm_client") and getattr(self.lm_client, "was_loaded_by_client", False):
             try:
                 self.lm_client.unload_model()
@@ -473,6 +514,11 @@ class PipelineBatchRunner:
                 self.metrics["last_log"] = f"Исключение: {str(e)}"
         finally:
             self._purge_vram()
+            if hasattr(self, "embedded_runner"):
+                try:
+                    self.embedded_runner.stop()
+                except Exception:
+                    pass
             if hasattr(self, "lm_client") and getattr(self.lm_client, "was_loaded_by_client", False):
                 try:
                     self.lm_client.unload_model()
@@ -926,6 +972,14 @@ class PipelineBatchRunner:
                             cv2.imwrite(str(debug_file), debug_img)
                             cv2.imwrite(str(mask_file), masked_img)
 
+                            try:
+                                rel_dbg = debug_file.relative_to(self.output_root).as_posix()
+                                with self._lock:
+                                    self.metrics["current_page_image_url"] = f"/output/{rel_dbg}"
+                            except Exception:
+                                pass
+                            self.log_event("YOLO", f"Стр. {bp} ({side}): найдено {len(crops_data)} станов")
+
                             new_crops_to_enqueue = []
                             for crop in crops_data:
                                 crop_name = f"{crop['stub_id']}.png"
@@ -1048,6 +1102,14 @@ class PipelineBatchRunner:
                                 tc = max(1, stats["crops_cut"])
                             chk["phases"]["omr"]["crops_done"] = cd
                             self._write_checkpoint(pdf_path.stem, chk)
+
+                            try:
+                                rel_crop = batch[-1].relative_to(self.output_root).as_posix()
+                                with self._lock:
+                                    self.metrics["current_page_image_url"] = f"/output/{rel_crop}"
+                            except Exception:
+                                pass
+                            self.log_event("OMR", f"Распознана пачка ({saved} станов, всего: {cd}/{tc})")
 
                             pct_p2 = round((cd / tc) * 100.0, 1)
                             omr_detail = f"Стан {cd}/{tc} (пачка {len(batch)})"
@@ -1363,28 +1425,58 @@ class PipelineBatchRunner:
             self._update_hud("Фаза 3/4: VLM OCR пропущен (skip_vlm=True)", 90.0, "Текстовый VLM отключен в настройках")
             return True
 
-        # Check LM Studio availability
+        # Check VLM backend choice
+        vlm_backend = self.config.get("vlm_backend", "embedded")
+        if vlm_backend == "embedded":
+            if not self.embedded_runner.is_server_ready():
+                self.log_event("VLM", "Проверка локальных весов модели Qwen...")
+                m_info = self.model_manager.resolve_model_files(
+                    repo=self.config.get("vlm_model_repo", "lmstudio-community/Qwen3.5-9B-GGUF"),
+                    model_file=self.config.get("vlm_model_file", "Qwen3.5-9B-Q4_K_M.gguf"),
+                    mmproj_file=self.config.get("vlm_mmproj_file", "mmproj-Qwen3.5-9B-BF16.gguf"),
+                )
+                if m_info["ready"]:
+                    self.log_event("VLM", "Запуск автономного VLM сервера llama-server...")
+                    port_cfg = int(self.config.get("vlm_embedded_port", 1234))
+                    started = self.embedded_runner.start(
+                        model_path=m_info["model_path"],
+                        mmproj_path=m_info["mmproj_path"],
+                        context_length=int(self.config.get("qwen_context_length", 4096)),
+                        parallel=int(self.config.get("qwen_parallel", 1)),
+                        flash_attention=bool(self.config.get("qwen_flash_attention", True)),
+                        port=port_cfg,
+                    )
+                    if started:
+                        self.lm_client.port = str(self.embedded_runner.port)
+                        self.lm_client.base_url = f"http://{self.lm_client.host}:{self.lm_client.port}"
+                    else:
+                        self.log_event("WARN", "Не удалось запустить автономный llama-server, проверка порта 1234...")
+                else:
+                    self.log_event("WARN", "Веса VLM не найдены на диске. Требуется загрузка или запуск LM Studio.")
+
+        # Check LM Studio / llama-server availability
         is_online, msg = self.lm_client.check_connection()
         if not is_online:
             with self._lock:
-                self.metrics["last_log"] = f"LM Studio недоступен: {msg}"
+                self.metrics["last_log"] = f"VLM сервер недоступен: {msg}"
+            self.log_event("WARN", f"VLM сервер недоступен: {msg}. Запуск fallback...")
             ok = self._vlm_fallback_mode(mask_files, raw_md_dir, chk)
             self._update_phase_progress("phase3", 100.0, total_masks, total_masks, "completed", "Сформировано (fallback)")
             return ok
 
-        # Attempt to load model
-        try:
-            self.lm_client.load_model(
-                model_name=self.config.get("lm_model", "qwen3.5-9b"),
-                context_length=int(self.config.get("qwen_context_length", 4096)),
-                eval_batch_size=int(self.config.get("qwen_eval_batch_size", 2048)),
-                flash_attention=bool(self.config.get("qwen_flash_attention", True)),
-                offload_kv_cache=bool(self.config.get("qwen_offload_kv_cache_to_gpu", True)),
-                parallel=int(self.config.get("qwen_parallel", 1)),
-            )
-        except Exception as e:
-            with self._lock:
-                self.metrics["last_log"] = f"Предупреждение при загрузке модели: {e}"
+        # If backend is LM Studio, attempt explicit model loading
+        if vlm_backend == "lm_studio":
+            try:
+                self.lm_client.load_model(
+                    model_name=self.config.get("lm_model", "qwen3.5-9b"),
+                    context_length=int(self.config.get("qwen_context_length", 4096)),
+                    eval_batch_size=int(self.config.get("qwen_eval_batch_size", 2048)),
+                    flash_attention=bool(self.config.get("qwen_flash_attention", True)),
+                    offload_kv_cache=bool(self.config.get("qwen_offload_kv_cache_to_gpu", True)),
+                    parallel=int(self.config.get("qwen_parallel", 1)),
+                )
+            except Exception as e:
+                self.log_event("WARN", f"Предупреждение при загрузке модели: {e}")
 
         system_prompt = self.config.get("system_prompt", DEFAULT_CONFIG["system_prompt"])
         vlm_done_count = len(existing_valid_mds)
@@ -1401,9 +1493,17 @@ class PipelineBatchRunner:
             if not overwrite and p_num in existing_valid_mds:
                 continue
 
+            # Update live preview image for current page
+            try:
+                rel_mask = mask_file.relative_to(self.output_root).as_posix()
+                with self._lock:
+                    self.metrics["current_page_image_url"] = f"/output/{rel_mask}"
+            except Exception:
+                pass
+
             try:
                 img_bytes = mask_file.read_bytes()
-                extracted_text = self.lm_client.request_ocr(
+                detailed = self.lm_client.request_ocr_detailed(
                     image_bytes=img_bytes,
                     system_prompt=system_prompt,
                     model_name=self.config.get("lm_model", "qwen3.5-9b"),
@@ -1412,8 +1512,20 @@ class PipelineBatchRunner:
                     context_length=int(self.config.get("qwen_context_length", 4096)),
                     max_dim=int(self.config.get("vlm_max_dim", 1600)),
                 )
+                extracted_text = detailed["text"]
+                tok_per_sec = detailed.get("tokens_per_second", 0.0)
+                duration = detailed.get("duration", 0.0)
+                tok_count = detailed.get("tokens_count", 0)
+
+                with self._lock:
+                    self.metrics["vlm_tok_per_sec"] = tok_per_sec
+                    self.metrics["last_page_seconds"] = duration
+                    self.metrics["last_page_tokens"] = tok_count
+
+                self.log_event("VLM", f"Стр. {p_num}: {tok_count} токенов ({tok_per_sec:.1f} tok/s, {duration:.1f}s)")
                 raw_md_file.write_text(self._sanitize_vlm_text(extracted_text), encoding="utf-8")
             except Exception as e:
+                self.log_event("ERROR", f"Стр. {p_num}: ошибка VLM ({str(e)})", level="ERROR")
                 fallback_txt = f"<!-- LM_STUDIO_ERROR: {str(e)} -->\n\n## Страница {int(p_num)}\n\n[Текст не распознан: ошибка связи с VLM]\n"
                 raw_md_file.write_text(fallback_txt, encoding="utf-8")
 
@@ -1561,6 +1673,7 @@ class PipelineBatchRunner:
         complete_book_file.write_text(full_content, encoding="utf-8")
         chk["phases"]["assembly"]["completed"] = True
         self._update_phase_progress("phase4", 100.0, total_raw, total_raw, "completed", f"Издание {book_dir.name} собрано")
+        self.log_event("ASSEMBLY", f"Издание {book_dir.name} успешно собрано ({total_raw} стр.)")
         return True
 
     @staticmethod

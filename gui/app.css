@@ -616,7 +616,7 @@ html, body {
 
 /* Right Pane: Live View & Logs */
 .live-card {
-  flex: 6;
+  flex: 5.8;
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
@@ -625,24 +625,77 @@ html, body {
   overflow: hidden;
 }
 
+.panel-header-left, .panel-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.svg-icon-small {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
 .live-image-canvas {
   flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 12px;
-  background: #0d121c;
+  padding: 10px;
+  background: #080b11;
   position: relative;
   overflow: hidden;
 }
 
 .live-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: 12px;
+}
+
+/* Real-time Telemetry Ribbon */
+.live-telemetry-strip {
+  height: 36px;
+  background: #0d121c;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  padding: 0 12px;
+  flex-shrink: 0;
+}
+
+.telem-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.telem-label {
+  font-size: 9.5px;
+  font-weight: 700;
+  color: var(--text-muted);
+  letter-spacing: 0.5px;
+}
+
+.telem-val {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 700;
+  color: #f1f5f9;
+}
+
+.telem-speed {
+  color: #38bdf8;
+  text-shadow: 0 0 6px rgba(56, 189, 248, 0.35);
 }
 
 .log-card {
-  flex: 4;
+  flex: 4.2;
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
@@ -658,23 +711,167 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 14px;
+  padding: 0 12px;
   font-size: 11px;
   font-weight: 700;
   color: var(--text-muted);
   letter-spacing: 0.5px;
+  flex-shrink: 0;
+}
+
+.log-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.log-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btn-micro {
+  height: 22px;
+  padding: 0 8px;
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-micro:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.btn-micro.active {
+  background: rgba(79, 70, 229, 0.25);
+  border-color: var(--accent-indigo);
+  color: #818cf8;
 }
 
 .log-console-box {
   flex: 1;
-  background: #080b11;
-  padding: 10px 14px;
+  background: #06090e;
+  padding: 8px 12px;
   font-family: var(--font-mono);
   font-size: 11px;
-  line-height: 1.6;
-  color: #38bdf8;
+  line-height: 1.5;
   overflow-y: auto;
-  white-space: pre-wrap;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.log-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  word-break: break-word;
+}
+
+.log-time {
+  color: #475569;
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.log-tag {
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.log-tag-yolo {
+  background: rgba(245, 158, 11, 0.18);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.log-tag-omr {
+  background: rgba(16, 185, 129, 0.18);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.log-tag-vlm {
+  background: rgba(168, 85, 247, 0.18);
+  color: #c084fc;
+  border: 1px solid rgba(168, 85, 247, 0.3);
+}
+
+.log-tag-assembly {
+  background: rgba(59, 130, 246, 0.18);
+  color: #60a5fa;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+.log-tag-pipeline, .log-tag-system {
+  background: rgba(100, 116, 139, 0.18);
+  color: #94a3b8;
+  border: 1px solid rgba(100, 116, 139, 0.3);
+}
+
+.log-tag-warn {
+  background: rgba(245, 158, 11, 0.25);
+  color: #f59e0b;
+}
+
+.log-tag-error {
+  background: rgba(239, 68, 68, 0.25);
+  color: #f87171;
+}
+
+.log-text {
+  color: #cbd5e1;
+}
+
+/* Model Manager Card in Settings */
+.model-manager-card {
+  background: #0a0e17;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin-top: 10px;
+}
+
+.model-manager-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.model-manager-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.model-manager-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.model-dl-box {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.model-dl-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-muted);
 }
 
 /* ==========================================================================

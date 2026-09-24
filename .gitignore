@@ -25,3 +25,7 @@ queue_state.json
 
 # Scratch and diagnostic logs
 /scratch/
+
+# Standalone models & binaries
+/models/
+/bin/
