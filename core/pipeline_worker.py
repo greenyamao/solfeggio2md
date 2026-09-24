@@ -396,7 +396,7 @@ class PipelineWorker:
 
                 if blocks:
                     return "\n\n" + "\n\n".join(blocks) + "\n\n"
-                return f"\n\n<!-- MUSIC_STUB_ID:{cid} (Ожидает OMR) -->\n\n"
+                return f"\n\n<!-- MUSIC_STUB_ID:{cid} (Ноты не найдены, ожидают OMR) -->\n\n"
 
             assembled = re.sub(r"<!--\s*MUSIC_STUB_ID:\s*(.*?)\s*-->", inject_music_blocks, markdown_text)
 

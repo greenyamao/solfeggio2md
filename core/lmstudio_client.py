@@ -69,10 +69,9 @@ class LMStudioClient:
         except Exception:
             return []
 
-    def get_loaded_instance(self, model_name: Optional[str] = None) -> Optional[str]:
+    def get_loaded_instance_info(self, model_name: Optional[str] = None) -> Optional[Tuple[str, Dict[str, Any]]]:
         """
-        Returns the instance_id if model_name (or any active model) is already loaded.
-        Prevents spawning duplicate model instances in LM Studio VRAM.
+        Returns (instance_id, instance_config) if model_name (or any active model) is loaded.
         """
         try:
             models = self.list_models()
@@ -86,39 +85,59 @@ class LMStudioClient:
                     if instances:
                         inst_ids = [str(inst.get("id", "")).strip().lower() for inst in instances]
                         if target == key or target == display or any(target == iid for iid in inst_ids):
-                            return instances[0].get("id") or m.get("key")
+                            return instances[0].get("id") or m.get("key"), instances[0].get("config", {})
                         if target in key or key in target:
-                            return instances[0].get("id") or m.get("key")
+                            return instances[0].get("id") or m.get("key"), instances[0].get("config", {})
 
             for m in models:
                 instances = m.get("loaded_instances", [])
                 if instances:
-                    return instances[0].get("id") or m.get("key")
+                    return instances[0].get("id") or m.get("key"), instances[0].get("config", {})
         except Exception:
             pass
         return None
 
+    def get_loaded_instance(self, model_name: Optional[str] = None) -> Optional[str]:
+        """
+        Returns the instance_id if model_name (or any active model) is already loaded.
+        Prevents spawning duplicate model instances in LM Studio VRAM.
+        """
+        info = self.get_loaded_instance_info(model_name)
+        return info[0] if info else None
+
     def load_model(
         self,
         model_name: str,
-        context_length: int = 16196,
+        context_length: int = 4096,
         eval_batch_size: int = 2048,
         flash_attention: bool = True,
         offload_kv_cache: bool = True,
+        parallel: int = 1,
     ) -> Dict[str, Any]:
         """
         Loads specified model into VRAM via native LM Studio API.
-        Idempotent: if model is already loaded, reuses existing instance without spawning duplicates.
+        Ensures optimal single-slot (parallel=1) and compact context (4096) configuration
+        to guarantee 100% GPU offload and eliminate RAM spillover.
         """
-        existing_inst = self.get_loaded_instance(model_name)
-        if existing_inst:
-            self.active_instance_id = existing_inst
-            return {"instance_id": existing_inst, "status": "already_loaded"}
+        existing_info = self.get_loaded_instance_info(model_name)
+        if existing_info:
+            inst_id, inst_cfg = existing_info
+            current_parallel = int(inst_cfg.get("parallel", 1))
+            current_ctx = int(inst_cfg.get("context_length", 4096))
+
+            # If the loaded model has suboptimal configuration (parallel > 1 or ctx > 6144),
+            # automatically unload it to free bloated KV cache from VRAM.
+            if current_parallel > int(parallel) or current_ctx > max(int(context_length), 6144):
+                self.unload_model(inst_id)
+            else:
+                self.active_instance_id = inst_id
+                return {"instance_id": inst_id, "status": "already_loaded"}
 
         payload = {
             "model": model_name,
             "context_length": int(context_length),
             "eval_batch_size": int(eval_batch_size),
+            "parallel": int(parallel),
             "flash_attention": bool(flash_attention),
             "offload_kv_cache_to_gpu": bool(offload_kv_cache),
             "echo_load_config": True,
@@ -152,7 +171,7 @@ class LMStudioClient:
         model_name: str = "default",
         temperature: float = 0.1,
         max_tokens: int = 8192,
-        context_length: int = 16196,
+        context_length: int = 4096,
     ) -> str:
         """
         Sends a masked book page image to the VLM with strict parameters.

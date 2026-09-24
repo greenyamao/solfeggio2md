@@ -24,6 +24,11 @@ class ABCBridge:
             pass
         self._tk = verovio.toolkit()
 
+        # Suppress third-party MIDI channel and syntax warning spam from music21
+        import logging
+        for logger_name in ("music21", "music21.humdrum", "music21.musicxml"):
+            logging.getLogger(logger_name).setLevel(logging.ERROR)
+
     @staticmethod
     def check_spines_valid(norm_text: str) -> bool:
         """
@@ -75,6 +80,16 @@ class ABCBridge:
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         if not lines:
             raise ValueError("Notation contains no valid lines")
+
+        # Normalize mispredicted guitar/lute tablature clefs into standard bass clef
+        cleaned_lines = []
+        for line in lines:
+            if "*clefTAB" in line:
+                line = re.sub(r"\*clefTAB\d*", "*clefF4", line)
+            if "*stria" in line:
+                continue
+            cleaned_lines.append(line)
+        lines = cleaned_lines
 
         # Strip trailing dangling spine manipulation lines before end that lack following notes/events
         while lines and all(t.startswith("*") and not t.startswith("*-") for t in lines[-1].split("\t")):

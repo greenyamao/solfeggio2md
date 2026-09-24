@@ -46,7 +46,8 @@ DEFAULT_CONFIG = {
     "dpi": 200,
     "delay": 0.2,
     "smt_max_tokens": 512,
-    "qwen_context_length": 16196,
+    "qwen_context_length": 4096,
+    "qwen_parallel": 1,
     "qwen_eval_batch_size": 2048,
     "qwen_flash_attention": True,
     "qwen_offload_kv_cache_to_gpu": True,
@@ -1372,10 +1373,11 @@ class PipelineBatchRunner:
         try:
             self.lm_client.load_model(
                 model_name=self.config.get("lm_model", "qwen3.5-9b"),
-                context_length=int(self.config.get("qwen_context_length", 16196)),
+                context_length=int(self.config.get("qwen_context_length", 4096)),
                 eval_batch_size=int(self.config.get("qwen_eval_batch_size", 2048)),
                 flash_attention=bool(self.config.get("qwen_flash_attention", True)),
                 offload_kv_cache=bool(self.config.get("qwen_offload_kv_cache_to_gpu", True)),
+                parallel=int(self.config.get("qwen_parallel", 1)),
             )
         except Exception as e:
             with self._lock:
@@ -1498,7 +1500,7 @@ class PipelineBatchRunner:
 
             if blocks:
                 return "\n\n" + "\n\n".join(blocks) + "\n\n"
-            return f"\n\n<!-- MUSIC_STUB_ID:{cid} (Ожидает OMR) -->\n\n"
+            return f"\n\n<!-- MUSIC_STUB_ID:{cid} (Ноты не найдены, ожидают OMR) -->\n\n"
 
         for r_idx, r_file in enumerate(raw_files, start=1):
             p_num_str = re.search(r"page_(\d+)_raw", r_file.stem)

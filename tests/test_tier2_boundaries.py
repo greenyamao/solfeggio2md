@@ -488,8 +488,10 @@ class TestTier2Boundaries(unittest.TestCase):
 
     def test_f9_bnd_03_assembly_missing_abc_file(self):
         """F9 Boundary: Missing .abc file inserts warning marker without crashing."""
+        cfg = dict(DEFAULT_CONFIG)
+        cfg["output_dir"] = str(self.output_dir)
         cfg_file = self.test_root / "config.json"
-        cfg_file.write_text(json.dumps(DEFAULT_CONFIG), encoding="utf-8")
+        cfg_file.write_text(json.dumps(cfg), encoding="utf-8")
         runner = PipelineBatchRunner(config_path=cfg_file)
 
         book_dir = runner._get_book_dir("missing_abc_book")
@@ -511,8 +513,10 @@ class TestTier2Boundaries(unittest.TestCase):
 
     def test_f9_bnd_04_assembly_multiline_abc_content(self):
         """F9 Boundary: Multiline ABC content properly wrapped in markdown code fence."""
+        cfg = dict(DEFAULT_CONFIG)
+        cfg["output_dir"] = str(self.output_dir)
         cfg_file = self.test_root / "config.json"
-        cfg_file.write_text(json.dumps(DEFAULT_CONFIG), encoding="utf-8")
+        cfg_file.write_text(json.dumps(cfg), encoding="utf-8")
         runner = PipelineBatchRunner(config_path=cfg_file)
 
         book_dir = runner._get_book_dir("multiline_abc_book")
