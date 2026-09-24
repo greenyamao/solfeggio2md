@@ -32,6 +32,7 @@ from core.layout_detector import LayoutDetector
 from core.book_section_filter import BookSectionFilter
 from core.windows_perf import enable_windows_high_performance
 from core.process_telemetry import get_process_telemetry
+from core.abc_bridge import ABCBridge
 
 
 DEFAULT_CONFIG_FILE = ROOT_DIR / "config.json"
@@ -41,12 +42,13 @@ DEFAULT_CONFIG = {
     "lm_port": "1234",
     "lm_model": "qwen/qwen3.5-9b",
     "lm_temperature": 0.1,
-    "lm_max_tokens": 8192,
+    "lm_max_tokens": 2048,
     "output_dir": str(ROOT_DIR / "output"),
     "dpi": 200,
     "delay": 0.2,
     "smt_max_tokens": 512,
     "qwen_context_length": 4096,
+    "vlm_max_dim": 1600,
     "qwen_parallel": 1,
     "qwen_eval_batch_size": 2048,
     "qwen_flash_attention": True,
@@ -134,6 +136,7 @@ class PipelineBatchRunner:
             host=self.config.get("lm_host", "127.0.0.1"),
             port=self.config.get("lm_port", "1234"),
         )
+        self.bridge = ABCBridge()
 
         # Initial queue population and directory sync
         self._load_existing_queue()
@@ -1405,8 +1408,9 @@ class PipelineBatchRunner:
                     system_prompt=system_prompt,
                     model_name=self.config.get("lm_model", "qwen3.5-9b"),
                     temperature=float(self.config.get("lm_temperature", 0.1)),
-                    max_tokens=int(self.config.get("lm_max_tokens", 8192)),
-                    context_length=int(self.config.get("qwen_context_length", 16196)),
+                    max_tokens=int(self.config.get("lm_max_tokens", 2048)),
+                    context_length=int(self.config.get("qwen_context_length", 4096)),
+                    max_dim=int(self.config.get("vlm_max_dim", 1600)),
                 )
                 raw_md_file.write_text(self._sanitize_vlm_text(extracted_text), encoding="utf-8")
             except Exception as e:
