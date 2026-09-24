@@ -249,10 +249,11 @@ class SettingsView(QWidget):
     def _check_status(self) -> None:
         # Check model file status
         st = self.model_manager.get_status(
-            repo_id=self.edit_repo.text().strip(),
-            model_filename=self.edit_model.text().strip(),
-            mmproj_filename=self.edit_mmproj.text().strip(),
+            repo=self.edit_repo.text().strip(),
+            model_file=self.edit_model.text().strip(),
+            mmproj_file=self.edit_mmproj.text().strip(),
         )
+
 
         dl_state = self.model_manager.get_download_state()
         status_str = dl_state.get("status", "idle")

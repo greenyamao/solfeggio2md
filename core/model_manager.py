@@ -188,19 +188,32 @@ class ModelManager:
         repo: str = "lmstudio-community/Qwen3.5-9B-GGUF",
         model_file: str = "Qwen3.5-9B-Q4_K_M.gguf",
         mmproj_file: str = "mmproj-Qwen3.5-9B-BF16.gguf",
+        **kwargs: Any,
     ) -> Dict[str, Any]:
         """Returns unified model availability status and download telemetry."""
+        if "repo_id" in kwargs:
+            repo = kwargs["repo_id"]
+        if "model_filename" in kwargs:
+            model_file = kwargs["model_filename"]
+        if "mmproj_filename" in kwargs:
+            mmproj_file = kwargs["mmproj_filename"]
+
         with self._lock:
             st = dict(self.download_state)
 
         files = self.resolve_model_files(repo, model_file, mmproj_file)
         st["model_info"] = files
+        st["ready"] = bool(files.get("ready", False))
+        st["model_path"] = files.get("model_path")
+        st["mmproj_path"] = files.get("mmproj_path")
+        st["missing"] = files.get("missing", [])
         if files["ready"] and st["status"] != "downloading":
             st["status"] = "ready"
         elif not files["ready"] and st["status"] not in ("downloading", "error"):
             st["status"] = "missing"
 
         return st
+
 
     def get_download_state(self) -> Dict[str, Any]:
         """Returns a snapshot of the current background download state."""
