@@ -379,6 +379,21 @@ class PipelineView(QWidget):
             """)
             return
 
+        if stage == "phase3_disconnected":
+            self.badge_text_status.setText("SERVER DISCONNECTED")
+            self.badge_text_status.setStyleSheet("""
+                QLabel {
+                    background-color: #7f1d1d;
+                    color: #fca5a5;
+                    font-family: 'Segoe UI', sans-serif;
+                    font-size: 10px;
+                    font-weight: 700;
+                    padding: 2px 8px;
+                    border-radius: 4px;
+                }
+            """)
+            return
+
         # Phase 3: VLM Markdown
         img_path = data.get("image_path")
         first_chunk = data.get("first_chunk", False)

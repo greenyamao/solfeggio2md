@@ -66,7 +66,7 @@ DEFAULT_CONFIG = {
     "smt_device": "cuda" if torch.cuda.is_available() else "cpu",
     "enable_score_enhancer": True,
     "enable_cugan_sr": True,
-    "skip_vlm": True,
+    "skip_vlm": False,
     "skip_front_matter": True,
     "skip_back_matter": True,
     "system_prompt": (
@@ -1715,90 +1715,152 @@ class PipelineBatchRunner:
                     "book": masked_dir.parent.name,
                 })
 
-            streamed_tokens: List[str] = []
-            def _vlm_token_cb(chunk: str) -> None:
-                is_first = (len(streamed_tokens) == 0)
-                streamed_tokens.append(chunk)
-                if is_first:
-                    try:
-                        rel_mask = mask_file.relative_to(self.output_root).as_posix()
-                        with self._lock:
-                            self.metrics["current_page_image_url"] = f"/output/{rel_mask}"
-                            self.metrics["current_page_image_path"] = str(mask_file)
-                    except Exception:
-                        pass
+            page_recognized = False
+            while not page_recognized and not self._stop_event.is_set():
+                self._check_pause()
+
+                # Notify UI that image analysis is in progress for page p_val (without wiping previous page preview)
                 if self.on_text_update is not None:
                     self.on_text_update({
+                        "stage": "phase3_analyzing",
                         "page": p_val,
                         "book": masked_dir.parent.name,
-                        "chunk": chunk,
-                        "completed": False,
-                        "stage": "phase3",
-                        "first_chunk": is_first,
-                        "image_path": str(mask_file) if is_first else None,
                     })
 
-            try:
-                img_bytes = mask_file.read_bytes()
-                detailed = self.lm_client.request_ocr_detailed(
-                    image_bytes=img_bytes,
-                    system_prompt=system_prompt,
-                    model_name=self.config.get("lm_model", "qwen3.5-9b"),
-                    temperature=float(self.config.get("lm_temperature", 0.1)),
-                    max_tokens=int(self.config.get("lm_max_tokens", 2048)),
-                    context_length=int(self.config.get("qwen_context_length", 4096)),
-                    max_dim=int(self.config.get("vlm_max_dim", 1600)),
-                    on_chunk=_vlm_token_cb,
-                )
-                extracted_text = detailed["text"]
-                sanitized_text = self._sanitize_vlm_text(extracted_text, valid_stubs=page_stubs_set)
-                if not sanitized_text.strip():
-                    sanitized_text = f"## Page {p_val}\n\n<!-- No text detected on page -->\n"
-                tok_per_sec = detailed.get("tokens_per_second", 0.0)
-                duration = detailed.get("duration", 0.0)
-                tok_count = detailed.get("tokens_count", 0)
-
-                with self._lock:
-                    self.metrics["vlm_tok_per_sec"] = tok_per_sec
-                    self.metrics["last_page_seconds"] = duration
-                    self.metrics["last_page_tokens"] = tok_count
-                    self.metrics["current_vlm_text"] = sanitized_text
-                    self.metrics["current_page_image_path"] = str(mask_file)
-
-                self.log_event("VLM", f"Page {p_num}: {tok_count} tokens ({tok_per_sec:.1f} tok/s, {duration:.1f}s)")
-                raw_md_file.write_text(sanitized_text, encoding="utf-8")
-
-                if self.on_text_update is not None:
-                    self.on_text_update({
-                        "page": p_val,
-                        "book": masked_dir.parent.name,
-                        "text": sanitized_text,
-                        "completed": True,
-                        "stage": "phase3",
-                        "image_path": str(mask_file),
-                    })
-            except Exception as e:
-                if self._stop_event.is_set():
-                    if raw_md_file.is_file():
+                streamed_tokens: List[str] = []
+                def _vlm_token_cb(chunk: str) -> None:
+                    is_first = (len(streamed_tokens) == 0)
+                    streamed_tokens.append(chunk)
+                    if is_first:
                         try:
-                            raw_md_file.unlink()
+                            rel_mask = mask_file.relative_to(self.output_root).as_posix()
+                            with self._lock:
+                                self.metrics["current_page_image_url"] = f"/output/{rel_mask}"
+                                self.metrics["current_page_image_path"] = str(mask_file)
                         except Exception:
                             pass
-                    self.log_event("SYSTEM", f"Page {p_num}: recognition stopped by user")
-                    return False
+                    if self.on_text_update is not None:
+                        self.on_text_update({
+                            "page": p_val,
+                            "book": masked_dir.parent.name,
+                            "chunk": chunk,
+                            "completed": False,
+                            "stage": "phase3",
+                            "first_chunk": is_first,
+                            "image_path": str(mask_file) if is_first else None,
+                        })
 
-                self.log_event("ERROR", f"Page {p_num}: VLM error ({str(e)})", level="ERROR")
-                fallback_txt = f"<!-- LM_STUDIO_ERROR: {str(e)} -->\n\n## Page {int(p_num)}\n\n[Text not recognized: VLM connection error]\n"
-                raw_md_file.write_text(fallback_txt, encoding="utf-8")
-                if self.on_text_update is not None:
-                    self.on_text_update({
-                        "page": p_val,
-                        "book": masked_dir.parent.name,
-                        "text": fallback_txt,
-                        "completed": True,
-                        "stage": "phase3",
-                        "image_path": str(mask_file),
-                    })
+                try:
+                    img_bytes = mask_file.read_bytes()
+                    detailed = self.lm_client.request_ocr_detailed(
+                        image_bytes=img_bytes,
+                        system_prompt=system_prompt,
+                        model_name=self.config.get("lm_model", "qwen3.5-9b"),
+                        temperature=float(self.config.get("lm_temperature", 0.1)),
+                        max_tokens=int(self.config.get("lm_max_tokens", 2048)),
+                        context_length=int(self.config.get("qwen_context_length", 4096)),
+                        max_dim=int(self.config.get("vlm_max_dim", 1600)),
+                        on_chunk=_vlm_token_cb,
+                    )
+                    extracted_text = detailed["text"]
+                    sanitized_text = self._sanitize_vlm_text(extracted_text, valid_stubs=page_stubs_set)
+                    if not sanitized_text.strip():
+                        sanitized_text = f"## Page {p_val}\n\n<!-- No text detected on page -->\n"
+                    tok_per_sec = detailed.get("tokens_per_second", 0.0)
+                    duration = detailed.get("duration", 0.0)
+                    tok_count = detailed.get("tokens_count", 0)
+
+                    with self._lock:
+                        self.metrics["vlm_tok_per_sec"] = tok_per_sec
+                        self.metrics["last_page_seconds"] = duration
+                        self.metrics["last_page_tokens"] = tok_count
+                        self.metrics["current_vlm_text"] = sanitized_text
+                        self.metrics["current_page_image_path"] = str(mask_file)
+
+                    self.log_event("VLM", f"Page {p_num}: {tok_count} tokens ({tok_per_sec:.1f} tok/s, {duration:.1f}s)")
+                    raw_md_file.write_text(sanitized_text, encoding="utf-8")
+
+                    if self.on_text_update is not None:
+                        self.on_text_update({
+                            "page": p_val,
+                            "book": masked_dir.parent.name,
+                            "text": sanitized_text,
+                            "completed": True,
+                            "stage": "phase3",
+                            "image_path": str(mask_file),
+                        })
+                    page_recognized = True
+
+                except Exception as e:
+                    if self._stop_event.is_set():
+                        if raw_md_file.is_file():
+                            try:
+                                raw_md_file.unlink()
+                            except Exception:
+                                pass
+                        self.log_event("SYSTEM", f"Page {p_num}: recognition stopped by user")
+                        return False
+
+                    err_msg = str(e)
+                    is_conn_error = (
+                        isinstance(e, (urllib.error.URLError, ConnectionError, TimeoutError, OSError))
+                        or "connection" in err_msg.lower()
+                        or "refused" in err_msg.lower()
+                        or "timed out" in err_msg.lower()
+                        or "offline" in err_msg.lower()
+                    )
+
+                    if is_conn_error:
+                        self.log_event("WARN", f"Page {p_num}: VLM connection lost ({err_msg}). Pausing pipeline...")
+                        if self.on_text_update is not None:
+                            self.on_text_update({
+                                "stage": "phase3_disconnected",
+                                "page": p_val,
+                                "book": masked_dir.parent.name,
+                                "error": err_msg,
+                            })
+                        self.pause()
+                        # Wait while paused until user resumes or stops
+                        while self.is_paused and not self._stop_event.is_set():
+                            time.sleep(0.5)
+                        if self._stop_event.is_set():
+                            return False
+
+                        # If resumed and backend is embedded, ensure server process is up
+                        if vlm_backend == "embedded" and not self.embedded_runner.is_server_ready():
+                            m_info = self.model_manager.resolve_model_files(
+                                repo=self.config.get("vlm_model_repo", "lmstudio-community/Qwen3.5-9B-GGUF"),
+                                model_file=self.config.get("vlm_model_file", "Qwen3.5-9B-Q4_K_M.gguf"),
+                                mmproj_file=self.config.get("vlm_mmproj_file", "mmproj-Qwen3.5-9B-BF16.gguf"),
+                            )
+                            if m_info["ready"]:
+                                self.embedded_runner.start(
+                                    model_path=m_info["model_path"],
+                                    mmproj_path=m_info["mmproj_path"],
+                                    context_length=int(self.config.get("qwen_context_length", 4096)),
+                                    parallel=int(self.config.get("qwen_parallel", 1)),
+                                    flash_attention=bool(self.config.get("qwen_flash_attention", True)),
+                                    port=int(self.config.get("vlm_embedded_port", 1234)),
+                                )
+                        continue
+                    else:
+                        # Non-connection processing error (e.g., corrupt image)
+                        self.log_event("ERROR", f"Page {p_num}: VLM error ({err_msg})", level="ERROR")
+                        fallback_txt = f"<!-- VLM_ERROR: {err_msg} -->\n\n## Page {int(p_num)}\n\n[Text not recognized]\n"
+                        raw_md_file.write_text(fallback_txt, encoding="utf-8")
+                        if self.on_text_update is not None:
+                            self.on_text_update({
+                                "page": p_val,
+                                "book": masked_dir.parent.name,
+                                "text": fallback_txt,
+                                "completed": True,
+                                "stage": "phase3",
+                                "image_path": str(mask_file),
+                            })
+                        page_recognized = True
+
+            if self._stop_event.is_set():
+                return False
 
             vlm_done_count += 1
             chk["phases"]["vlm"]["pages_done"] = vlm_done_count

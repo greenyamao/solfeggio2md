@@ -65,7 +65,8 @@ class LMStudioClient:
                 models = res.get("data", [])
                 return True, f"VLM server reachable ({len(models)} models available)"
             except urllib.error.URLError as e:
-                return False, f"Connection error to {self.base_url}: {e.reason}"
+                err_str = str(e.reason) if getattr(e, "reason", None) is not None else str(e)
+                return False, f"Connection error to {self.base_url}: {err_str}"
             except Exception as e:
                 return False, f"Failed to connect to server: {str(e)}"
 
@@ -243,6 +244,7 @@ class LMStudioClient:
                 "max_tokens": int(max_tokens),
                 "stream": True,
             }
+            streamed_any = False
             try:
                 url = f"{self.base_url}/v1/chat/completions"
                 req = urllib.request.Request(
@@ -253,22 +255,33 @@ class LMStudioClient:
                 )
                 accumulated: List[str] = []
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                    for line_b in resp:
-                        line = line_b.decode("utf-8", errors="replace").strip()
-                        if not line or line.startswith(":"):
-                            continue
-                        if line.startswith("data: "):
-                            d_str = line[6:].strip()
-                            if d_str == "[DONE]":
-                                break
-                            try:
-                                chunk_json = json.loads(d_str)
-                                delta = chunk_json.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                                if delta:
-                                    accumulated.append(delta)
-                                    on_chunk(delta)
-                            except Exception:
-                                pass
+                    buf = ""
+                    while True:
+                        chunk_b = resp.read(128)
+                        if not chunk_b:
+                            break
+                        buf += chunk_b.decode("utf-8", errors="replace")
+                        while "\n" in buf:
+                            line, buf = buf.split("\n", 1)
+                            line = line.strip()
+                            if not line or line.startswith(":"):
+                                continue
+                            if line.startswith("data: "):
+                                d_str = line[6:].strip()
+                                if d_str == "[DONE]":
+                                    break
+                                try:
+                                    chunk_json = json.loads(d_str)
+                                    choices = chunk_json.get("choices", [])
+                                    if choices:
+                                        delta_obj = choices[0].get("delta", {})
+                                        delta = delta_obj.get("content") or delta_obj.get("reasoning_content") or ""
+                                        if delta:
+                                            accumulated.append(delta)
+                                            streamed_any = True
+                                            on_chunk(delta)
+                                except Exception:
+                                    pass
                 if accumulated:
                     raw_text = "".join(accumulated).strip()
             except Exception:
@@ -329,9 +342,11 @@ class LMStudioClient:
         duration = max(0.01, t_end - t_start)
         cleaned_text = self._strip_markdown_fences(raw_text)
 
-        # Ensure on_chunk receives the full text if streaming was bypassed
-        if on_chunk is not None and cleaned_text and not raw_text.startswith(""):
-            on_chunk(cleaned_text)
+        # Ensure on_chunk receives progressive tokens if streaming was bypassed or failed
+        if on_chunk is not None and cleaned_text and not streamed_any:
+            step = 16
+            for i in range(0, len(cleaned_text), step):
+                on_chunk(cleaned_text[i : i + step])
 
         tok_per_sec = float(stats.get("tokens_per_second") or 0.0)
         num_tokens = int(stats.get("num_output_tokens") or 0)
