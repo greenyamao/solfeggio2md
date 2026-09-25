@@ -163,26 +163,26 @@ class PipelineView(QWidget):
         layout.setSpacing(10)
 
         # Action Buttons
-        self.btn_start = PrimaryPushButton(FluentIcon.PLAY, "Запустить конвейер", bar)
+        self.btn_start = PrimaryPushButton(FluentIcon.PLAY, "Start Pipeline", bar)
         self.btn_start.clicked.connect(self._on_start_clicked)
         layout.addWidget(self.btn_start)
 
-        self.btn_pause = PushButton(FluentIcon.PAUSE, "Пауза", bar)
+        self.btn_pause = PushButton(FluentIcon.PAUSE, "Pause", bar)
         self.btn_pause.clicked.connect(self._on_pause_clicked)
         layout.addWidget(self.btn_pause)
 
-        self.btn_stop = PushButton(FluentIcon.POWER_BUTTON, "Остановить", bar)
+        self.btn_stop = PushButton(FluentIcon.POWER_BUTTON, "Stop", bar)
         self.btn_stop.clicked.connect(self._on_stop_clicked)
         layout.addWidget(self.btn_stop)
 
-        self.btn_folder = PushButton(FluentIcon.FOLDER, "Папка in/", bar)
+        self.btn_folder = PushButton(FluentIcon.FOLDER, "Folder in/", bar)
         self.btn_folder.clicked.connect(self._on_open_folder_clicked)
         layout.addWidget(self.btn_folder)
 
         layout.addStretch()
 
         # Status text in command bar
-        self.lbl_bar_status = QLabel("Готов к работе", bar)
+        self.lbl_bar_status = QLabel("Ready", bar)
         self.lbl_bar_status.setStyleSheet("color: #38bdf8; font-weight: 600; font-size: 12px;")
         layout.addWidget(self.lbl_bar_status)
 
@@ -195,17 +195,17 @@ class PipelineView(QWidget):
         layout.setSpacing(6)
 
         header_layout = QHBoxLayout()
-        caption = CaptionLabel("ТЕКУЩАЯ КНИГА", card)
+        caption = CaptionLabel("CURRENT BOOK", card)
         caption.setStyleSheet("color: #94a3b8; font-size: 10px; font-weight: 700;")
         header_layout.addWidget(caption)
         header_layout.addStretch()
 
-        self.lbl_book_pages = CaptionLabel("0 / 0 стр.", card)
+        self.lbl_book_pages = CaptionLabel("0 / 0 pages", card)
         self.lbl_book_pages.setStyleSheet("color: #38bdf8; font-weight: 600;")
         header_layout.addWidget(self.lbl_book_pages)
         layout.addLayout(header_layout)
 
-        self.lbl_book_title = QLabel("Очередь ожидает команды", card)
+        self.lbl_book_title = QLabel("Queue awaiting command", card)
         self.lbl_book_title.setStyleSheet("color: #ffffff; font-size: 13px; font-weight: 700;")
         self.lbl_book_title.setWordWrap(True)
         layout.addWidget(self.lbl_book_title)
@@ -223,13 +223,13 @@ class PipelineView(QWidget):
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(6)
 
-        caption = CaptionLabel("ОЧЕРЕДЬ ФАЙЛОВ (in/)", card)
+        caption = CaptionLabel("FILE QUEUE (in/)", card)
         caption.setStyleSheet("color: #94a3b8; font-size: 10px; font-weight: 700;")
         layout.addWidget(caption)
 
         self.queue_table = TableWidget(card)
         self.queue_table.setColumnCount(3)
-        self.queue_table.setHorizontalHeaderLabels(["Файл", "Стр.", "Статус"])
+        self.queue_table.setHorizontalHeaderLabels(["File", "Pages", "Status"])
         self.queue_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.queue_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.queue_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
@@ -245,13 +245,13 @@ class PipelineView(QWidget):
         layout.setContentsMargins(12, 6, 12, 6)
         layout.setSpacing(10)
 
-        self.lbl_mon_title = CaptionLabel("ЖИВОЙ МОНИТОР ТЕКУЩЕГО ШАГА", card)
+        self.lbl_mon_title = CaptionLabel("LIVE MONITOR OF CURRENT STEP", card)
         self.lbl_mon_title.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 700;")
         layout.addWidget(self.lbl_mon_title)
 
         layout.addStretch()
 
-        self.badge_stage = QLabel("ФАЗА: ОЖИДАНИЕ", card)
+        self.badge_stage = QLabel("PHASE: IDLE", card)
         self.badge_stage.setStyleSheet("""
             QLabel {
                 background-color: #1e293b;
@@ -265,12 +265,12 @@ class PipelineView(QWidget):
         layout.addWidget(self.badge_stage)
 
         self.btn_fit = ToolButton(FluentIcon.ZOOM_IN, card)
-        self.btn_fit.setToolTip("Вписать в окно")
+        self.btn_fit.setToolTip("Fit to window")
         self.btn_fit.clicked.connect(self.canvas_view.fit_to_view)
         layout.addWidget(self.btn_fit)
 
         self.btn_toggle_text = ToolButton(FluentIcon.DOCUMENT, card)
-        self.btn_toggle_text.setToolTip("Показать / скрыть панель распознанного текста")
+        self.btn_toggle_text.setToolTip("Show / hide recognized text panel")
         self.btn_toggle_text.clicked.connect(self._toggle_text_panel)
         layout.addWidget(self.btn_toggle_text)
 
@@ -283,13 +283,13 @@ class PipelineView(QWidget):
         layout.setSpacing(6)
 
         hdr_layout = QHBoxLayout()
-        self.lbl_text_title = CaptionLabel("РАСПОЗНАННЫЙ ТЕКСТ (MARKDOWN / ABC)", card)
+        self.lbl_text_title = CaptionLabel("RECOGNIZED TEXT (MARKDOWN / ABC)", card)
         self.lbl_text_title.setStyleSheet("color: #38bdf8; font-weight: 700; font-size: 11px;")
         hdr_layout.addWidget(self.lbl_text_title)
 
         hdr_layout.addStretch()
 
-        self.badge_text_status = QLabel("ОЖИДАНИЕ", card)
+        self.badge_text_status = QLabel("IDLE", card)
         self.badge_text_status.setStyleSheet("""
             QLabel {
                 background-color: #1e293b;
@@ -304,7 +304,7 @@ class PipelineView(QWidget):
         hdr_layout.addWidget(self.badge_text_status)
 
         self.btn_copy_text = ToolButton(FluentIcon.COPY, card)
-        self.btn_copy_text.setToolTip("Копировать распознанный текст")
+        self.btn_copy_text.setToolTip("Copy recognized text")
         self.btn_copy_text.clicked.connect(self._copy_live_text)
         hdr_layout.addWidget(self.btn_copy_text)
 
@@ -312,7 +312,7 @@ class PipelineView(QWidget):
 
         self.text_preview = QPlainTextEdit(card)
         self.text_preview.setReadOnly(True)
-        self.text_preview.setPlaceholderText("Здесь в реальном времени отображается генерируемый нейросетью Markdown текст или OMR код нот...")
+        self.text_preview.setPlaceholderText("Real-time generated Markdown text or OMR code will appear here...")
         self.text_preview.setStyleSheet("""
             QPlainTextEdit {
                 background-color: #0b0f17;
@@ -346,10 +346,10 @@ class PipelineView(QWidget):
         page = data.get("page", 0)
 
         if stage == "phase2":
-            self.lbl_text_title.setText("РАСПОЗНАННЫЕ НОТЫ (ABC CODE)")
+            self.lbl_text_title.setText("RECOGNIZED NOTES (ABC CODE)")
             self.lbl_text_title.setStyleSheet("color: #facc15; font-weight: 700; font-size: 11px;")
             self.text_preview.setPlainText(full_text)
-            self.badge_text_status.setText("OMR ГОТОВО")
+            self.badge_text_status.setText("OMR DONE")
             self.badge_text_status.setStyleSheet("""
                 QLabel {
                     background-color: #854d0e;
@@ -365,7 +365,7 @@ class PipelineView(QWidget):
 
         if stage == "phase3_analyzing":
             # Keep previous page image and text visible while vision encoder is deciphering page
-            self.badge_text_status.setText(f"АНАЛИЗ СТР. {page}...")
+            self.badge_text_status.setText(f"ANALYZING PAGE {page}...")
             self.badge_text_status.setStyleSheet("""
                 QLabel {
                     background-color: #431407;
@@ -377,11 +377,11 @@ class PipelineView(QWidget):
                     border-radius: 4px;
                 }
             """)
-            self.lbl_mon_title.setText(f"ЖИВОЙ МОНИТОР: VLM анализирует стр. {page} (дешифровка фото)")
+            self.lbl_mon_title.setText(f"LIVE MONITOR: VLM analyzing page {page} (image decoding)")
             return
 
         # Phase 3: VLM Markdown
-        title_str = f"РАСПОЗНАННЫЙ ТЕКСТ (MARKDOWN • СТР. {page})" if page else "РАСПОЗНАННЫЙ ТЕКСТ (MARKDOWN)"
+        title_str = f"RECOGNIZED TEXT (MARKDOWN • PAGE {page})" if page else "RECOGNIZED TEXT (MARKDOWN)"
         self.lbl_text_title.setText(title_str)
         self.lbl_text_title.setStyleSheet("color: #38bdf8; font-weight: 700; font-size: 11px;")
 
@@ -390,7 +390,7 @@ class PipelineView(QWidget):
         if img_path and os.path.isfile(img_path):
             self._current_image_path = img_path
             self.canvas_view.load_file(img_path)
-            self.lbl_mon_title.setText(f"ЖИВОЙ МОНИТОР: Стр. {page} — VLM маскированная страница")
+            self.lbl_mon_title.setText(f"LIVE MONITOR: Page {page} — VLM masked page")
 
         first_chunk = data.get("first_chunk", False)
         if first_chunk:
@@ -399,7 +399,7 @@ class PipelineView(QWidget):
 
         if is_comp:
             self.text_preview.setPlainText(full_text)
-            self.badge_text_status.setText("ГОТОВО")
+            self.badge_text_status.setText("DONE")
             self.badge_text_status.setStyleSheet("""
                 QLabel {
                     background-color: #14532d;
@@ -418,7 +418,7 @@ class PipelineView(QWidget):
                 self.text_preview.moveCursor(QTextCursor.MoveOperation.End)
             elif full_text:
                 self.text_preview.setPlainText(full_text)
-            self.badge_text_status.setText("ГЕНЕРАЦИЯ...")
+            self.badge_text_status.setText("GENERATING...")
             self.badge_text_status.setStyleSheet("""
                 QLabel {
                     background-color: #1e3a8a;
@@ -452,8 +452,8 @@ class PipelineView(QWidget):
                 path = meta.get("path", "")
                 title = meta.get("title", "")
                 stage = meta.get("stage", "")
-                if title and self.lbl_mon_title.text() != f"ЖИВОЙ МОНИТОР: {title}":
-                    self.lbl_mon_title.setText(f"ЖИВОЙ МОНИТОР: {title}")
+                if title and self.lbl_mon_title.text() != f"LIVE MONITOR: {title}":
+                    self.lbl_mon_title.setText(f"LIVE MONITOR: {title}")
 
                 # For Phase 1 & 2, update canvas immediately. For Phase 3, canvas updates on token generation!
                 if stage != "phase3":
@@ -483,28 +483,28 @@ class PipelineView(QWidget):
 
         if is_running:
             if is_paused:
-                if self.lbl_bar_status.text() != "Пауза":
-                    self.lbl_bar_status.setText("Пауза")
+                if self.lbl_bar_status.text() != "Paused":
+                    self.lbl_bar_status.setText("Paused")
                     self.lbl_bar_status.setStyleSheet("color: #fb923c; font-weight: 600;")
-                if self.btn_pause.text() != "Продолжить":
-                    self.btn_pause.setText("Продолжить")
+                if self.btn_pause.text() != "Resume":
+                    self.btn_pause.setText("Resume")
             else:
-                if self.lbl_bar_status.text() != "Выполняется...":
-                    self.lbl_bar_status.setText("Выполняется...")
+                if self.lbl_bar_status.text() != "Running...":
+                    self.lbl_bar_status.setText("Running...")
                     self.lbl_bar_status.setStyleSheet("color: #4ade80; font-weight: 600;")
-                if self.btn_pause.text() != "Пауза":
-                    self.btn_pause.setText("Пауза")
+                if self.btn_pause.text() != "Pause":
+                    self.btn_pause.setText("Pause")
         else:
-            if self.lbl_bar_status.text() != "Остановлен / Готов":
-                self.lbl_bar_status.setText("Остановлен / Готов")
+            if self.lbl_bar_status.text() != "Stopped / Ready":
+                self.lbl_bar_status.setText("Stopped / Ready")
                 self.lbl_bar_status.setStyleSheet("color: #38bdf8; font-weight: 600;")
 
         # Active book
         book_name = metrics.get("current_book_name", "")
         if book_name and self.lbl_book_title.text() != book_name:
             self.lbl_book_title.setText(book_name)
-        phase_name = metrics.get("current_phase_name", "Ожидание")
-        phase_str = f"ФАЗА: {phase_name.upper()}"
+        phase_name = metrics.get("current_phase_name", "Idle")
+        phase_str = f"PHASE: {phase_name.upper()}"
         if self.badge_stage.text() != phase_str:
             self.badge_stage.setText(phase_str)
 
@@ -556,7 +556,7 @@ class PipelineView(QWidget):
         self.worker_client.send_command("start")
 
     def _on_pause_clicked(self) -> None:
-        if self.btn_pause.text() == "Продолжить":
+        if self.btn_pause.text() == "Resume":
             self.worker_client.send_command("resume")
         else:
             self.worker_client.send_command("pause")

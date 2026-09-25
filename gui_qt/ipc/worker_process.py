@@ -102,7 +102,7 @@ def _ml_worker_main(command_queue: mp.Queue, status_queue: mp.Queue, shm_name: s
                     status_queue.put({"type": "log", "data": {
                         "time": time.strftime("%H:%M:%S"),
                         "tag": "SYSTEM",
-                        "msg": "Конвейер запущен пользователем",
+                        "msg": "Pipeline started by user",
                         "level": "INFO",
                     }})
 
@@ -111,7 +111,7 @@ def _ml_worker_main(command_queue: mp.Queue, status_queue: mp.Queue, shm_name: s
                     status_queue.put({"type": "log", "data": {
                         "time": time.strftime("%H:%M:%S"),
                         "tag": "SYSTEM",
-                        "msg": "Команда остановки отправлена конвейеру",
+                        "msg": "Stop command sent to pipeline",
                         "level": "WARN",
                     }})
 

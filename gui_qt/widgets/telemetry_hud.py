@@ -67,19 +67,19 @@ class TelemetryHUDRibbon(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        self.card_speed = MetricCard("VLM Скорость", "0.0", "tok/s", self)
+        self.card_speed = MetricCard("VLM Speed", "0.0", "tok/s", self)
         self.card_speed.value_label.setStyleSheet("color: #4ade80; font-size: 16px; font-weight: 700;")
         layout.addWidget(self.card_speed)
 
-        self.card_time = MetricCard("Время стр.", "0.0", "с", self)
+        self.card_time = MetricCard("Page Time", "0.0", "s", self)
         self.card_time.value_label.setStyleSheet("color: #38bdf8; font-size: 16px; font-weight: 700;")
         layout.addWidget(self.card_time)
 
-        self.card_vram = MetricCard("VRAM Память", "0.0", "MB", self)
+        self.card_vram = MetricCard("VRAM Usage", "0.0", "MB", self)
         self.card_vram.value_label.setStyleSheet("color: #c084fc; font-size: 16px; font-weight: 700;")
         layout.addWidget(self.card_vram)
 
-        self.card_tokens = MetricCard("Токены вывода", "0", "tok", self)
+        self.card_tokens = MetricCard("Output Tokens", "0", "tok", self)
         self.card_tokens.value_label.setStyleSheet("color: #facc15; font-size: 16px; font-weight: 700;")
         layout.addWidget(self.card_tokens)
 

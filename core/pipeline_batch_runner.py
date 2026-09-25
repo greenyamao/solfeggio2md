@@ -70,11 +70,11 @@ DEFAULT_CONFIG = {
     "skip_front_matter": True,
     "skip_back_matter": True,
     "system_prompt": (
-        "Ты — строгий OCR-транскрибатор. Перенеси весь печатный текст страницы книги в чистый Markdown дословно.\n"
-        "Сохраняй иерархию заголовков (#, ##, ###), таблицы и списки.\n"
-        "ВАЖНО: Если на белых плашках страницы видны метки <!-- MUSIC_STUB_ID:... -->, скопируй ТОЧНЫЙ текст этой метки "
-        "в соответствующее место текста. НЕ придумывай и НЕ вставляй метки MUSIC_STUB_ID самостоятельно, если их нет на изображении.\n"
-        "Если страница пуста — не выводи никакого текста."
+        "You are a strict OCR transcriber. Transcribe all printed text from the book page into clean verbatim Markdown.\n"
+        "Preserve heading hierarchy (#, ##, ###), tables, and lists.\n"
+        "IMPORTANT: If you see <!-- MUSIC_STUB_ID:... --> tags on the white masked areas, copy the EXACT text of each tag "
+        "into its corresponding position in the text. Do NOT invent or insert MUSIC_STUB_ID tags if they are not present on the image.\n"
+        "If the page contains no text, output nothing."
     ),
 }
 
@@ -148,12 +148,12 @@ class PipelineBatchRunner:
             "current_book_index": 0,
             "total_books": 0,
             "current_book_name": "",
-            "current_phase_name": "Готов к запуску",
-            "current_item_detail": "Очередь ожидает команды",
+            "current_phase_name": "Ready to run",
+            "current_item_detail": "Queue idle",
             "elapsed_seconds": 0.0,
             "estimated_remaining_seconds": 0.0,
             "vram_allocated_mb": 0.0,
-            "last_log": "Инициализация выполнена",
+            "last_log": "Initialization completed",
             "logs": [],
             "vlm_tok_per_sec": 0.0,
             "last_page_seconds": 0.0,
@@ -162,10 +162,10 @@ class PipelineBatchRunner:
             "current_page_image_path": "",
             "current_vlm_text": "",
             "phase_progress": {
-                "phase1": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Ожидание"},
-                "phase2": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Ожидание"},
-                "phase3": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Ожидание"},
-                "phase4": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Ожидание"},
+                "phase1": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Pending"},
+                "phase2": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Pending"},
+                "phase3": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Pending"},
+                "phase4": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Pending"},
             },
         }
 
@@ -187,7 +187,7 @@ class PipelineBatchRunner:
         self.on_text_update: Optional[Any] = None
 
         # Log initial event
-        self.log_event("SYSTEM", "Система инициализирована. Готова к обработке очереди.")
+        self.log_event("SYSTEM", "System initialized. Ready to process queue.")
 
         # Initial queue population and directory sync
         self._load_existing_queue()
@@ -496,7 +496,7 @@ class PipelineBatchRunner:
                 self.is_paused = True
                 self._pause_event.clear()
                 self.metrics["is_paused"] = True
-                self.metrics["current_phase_name"] = "Приостановлено пользователем"
+                self.metrics["current_phase_name"] = "Paused by user"
 
     def resume(self) -> None:
         with self._lock:
@@ -523,7 +523,7 @@ class PipelineBatchRunner:
             self.is_paused = False
             self.metrics["is_running"] = False
             self.metrics["is_paused"] = False
-            self.metrics["current_phase_name"] = "Остановлено пользователем"
+            self.metrics["current_phase_name"] = "Stopped by user"
 
     # ---------------- Orchestration Loop ---------------- #
 
@@ -559,10 +559,10 @@ class PipelineBatchRunner:
                             "book_progress_pct": 0.0,
                             "queue_progress_pct": round(((book_idx - 1) / max(1, total_books)) * 100, 1),
                             "phase_progress": {
-                                "phase1": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Ожидание"},
-                                "phase2": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Ожидание"},
-                                "phase3": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Ожидание"},
-                                "phase4": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Ожидание"},
+                                "phase1": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Pending"},
+                                "phase2": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Pending"},
+                                "phase3": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Pending"},
+                                "phase4": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Pending"},
                             },
                         }
                     )
@@ -578,8 +578,8 @@ class PipelineBatchRunner:
             with self._lock:
                 self.metrics["queue_progress_pct"] = 100.0
                 self.metrics["book_progress_pct"] = 100.0
-                self.metrics["current_phase_name"] = "Очередь полностью обработана"
-                self.metrics["current_item_detail"] = "Все задачи завершены"
+                self.metrics["current_phase_name"] = "Queue completed"
+                self.metrics["current_item_detail"] = "All tasks finished"
                 for p_key in ("phase1", "phase2", "phase3", "phase4"):
                     if p_key in self.metrics.get("phase_progress", {}):
                         self.metrics["phase_progress"][p_key]["pct"] = 100.0
@@ -587,8 +587,8 @@ class PipelineBatchRunner:
 
         except Exception as e:
             with self._lock:
-                self.metrics["current_phase_name"] = "Ошибка в конвейере"
-                self.metrics["last_log"] = f"Исключение: {str(e)}"
+                self.metrics["current_phase_name"] = "Pipeline error"
+                self.metrics["last_log"] = f"Exception: {str(e)}"
         finally:
             self._purge_vram()
             if hasattr(self, "embedded_runner"):
@@ -669,7 +669,7 @@ class PipelineBatchRunner:
                 f for f in raw_md_dir.glob("page_*_raw.md")
                 if f.stat().st_size > 0
                 and "LM_STUDIO_ERROR" not in f.read_text(encoding="utf-8", errors="replace")
-                and "[Текст не распознан" not in f.read_text(encoding="utf-8", errors="replace")
+                and "[Text not recognized" not in f.read_text(encoding="utf-8", errors="replace")
             ])
             if len(m_files) > 0 and existing_r >= len(m_files):
                 chk["phases"]["vlm"]["completed"] = True
@@ -706,7 +706,7 @@ class PipelineBatchRunner:
             done=p1_done,
             total=p1_tot,
             status="completed" if p1_comp else "pending",
-            detail="Готово" if p1_comp else "Ожидание",
+            detail="Completed" if p1_comp else "Pending",
         )
         self._update_phase_progress(
             "phase2",
@@ -714,7 +714,7 @@ class PipelineBatchRunner:
             done=p2_done,
             total=p2_tot,
             status="completed" if p2_comp else "pending",
-            detail="Готово" if p2_comp else "Ожидание",
+            detail="Completed" if p2_comp else "Pending",
         )
         self._update_phase_progress(
             "phase3",
@@ -722,7 +722,7 @@ class PipelineBatchRunner:
             done=p3_done,
             total=p3_tot,
             status="completed" if p3_comp else "pending",
-            detail="Готово" if p3_comp else "Ожидание",
+            detail="Completed" if p3_comp else "Pending",
         )
         self._update_phase_progress(
             "phase4",
@@ -730,7 +730,7 @@ class PipelineBatchRunner:
             done=0,
             total=0,
             status="completed" if p4_comp else "pending",
-            detail="Готово" if p4_comp else "Ожидание",
+            detail="Completed" if p4_comp else "Pending",
         )
 
         # ---------------- Phases 1 & 2: Pipelined Streaming (Slicing + OMR) ---------------- #
@@ -740,7 +740,7 @@ class PipelineBatchRunner:
         if not (slicing_done and omr_done):
             if slicing_done:
                 # Slicing already done on disk; only run remaining OMR
-                self._update_hud("Фаза 2/4: Оптическое распознавание нот (Transcoda-59M)", 25.0)
+                self._update_hud("Phase 2/4: Optical Music Recognition (Transcoda-59M)", 25.0)
                 ok = self._phase_2_omr(crops_dir, chk, overwrite)
                 if not ok:
                     return False
@@ -748,7 +748,7 @@ class PipelineBatchRunner:
                 self._write_checkpoint(book_title, chk)
             else:
                 # Pipelined concurrent execution of Slicing and OMR
-                self._update_hud("Фазы 1-2: Потоковая нарезка и распознавание нот (YOLO + Transcoda)", 0.0)
+                self._update_hud("Phases 1-2: Streaming Slicing & OMR (YOLO + Transcoda)", 0.0)
                 ok = self._phase_1_and_2_pipelined(pdf_path, crops_dir, masked_dir, chk, overwrite)
                 if not ok:
                     return False
@@ -757,12 +757,12 @@ class PipelineBatchRunner:
                 self._write_checkpoint(book_title, chk)
 
         # ---------------- VRAM Purge Barrier before VLM ---------------- #
-        self._update_hud("Очистка VRAM GPU перед VLM...", 50.0)
+        self._update_hud("Purging GPU VRAM before VLM...", 50.0)
         self._purge_vram()
 
         # ---------------- Phase 3: VLM Text Recognition ---------------- #
         if not chk["phases"]["vlm"]["completed"] or overwrite:
-            self._update_hud("Фаза 3/4: Извлечение текста книги (LM Studio VLM)", 55.0)
+            self._update_hud("Phase 3/4: Book text extraction (VLM)", 55.0)
             ok = self._phase_3_vlm(masked_dir, raw_md_dir, chk, overwrite)
             if not ok:
                 return False
@@ -770,7 +770,7 @@ class PipelineBatchRunner:
             self._write_checkpoint(book_title, chk)
 
         # ---------------- Phase 4: Final Assembly ---------------- #
-        self._update_hud("Фаза 4/4: Сборка итогового Markdown издания", 90.0)
+        self._update_hud("Phase 4/4: Assembling final Markdown edition", 90.0)
         ok = self._phase_4_assembly(book_dir, raw_md_dir, crops_dir, final_dir, chk)
         if not ok:
             return False
@@ -778,7 +778,7 @@ class PipelineBatchRunner:
         chk["phases"]["assembly"]["completed"] = True
         chk["status"] = "completed"
         self._write_checkpoint(book_title, chk)
-        self._update_hud(f"Книга {book_title} успешно завершена", 100.0)
+        self._update_hud(f"Book {book_title} successfully completed", 100.0)
         return True
 
     def _update_phase_progress(
@@ -925,7 +925,7 @@ class PipelineBatchRunner:
                     self.on_frame_update(composite_bgr, {
                         "path": str(preview_file),
                         "stage": "phase2",
-                        "title": f"OMR Пачка ({len(batch_crops_bgr)} станов)",
+                        "title": f"OMR Batch ({len(batch_crops_bgr)} staves)",
                     })
             except Exception:
                 pass
@@ -1056,8 +1056,8 @@ class PipelineBatchRunner:
             # Initial progress update
             p1_init_pct = round((pages_done_count / max(1, total_book_pages)) * 100.0, 1)
             p2_init_pct = round((stats["crops_done"] / max(1, stats["crops_cut"])) * 100.0, 1)
-            self._update_phase_progress("phase1", p1_init_pct, pages_done_count, total_book_pages, "running", f"Стр. {pages_done_count}/{total_book_pages}")
-            self._update_phase_progress("phase2", p2_init_pct, stats["crops_done"], stats["crops_cut"], "running", f"Станов: {stats['crops_done']}/{stats['crops_cut']}")
+            self._update_phase_progress("phase1", p1_init_pct, pages_done_count, total_book_pages, "running", f"Pages {pages_done_count}/{total_book_pages}")
+            self._update_phase_progress("phase2", p2_init_pct, stats["crops_done"], stats["crops_cut"], "running", f"Staves: {stats['crops_done']}/{stats['crops_cut']}")
 
             producer_done = threading.Event()
             thread_errors: List[Exception] = []
@@ -1116,12 +1116,12 @@ class PipelineBatchRunner:
                                 raw_md_file = masked_dir.parent / "3_raw_md" / f"page_{bp:04d}_raw.md"
                                 if not raw_md_file.is_file() or overwrite:
                                     raw_md_file.parent.mkdir(parents=True, exist_ok=True)
-                                    raw_md_file.write_text(f"## Страница {bp}\n\n<!-- Пропуск: {reason} -->\n", encoding="utf-8")
+                                    raw_md_file.write_text(f"## Page {bp}\n\n<!-- Skipped: {reason} -->\n", encoding="utf-8")
 
                                 pct_p1 = round((bp / max(1, total_book_pages)) * 100.0, 1)
-                                detail_msg = f"Стр. {bp}/{total_book_pages} • Пропуск: {reason}"
+                                detail_msg = f"Page {bp}/{total_book_pages} • Skipped: {reason}"
                                 self._update_phase_progress("phase1", pct_p1, bp, total_book_pages, "running", detail_msg)
-                                self._update_hud("Фазы 1-2: Потоковая нарезка и OMR", (bp / total_book_pages) * 25.0, detail_msg)
+                                self._update_hud("Phases 1-2: Streaming Slicing & OMR", (bp / total_book_pages) * 25.0, detail_msg)
                                 continue
 
                             masked_img, crops_data = self.layout_detector.mask_page(
@@ -1144,11 +1144,11 @@ class PipelineBatchRunner:
                                         "stage": "phase1",
                                         "book": pdf_path.stem,
                                         "page": bp,
-                                        "title": f"Стр. {bp} ({side}) — BBox разметка",
+                                        "title": f"Page {bp} ({side}) — BBox Layout",
                                     })
                             except Exception:
                                 pass
-                            self.log_event("YOLO", f"Стр. {bp} ({side}): найдено {len(crops_data)} станов")
+                            self.log_event("YOLO", f"Page {bp} ({side}): found {len(crops_data)} staves")
 
                             new_crops_to_enqueue = []
                             for crop in crops_data:
@@ -1175,15 +1175,15 @@ class PipelineBatchRunner:
                             self._write_checkpoint(pdf_path.stem, chk)
 
                             pct_p1 = round((bp / max(1, total_book_pages)) * 100.0, 1)
-                            detail_msg = f"Стр. {bp}/{total_book_pages} ({side}) • Вырезано: {len(crops_data)}"
+                            detail_msg = f"Page {bp}/{total_book_pages} ({side}) • Sliced: {len(crops_data)}"
                             self._update_phase_progress("phase1", pct_p1, bp, total_book_pages, "running", detail_msg)
-                            self._update_hud("Фазы 1-2: Потоковая нарезка и OMR", (bp / total_book_pages) * 25.0, detail_msg)
+                            self._update_hud("Phases 1-2: Streaming Slicing & OMR", (bp / total_book_pages) * 25.0, detail_msg)
 
                     if not self._stop_event.is_set() and not thread_errors:
                         chk["phases"]["slicing"]["completed"] = True
                         chk["phases"]["slicing"]["pages_done"] = total_book_pages
                         self._write_checkpoint(pdf_path.stem, chk)
-                        self._update_phase_progress("phase1", 100.0, total_book_pages, total_book_pages, "completed", f"Все {total_book_pages} стр. нарезаны")
+                        self._update_phase_progress("phase1", 100.0, total_book_pages, total_book_pages, "completed", f"All {total_book_pages} pages sliced")
                 except Exception as ex:
                     thread_errors.append(ex)
                 finally:
@@ -1241,7 +1241,7 @@ class PipelineBatchRunner:
                                     chk["phases"]["omr"]["crops_done"] = cd
                                     self._write_checkpoint(pdf_path.stem, chk)
                                     pct_p2 = round((cd / tc) * 100.0, 1)
-                                    omr_detail = f"Стан {cd}/{tc} (пачка {len(sub_batch)})"
+                                    omr_detail = f"Staff {cd}/{tc} (batch {len(sub_batch)})"
                                     self._update_phase_progress("phase2", pct_p2, cd, tc, "running", omr_detail)
                             break
 
@@ -1273,11 +1273,10 @@ class PipelineBatchRunner:
                             chk["phases"]["omr"]["crops_done"] = cd
                             self._write_checkpoint(pdf_path.stem, chk)
 
-                            self.log_event("OMR", f"Распознана пачка ({saved} станов, всего: {cd}/{tc})")
-
+                            self.log_event("OMR", f"Batch recognized ({saved} staves, total: {cd}/{tc})")
 
                             pct_p2 = round((cd / tc) * 100.0, 1)
-                            omr_detail = f"Стан {cd}/{tc} (пачка {len(batch)})"
+                            omr_detail = f"Staff {cd}/{tc} (batch {len(batch)})"
                             self._update_phase_progress("phase2", pct_p2, cd, tc, "running", omr_detail)
 
                     if not self._stop_event.is_set() and not thread_errors:
@@ -1287,9 +1286,9 @@ class PipelineBatchRunner:
                         chk["phases"]["omr"]["completed"] = True
                         self._write_checkpoint(pdf_path.stem, chk)
                         if final_total_crops > 0:
-                            self._update_phase_progress("phase2", 100.0, final_total_crops, final_total_crops, "completed", f"Все {final_total_crops} станов распознаны")
+                            self._update_phase_progress("phase2", 100.0, final_total_crops, final_total_crops, "completed", f"All {final_total_crops} staves recognized")
                         else:
-                            self._update_phase_progress("phase2", 100.0, 0, 0, "completed", "Нет станов для OMR")
+                            self._update_phase_progress("phase2", 100.0, 0, 0, "completed", "No staves for OMR")
                 except Exception as ex:
                     thread_errors.append(ex)
 
@@ -1353,8 +1352,8 @@ class PipelineBatchRunner:
                 chk["phases"]["slicing"]["completed"] = True
                 chk["phases"]["slicing"]["pages_done"] = total_book_pages
                 self._write_checkpoint(pdf_path.stem, chk)
-                self._update_phase_progress("phase1", 100.0, total_book_pages, total_book_pages, "completed", f"Все {total_book_pages} стр. готовы")
-                self._update_hud("Фаза 1/4: Нарезка уже выполнена на диске", 25.0, f"Все {total_book_pages} стр. готовы")
+                self._update_phase_progress("phase1", 100.0, total_book_pages, total_book_pages, "completed", f"All {total_book_pages} pages ready")
+                self._update_hud("Phase 1/4: Slicing already completed on disk", 25.0, f"All {total_book_pages} pages ready")
                 return True
 
             if self.layout_detector is None:
@@ -1428,13 +1427,13 @@ class PipelineBatchRunner:
                         raw_md_file = masked_dir.parent / "3_raw_md" / f"page_{bp:04d}_raw.md"
                         if not raw_md_file.is_file() or overwrite:
                             raw_md_file.parent.mkdir(parents=True, exist_ok=True)
-                            raw_md_file.write_text(f"## Страница {bp}\n\n<!-- Пропуск: {reason} -->\n", encoding="utf-8")
+                            raw_md_file.write_text(f"## Page {bp}\n\n<!-- Skipped: {reason} -->\n", encoding="utf-8")
 
                         pct_p1 = round((bp / max(1, total_book_pages)) * 100.0, 1)
-                        detail_msg = f"Стр. {bp}/{total_book_pages} • Пропуск: {reason}"
+                        detail_msg = f"Page {bp}/{total_book_pages} • Skipped: {reason}"
                         self._update_phase_progress("phase1", pct_p1, bp, total_book_pages, "running", detail_msg)
                         self._update_hud(
-                            "Фаза 1/4: Нарезка и маскирование",
+                            "Phase 1/4: Slicing and masking",
                             (bp / total_book_pages) * 25.0,
                             detail_msg,
                         )
@@ -1464,15 +1463,15 @@ class PipelineBatchRunner:
                     self._write_checkpoint(pdf_path.stem, chk)
 
                     pct_p1 = round((bp / max(1, total_book_pages)) * 100.0, 1)
-                    detail_msg = f"Стр. {bp}/{total_book_pages} ({side}) • Вырезано станов: {len(crops_data)}"
+                    detail_msg = f"Page {bp}/{total_book_pages} ({side}) • Sliced staves: {len(crops_data)}"
                     self._update_phase_progress("phase1", pct_p1, bp, total_book_pages, "running", detail_msg)
                     self._update_hud(
-                        "Фаза 1/4: Нарезка и маскирование",
+                        "Phase 1/4: Slicing and masking",
                         (bp / total_book_pages) * 25.0,
                         detail_msg,
                     )
 
-        self._update_phase_progress("phase1", 100.0, total_book_pages, total_book_pages, "completed", f"Все {total_book_pages} стр. нарезаны")
+        self._update_phase_progress("phase1", 100.0, total_book_pages, total_book_pages, "completed", f"All {total_book_pages} pages sliced")
         return True
 
     # ---------------- Phase 2 Implementation ---------------- #
@@ -1487,7 +1486,7 @@ class PipelineBatchRunner:
 
         if total_crops == 0:
             chk["phases"]["omr"]["completed"] = True
-            self._update_phase_progress("phase2", 100.0, 0, 0, "completed", "Нет станов для OMR")
+            self._update_phase_progress("phase2", 100.0, 0, 0, "completed", "No staves for OMR")
             return True
 
         existing_valid_abcs = set()
@@ -1500,8 +1499,8 @@ class PipelineBatchRunner:
             chk["phases"]["omr"]["completed"] = True
             chk["phases"]["omr"]["crops_done"] = total_crops
             self._write_checkpoint(crops_dir.parent.name, chk)
-            self._update_phase_progress("phase2", 100.0, total_crops, total_crops, "completed", f"Все {total_crops} станов готовы")
-            self._update_hud("Фаза 2/4: OMR уже выполнен на диске", 50.0, f"Все {total_crops} станов готовы")
+            self._update_phase_progress("phase2", 100.0, total_crops, total_crops, "completed", f"All {total_crops} staves ready")
+            self._update_hud("Phase 2/4: OMR already completed on disk", 50.0, f"All {total_crops} staves ready")
             return True
 
         if self.omr_engine is None:
@@ -1537,15 +1536,15 @@ class PipelineBatchRunner:
 
             curr_idx = min(total_crops, len(existing_valid_abcs) + b_start + len(batch_files))
             pct_p2 = round((curr_idx / max(1, total_crops)) * 100.0, 1)
-            detail_msg = f"Стан {curr_idx}/{total_crops} [batch={len(batch_files)}]"
+            detail_msg = f"Staff {curr_idx}/{total_crops} [batch={len(batch_files)}]"
             self._update_phase_progress("phase2", pct_p2, curr_idx, total_crops, "running", detail_msg)
             self._update_hud(
-                "Фаза 2/4: Распознавание нот (OMR)",
+                "Phase 2/4: Music recognition (OMR)",
                 25.0 + (curr_idx / max(1, total_crops)) * 25.0,
                 detail_msg,
             )
 
-        self._update_phase_progress("phase2", 100.0, total_crops, total_crops, "completed", f"Все {total_crops} станов распознаны")
+        self._update_phase_progress("phase2", 100.0, total_crops, total_crops, "completed", f"All {total_crops} staves recognized")
         chk["phases"]["omr"]["completed"] = True
         self._write_checkpoint(crops_dir.parent.name, chk)
         return True
@@ -1561,7 +1560,7 @@ class PipelineBatchRunner:
 
         if total_masks == 0:
             chk["phases"]["vlm"]["completed"] = True
-            self._update_phase_progress("phase3", 100.0, 0, 0, "completed", "Нет страниц для VLM")
+            self._update_phase_progress("phase3", 100.0, 0, 0, "completed", "No pages for VLM")
             return True
 
         existing_valid_mds = set()
@@ -1570,7 +1569,7 @@ class PipelineBatchRunner:
                 if f.stat().st_size > 0:
                     try:
                         content = f.read_text(encoding="utf-8", errors="replace")
-                        if "<!-- LM_STUDIO_ERROR" in content or "[Текст не распознан" in content:
+                        if "<!-- LM_STUDIO_ERROR" in content or "[Text not recognized" in content:
                             continue
                     except Exception:
                         continue
@@ -1582,8 +1581,8 @@ class PipelineBatchRunner:
             chk["phases"]["vlm"]["completed"] = True
             chk["phases"]["vlm"]["pages_done"] = total_masks
             self._write_checkpoint(masked_dir.parent.name, chk)
-            self._update_phase_progress("phase3", 100.0, total_masks, total_masks, "completed", f"Все {total_masks} стр. готовы")
-            self._update_hud("Фаза 3/4: Текст VLM уже извлечен на диске", 90.0, f"Все {total_masks} стр. готовы")
+            self._update_phase_progress("phase3", 100.0, total_masks, total_masks, "completed", f"All {total_masks} pages ready")
+            self._update_hud("Phase 3/4: VLM text already extracted on disk", 90.0, f"All {total_masks} pages ready")
             return True
 
         # Check if VLM is explicitly skipped by configuration
@@ -1592,22 +1591,22 @@ class PipelineBatchRunner:
             chk["phases"]["vlm"]["completed"] = True
             chk["phases"]["vlm"]["pages_done"] = total_masks
             self._write_checkpoint(masked_dir.parent.name, chk)
-            self._update_phase_progress("phase3", 100.0, total_masks, total_masks, "skipped", "Пропущено (skip_vlm=True)")
-            self._update_hud("Фаза 3/4: VLM OCR пропущен (skip_vlm=True)", 90.0, "Текстовый VLM отключен в настройках")
+            self._update_phase_progress("phase3", 100.0, total_masks, total_masks, "skipped", "Skipped (skip_vlm=True)")
+            self._update_hud("Phase 3/4: VLM OCR skipped (skip_vlm=True)", 90.0, "Text VLM disabled in settings")
             return True
 
         # Check VLM backend choice
         vlm_backend = self.config.get("vlm_backend", "embedded")
         if vlm_backend == "embedded":
             if not self.embedded_runner.is_server_ready():
-                self.log_event("VLM", "Проверка локальных весов модели Qwen...")
+                self.log_event("VLM", "Checking local Qwen model weights...")
                 m_info = self.model_manager.resolve_model_files(
                     repo=self.config.get("vlm_model_repo", "lmstudio-community/Qwen3.5-9B-GGUF"),
                     model_file=self.config.get("vlm_model_file", "Qwen3.5-9B-Q4_K_M.gguf"),
                     mmproj_file=self.config.get("vlm_mmproj_file", "mmproj-Qwen3.5-9B-BF16.gguf"),
                 )
                 if m_info["ready"]:
-                    self.log_event("VLM", "Запуск автономного VLM сервера llama-server...")
+                    self.log_event("VLM", "Starting standalone llama-server VLM...")
                     port_cfg = int(self.config.get("vlm_embedded_port", 1234))
                     started = self.embedded_runner.start(
                         model_path=m_info["model_path"],
@@ -1620,18 +1619,18 @@ class PipelineBatchRunner:
                     if started:
                         self.lm_client.port = str(self.embedded_runner.port)
                     else:
-                        self.log_event("WARN", "Не удалось запустить автономный llama-server, проверка порта 1234...")
+                        self.log_event("WARN", "Failed to start standalone llama-server, checking port 1234...")
                 else:
-                    self.log_event("WARN", "Веса VLM не найдены на диске. Требуется загрузка или запуск LM Studio.")
+                    self.log_event("WARN", "VLM weights not found on disk. Download or LM Studio start required.")
 
         # Check LM Studio / llama-server availability
         is_online, msg = self.lm_client.check_connection()
         if not is_online:
             with self._lock:
-                self.metrics["last_log"] = f"VLM сервер недоступен: {msg}"
-            self.log_event("WARN", f"VLM сервер недоступен: {msg}. Запуск fallback...")
+                self.metrics["last_log"] = f"VLM server unavailable: {msg}"
+            self.log_event("WARN", f"VLM server unavailable: {msg}. Running fallback...")
             ok = self._vlm_fallback_mode(mask_files, raw_md_dir, chk)
-            self._update_phase_progress("phase3", 100.0, total_masks, total_masks, "completed", "Сформировано (fallback)")
+            self._update_phase_progress("phase3", 100.0, total_masks, total_masks, "completed", "Generated (fallback)")
             return ok
 
         # If backend is LM Studio, attempt explicit model loading
@@ -1646,7 +1645,7 @@ class PipelineBatchRunner:
                     parallel=int(self.config.get("qwen_parallel", 1)),
                 )
             except Exception as e:
-                self.log_event("WARN", f"Предупреждение при загрузке модели: {e}")
+                self.log_event("WARN", f"Warning during model loading: {e}")
 
         system_prompt = self.config.get("system_prompt", DEFAULT_CONFIG["system_prompt"])
         vlm_done_count = len(existing_valid_mds)
@@ -1685,15 +1684,15 @@ class PipelineBatchRunner:
                         "stage": "phase3",
                         "book": masked_dir.parent.name,
                         "page": p_val,
-                        "title": f"Стр. {p_val} — VLM маскированная страница",
+                        "title": f"Page {p_val} — VLM masked page",
                     })
             except Exception:
                 pass
 
             # Blank page check: zero music staves and pure white unprinted paper
             if len(page_stubs) == 0 and self._is_blank_image(mask_file):
-                self.log_event("VLM", f"Стр. {p_num}: пустая страница (пропуск VLM)")
-                blank_txt = f"## Страница {p_val}\n\n<!-- Пустая страница -->\n"
+                self.log_event("VLM", f"Page {p_num}: blank page (VLM skipped)")
+                blank_txt = f"## Page {p_val}\n\n<!-- Blank page -->\n"
                 raw_md_file.write_text(blank_txt, encoding="utf-8")
                 with self._lock:
                     self.metrics["current_vlm_text"] = blank_txt
@@ -1711,9 +1710,9 @@ class PipelineBatchRunner:
                 chk["phases"]["vlm"]["pages_done"] = vlm_done_count
                 self._write_checkpoint(masked_dir.parent.name, chk)
                 pct_p3 = round((m_idx / max(1, total_masks)) * 100.0, 1)
-                detail_msg = f"Стр. {m_idx}/{total_masks} (Пустая страница)"
+                detail_msg = f"Page {m_idx}/{total_masks} (Blank page)"
                 self._update_phase_progress("phase3", pct_p3, m_idx, total_masks, "running", detail_msg)
-                self._update_hud("Фаза 3/4: Текстовый VLM проход", 55.0 + (m_idx / total_masks) * 35.0, detail_msg)
+                self._update_hud("Phase 3/4: Text VLM pass", 55.0 + (m_idx / total_masks) * 35.0, detail_msg)
                 continue
 
             # Notify UI that image analysis is in progress for page p_val (without wiping previous page preview)
@@ -1764,7 +1763,7 @@ class PipelineBatchRunner:
                     self.metrics["current_vlm_text"] = sanitized_text
                     self.metrics["current_page_image_path"] = str(mask_file)
 
-                self.log_event("VLM", f"Стр. {p_num}: {tok_count} токенов ({tok_per_sec:.1f} tok/s, {duration:.1f}s)")
+                self.log_event("VLM", f"Page {p_num}: {tok_count} tokens ({tok_per_sec:.1f} tok/s, {duration:.1f}s)")
                 raw_md_file.write_text(sanitized_text, encoding="utf-8")
 
                 if self.on_text_update is not None:
@@ -1783,11 +1782,11 @@ class PipelineBatchRunner:
                             raw_md_file.unlink()
                         except Exception:
                             pass
-                    self.log_event("SYSTEM", f"Стр. {p_num}: распознавание остановлено пользователем")
+                    self.log_event("SYSTEM", f"Page {p_num}: recognition stopped by user")
                     return False
 
-                self.log_event("ERROR", f"Стр. {p_num}: ошибка VLM ({str(e)})", level="ERROR")
-                fallback_txt = f"<!-- LM_STUDIO_ERROR: {str(e)} -->\n\n## Страница {int(p_num)}\n\n[Текст не распознан: ошибка связи с VLM]\n"
+                self.log_event("ERROR", f"Page {p_num}: VLM error ({str(e)})", level="ERROR")
+                fallback_txt = f"<!-- LM_STUDIO_ERROR: {str(e)} -->\n\n## Page {int(p_num)}\n\n[Text not recognized: VLM connection error]\n"
                 raw_md_file.write_text(fallback_txt, encoding="utf-8")
                 if self.on_text_update is not None:
                     self.on_text_update({
@@ -1804,15 +1803,15 @@ class PipelineBatchRunner:
             self._write_checkpoint(masked_dir.parent.name, chk)
 
             pct_p3 = round((m_idx / max(1, total_masks)) * 100.0, 1)
-            detail_msg = f"Стр. {m_idx}/{total_masks} (Qwen VLM через LM Studio)"
+            detail_msg = f"Page {m_idx}/{total_masks} (Qwen VLM)"
             self._update_phase_progress("phase3", pct_p3, m_idx, total_masks, "running", detail_msg)
             self._update_hud(
-                "Фаза 3/4: Текстовый VLM проход",
+                "Phase 3/4: Text VLM pass",
                 55.0 + (m_idx / total_masks) * 35.0,
                 detail_msg,
             )
 
-        self._update_phase_progress("phase3", 100.0, total_masks, total_masks, "completed", f"Все {total_masks} стр. обработаны VLM")
+        self._update_phase_progress("phase3", 100.0, total_masks, total_masks, "completed", f"All {total_masks} pages processed by VLM")
         chk["phases"]["vlm"]["completed"] = True
         self._write_checkpoint(masked_dir.parent.name, chk)
         return True
@@ -1834,12 +1833,12 @@ class PipelineBatchRunner:
                         if not f.name.endswith("_deskew.png")
                     ])
 
-                lines = [f"## Страница {int(p_num)}\n"]
+                lines = [f"## Page {int(p_num)}\n"]
                 if stubs:
                     for stub_id in stubs:
                         lines.append(f"<!-- MUSIC_STUB_ID:{stub_id} -->\n")
                 else:
-                    lines.append("<!-- Страница без нотного материала -->\n")
+                    lines.append("<!-- Page contains no musical material -->\n")
 
                 raw_md_file.write_text("\n".join(lines), encoding="utf-8")
         return True
@@ -1853,12 +1852,12 @@ class PipelineBatchRunner:
         complete_book_file = book_dir / f"{book_dir.name}_complete.md"
         if not overwrite and complete_book_file.is_file() and complete_book_file.stat().st_size > 0:
             chk["phases"]["assembly"]["completed"] = True
-            self._update_phase_progress("phase4", 100.0, 1, 1, "completed", "Издание уже собрано на диске")
+            self._update_phase_progress("phase4", 100.0, 1, 1, "completed", "Book already assembled on disk")
             return True
 
         raw_files = sorted(raw_md_dir.glob("page_*_raw.md"))
         total_raw = len(raw_files)
-        self._update_phase_progress("phase4", 10.0, 0, total_raw, "running", "Сборка Markdown страниц...")
+        self._update_phase_progress("phase4", 10.0, 0, total_raw, "running", "Assembling Markdown pages...")
 
         all_pages_content = []
         injected_stubs = set()
@@ -1886,7 +1885,7 @@ class PipelineBatchRunner:
 
             if blocks:
                 return "\n\n" + "\n\n".join(blocks) + "\n\n"
-            return f"\n\n<!-- MUSIC_STUB_ID:{cid} (Ноты не найдены, ожидают OMR) -->\n\n"
+            return f"\n\n<!-- MUSIC_STUB_ID:{cid} (Notes not found, awaiting OMR) -->\n\n"
 
         for r_idx, r_file in enumerate(raw_files, start=1):
             p_num_str = re.search(r"page_(\d+)_raw", r_file.stem)
@@ -1937,13 +1936,13 @@ class PipelineBatchRunner:
             all_pages_content.append(f"<!-- PAGE {p_num} -->\n" + final_text)
 
             pct_p4 = round(10.0 + (r_idx / max(1, total_raw)) * 80.0, 1)
-            self._update_phase_progress("phase4", pct_p4, r_idx, total_raw, "running", f"Сборка стр. {p_num} ({r_idx}/{total_raw})")
+            self._update_phase_progress("phase4", pct_p4, r_idx, total_raw, "running", f"Assembling page {p_num} ({r_idx}/{total_raw})")
 
         full_content = "\n\n---\n\n".join(all_pages_content)
         complete_book_file.write_text(full_content, encoding="utf-8")
         chk["phases"]["assembly"]["completed"] = True
-        self._update_phase_progress("phase4", 100.0, total_raw, total_raw, "completed", f"Издание {book_dir.name} собрано")
-        self.log_event("ASSEMBLY", f"Издание {book_dir.name} успешно собрано ({total_raw} стр.)")
+        self._update_phase_progress("phase4", 100.0, total_raw, total_raw, "completed", f"Edition {book_dir.name} assembled")
+        self.log_event("ASSEMBLY", f"Edition {book_dir.name} successfully assembled ({total_raw} pages)")
         return True
 
     @staticmethod

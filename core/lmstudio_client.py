@@ -58,16 +58,16 @@ class LMStudioClient:
         try:
             res = self._get("/api/v1/models", timeout=5)
             models = res.get("models", [])
-            return True, f"Сервер доступен (моделей в списке: {len(models)})"
+            return True, f"Server reachable ({len(models)} models available)"
         except Exception:
             try:
                 res = self._get("/v1/models", timeout=5)
                 models = res.get("data", [])
-                return True, f"VLM сервер доступен (моделей в списке: {len(models)})"
+                return True, f"VLM server reachable ({len(models)} models available)"
             except urllib.error.URLError as e:
-                return False, f"Ошибка подключения к {self.base_url}: {e.reason}"
+                return False, f"Connection error to {self.base_url}: {e.reason}"
             except Exception as e:
-                return False, f"Не удалось связаться с сервером: {str(e)}"
+                return False, f"Failed to connect to server: {str(e)}"
 
     def list_models(self) -> List[Dict[str, Any]]:
         """
@@ -234,7 +234,7 @@ class LMStudioClient:
                     {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": "Распознай печатный текст на этой странице."},
+                            {"type": "text", "text": "Recognize printed text and music annotations on this page."},
                             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
                         ],
                     },
@@ -282,7 +282,7 @@ class LMStudioClient:
                     "model": target_model,
                     "system_prompt": system_prompt,
                     "input": [
-                        {"type": "text", "content": "Распознай печатный текст на этой странице."},
+                        {"type": "text", "content": "Recognize printed text and music annotations on this page."},
                         {"type": "image", "data_url": f"data:image/jpeg;base64,{b64}"},
                     ],
                     "reasoning": "off",
@@ -304,7 +304,7 @@ class LMStudioClient:
                         {
                             "role": "user",
                             "content": [
-                                {"type": "text", "text": "Распознай печатный текст на этой странице."},
+                                {"type": "text", "text": "Recognize printed text and music annotations on this page."},
                                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
                             ],
                         },

@@ -151,7 +151,7 @@ class EmbeddedLlamaRunner:
             server_bin = find_llama_server_binary()
             if not server_bin or not server_bin.is_file():
                 if self.log_callback:
-                    self.log_callback("ERROR", "Исполняемый файл llama-server.exe не найден на системе")
+                    self.log_callback("ERROR", "llama-server.exe executable not found on system")
                 return False
 
             if port is not None:
@@ -161,7 +161,7 @@ class EmbeddedLlamaRunner:
             if self.is_server_ready():
                 self.is_running = True
                 if self.log_callback:
-                    self.log_callback("VLM", f"Подключение к существующему VLM серверу на порту {self.port}")
+                    self.log_callback("VLM", f"Connecting to existing VLM server on port {self.port}")
                 return True
 
             # Ensure port is free
@@ -187,7 +187,7 @@ class EmbeddedLlamaRunner:
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
 
             if self.log_callback:
-                self.log_callback("VLM", f"Запуск автономного llama-server (порт {self.port}, context {context_length})")
+                self.log_callback("VLM", f"Starting standalone llama-server (port {self.port}, context {context_length})")
 
             # Launch headless subprocess without showing black console window on Windows
             startupinfo = None
@@ -217,12 +217,12 @@ class EmbeddedLlamaRunner:
             if self._proc.poll() is not None:
                 self.is_running = False
                 if self.log_callback:
-                    self.log_callback("ERROR", f"llama-server завершился с кодом {self._proc.returncode}")
+                    self.log_callback("ERROR", f"llama-server terminated with exit code {self._proc.returncode}")
                 return False
 
             if self.is_server_ready(timeout_sec=0.5):
                 if self.log_callback:
-                    self.log_callback("VLM", f"VLM сервер готов к обработке на http://{self.host}:{self.port}")
+                    self.log_callback("VLM", f"VLM server ready on http://{self.host}:{self.port}")
                 return True
             time.sleep(0.5)
 
@@ -234,7 +234,7 @@ class EmbeddedLlamaRunner:
             if self._proc:
                 try:
                     if self.log_callback:
-                        self.log_callback("VLM", "Остановка VLM сервера и освобождение VRAM...")
+                        self.log_callback("VLM", "Stopping VLM server and releasing VRAM...")
                     self._proc.terminate()
                     try:
                         self._proc.wait(timeout=3.0)

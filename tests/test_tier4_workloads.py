@@ -246,7 +246,7 @@ class TestTier4Workloads(unittest.TestCase):
 
         p1_raw = (raw_md_dir / "page_0001_raw.md").read_text(encoding="utf-8")
         p2_raw = (raw_md_dir / "page_0002_raw.md").read_text(encoding="utf-8")
-        self.assertIn("Страница без нотного материала", p1_raw)
+        self.assertIn("Page contains no musical material", p1_raw)
         self.assertIn(f"<!-- MUSIC_STUB_ID:{stub_id} -->", p2_raw)
 
         # Run Assembly

@@ -39,7 +39,7 @@ class PhaseRow(QWidget):
         hl.setSpacing(8)
 
         # Step badge
-        self.num_badge = QLabel(f"ФАЗА {step_num}", h_row)
+        self.num_badge = QLabel(f"PHASE {step_num}", h_row)
         self.num_badge.setStyleSheet("""
             QLabel {
                 background-color: #1e293b;
@@ -60,7 +60,7 @@ class PhaseRow(QWidget):
         hl.addStretch()
 
         # Status badge
-        self.status_pill = QLabel("В очереди", h_row)
+        self.status_pill = QLabel("Queued", h_row)
         self.status_pill.setStyleSheet("""
             QLabel {
                 background-color: #0f172a;
@@ -93,10 +93,10 @@ class PhaseRow(QWidget):
         if detail:
             self.detail_label.setText(detail)
         elif total > 0:
-            self.detail_label.setText(f"{done} из {total} ({pct:.1f}%)")
+            self.detail_label.setText(f"{done} of {total} ({pct:.1f}%)")
 
         if status == "running":
-            self.status_pill.setText("Выполняется...")
+            self.status_pill.setText("Running...")
             self.status_pill.setStyleSheet("""
                 QLabel {
                     background-color: #0284c7;
@@ -108,7 +108,7 @@ class PhaseRow(QWidget):
                 }
             """)
         elif status == "finished" or pct >= 100.0:
-            self.status_pill.setText("Готово")
+            self.status_pill.setText("Done")
             self.status_pill.setStyleSheet("""
                 QLabel {
                     background-color: #166534;
@@ -120,7 +120,7 @@ class PhaseRow(QWidget):
                 }
             """)
         elif status == "skipped":
-            self.status_pill.setText("Пропущено")
+            self.status_pill.setText("Skipped")
             self.status_pill.setStyleSheet("""
                 QLabel {
                     background-color: #334155;
@@ -132,7 +132,7 @@ class PhaseRow(QWidget):
                 }
             """)
         else:
-            self.status_pill.setText("В очереди")
+            self.status_pill.setText("Queued")
             self.status_pill.setStyleSheet("""
                 QLabel {
                     background-color: #0f172a;
@@ -155,20 +155,20 @@ class StageProgressWidget(CardWidget):
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(10)
 
-        header = CaptionLabel("ЭТАПЫ КОНВЕЙЕРА ОБРАБОТКИ", self)
+        header = CaptionLabel("PIPELINE PROCESSING STAGES", self)
         header.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 700; text-transform: uppercase;")
         layout.addWidget(header)
 
-        self.row1 = PhaseRow(1, "Нарезка и YOLO OLA", "Сплит разворота, 2D-DFT дескев, детекция станов", self)
+        self.row1 = PhaseRow(1, "Slicing & YOLO OLA", "Spread split, 2D-DFT deskew, staff detection", self)
         layout.addWidget(self.row1)
 
-        self.row2 = PhaseRow(2, "Распознавание нот (OMR)", "Мини-батчинг Transcoda-59M в ABC и Humdrum", self)
+        self.row2 = PhaseRow(2, "Music Recognition (OMR)", "Mini-batched Transcoda-59M to ABC & Humdrum", self)
         layout.addWidget(self.row2)
 
-        self.row3 = PhaseRow(3, "Инференс нейросети (VLM)", "Qwen3.5-9B OCR печатного текста и стабов", self)
+        self.row3 = PhaseRow(3, "Neural Inference (VLM)", "Qwen3.5-9B OCR printed text and stubs", self)
         layout.addWidget(self.row3)
 
-        self.row4 = PhaseRow(4, "Сборка Markdown", "Инъекция нотных блоков и сохранение книги", self)
+        self.row4 = PhaseRow(4, "Markdown Assembly", "Music block injection & edition export", self)
         layout.addWidget(self.row4)
 
     def update_phases(self, phase_data: Dict[str, Any]) -> None:

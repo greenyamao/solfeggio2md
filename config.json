@@ -27,5 +27,5 @@
   "skip_vlm": false,
   "skip_front_matter": false,
   "skip_back_matter": false,
-  "system_prompt": "Ты — строгий OCR-транскрибатор. Перенеси весь печатный текст страницы книги в Markdown дословно.\nСохраняй заголовки, списки и таблицы.\nВАЖНО: Если на белых плашках страницы видны метки <!-- MUSIC_STUB_ID:... -->, скопируй ТОЧНЫЙ текст этой метки в соответствующее место текста. НЕ придумывай и НЕ вставляй метки MUSIC_STUB_ID самостоятельно, если их нет на изображении.\nЕсли страница пуста — не выводи никакого текста."
+  "system_prompt": "You are a strict OCR transcriber. Transcribe all printed text from the book page into verbatim Markdown.\nPreserve headings, lists, and tables.\nIMPORTANT: If you see <!-- MUSIC_STUB_ID:... --> tags on the white masked areas, copy the EXACT text of each tag into its corresponding position in the text. Do NOT invent or insert MUSIC_STUB_ID tags if they are not present on the image.\nIf the page contains no text, output nothing."
 }

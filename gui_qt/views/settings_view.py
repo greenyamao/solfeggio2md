@@ -76,7 +76,7 @@ class SettingsView(QWidget):
         main_layout.setContentsMargins(16, 12, 16, 12)
         main_layout.setSpacing(12)
 
-        title = SubtitleLabel("ПАРАМЕТРЫ И МОДЕЛИ НЕЙРОСЕТИ", self)
+        title = SubtitleLabel("SETTINGS & NEURAL MODELS", self)
         title.setStyleSheet("color: #f8fafc; font-size: 16px; font-weight: 700;")
         main_layout.addWidget(title)
 
@@ -102,7 +102,7 @@ class SettingsView(QWidget):
         sb_layout.setContentsMargins(12, 10, 12, 10)
         sb_layout.addStretch()
 
-        self.btn_save = PrimaryPushButton(FluentIcon.SAVE, "Сохранить параметры", save_bar)
+        self.btn_save = PrimaryPushButton(FluentIcon.SAVE, "Save Settings", save_bar)
         self.btn_save.clicked.connect(self._save_settings)
         sb_layout.addWidget(self.btn_save)
 
@@ -118,7 +118,7 @@ class SettingsView(QWidget):
         layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(10)
 
-        head = CaptionLabel("ДВИЖОК НЕЙРОСЕТИ VLM (VISION-LANGUAGE MODEL)", card)
+        head = CaptionLabel("VLM ENGINE (VISION-LANGUAGE MODEL)", card)
         head.setStyleSheet("color: #38bdf8; font-weight: 700; font-size: 11px;")
         layout.addWidget(head)
 
@@ -127,32 +127,32 @@ class SettingsView(QWidget):
 
         # Backend Selector
         self.combo_backend = ComboBox(card)
-        self.combo_backend.addItem("Встроенный llama-server (Рекомендуется, чисто кодом)")
-        self.combo_backend.addItem("Внешний сервер LM Studio")
+        self.combo_backend.addItem("Embedded llama-server (Recommended, native subprocess)")
+        self.combo_backend.addItem("External LM Studio Server")
         cur_backend = self.config.get("vlm_backend", "embedded")
         self.combo_backend.setCurrentIndex(0 if cur_backend == "embedded" else 1)
-        form.addRow("Режим инференса:", self.combo_backend)
+        form.addRow("Inference Mode:", self.combo_backend)
 
         # Model Repo
         self.edit_repo = LineEdit(card)
         self.edit_repo.setText(self.config.get("vlm_model_repo", "lmstudio-community/Qwen3.5-9B-GGUF"))
-        form.addRow("Hugging Face Репозиторий:", self.edit_repo)
+        form.addRow("Hugging Face Repository:", self.edit_repo)
 
         # GGUF Model File
         self.edit_model = LineEdit(card)
         self.edit_model.setText(self.config.get("vlm_model_file", "Qwen3.5-9B-Q4_K_M.gguf"))
-        form.addRow("Имя файла весов (.gguf):", self.edit_model)
+        form.addRow("Weight Filename (.gguf):", self.edit_model)
 
         # mmproj File
         self.edit_mmproj = LineEdit(card)
         self.edit_mmproj.setText(self.config.get("vlm_mmproj_file", "mmproj-Qwen3.5-9B-BF16.gguf"))
-        form.addRow("Мультимодальный проектор:", self.edit_mmproj)
+        form.addRow("Multimodal Projector:", self.edit_mmproj)
 
         # Port
         self.spin_port = SpinBox(card)
         self.spin_port.setRange(1000, 65535)
         self.spin_port.setValue(int(self.config.get("vlm_embedded_port", 1234)))
-        form.addRow("Порт локального сервера:", self.spin_port)
+        form.addRow("Local Server Port:", self.spin_port)
 
         layout.addLayout(form)
 
@@ -163,16 +163,16 @@ class SettingsView(QWidget):
         layout.addWidget(sep)
 
         dl_header = QHBoxLayout()
-        self.lbl_model_status = QLabel("Проверка файлов модели...", card)
+        self.lbl_model_status = QLabel("Checking model files...", card)
         self.lbl_model_status.setStyleSheet("color: #38bdf8; font-weight: 600; font-size: 12px;")
         dl_header.addWidget(self.lbl_model_status)
         dl_header.addStretch()
 
-        self.btn_download = PrimaryPushButton(FluentIcon.DOWNLOAD, "Скачать с Hugging Face", card)
+        self.btn_download = PrimaryPushButton(FluentIcon.DOWNLOAD, "Download from Hugging Face", card)
         self.btn_download.clicked.connect(self._on_download_clicked)
         dl_header.addWidget(self.btn_download)
 
-        self.btn_cancel_dl = PushButton("Отмена", card)
+        self.btn_cancel_dl = PushButton("Cancel", card)
         self.btn_cancel_dl.setEnabled(False)
         self.btn_cancel_dl.clicked.connect(self._on_cancel_download_clicked)
         dl_header.addWidget(self.btn_cancel_dl)
@@ -185,7 +185,7 @@ class SettingsView(QWidget):
         self.dl_progress_bar.setFixedHeight(8)
         layout.addWidget(self.dl_progress_bar)
 
-        self.lbl_dl_detail = CaptionLabel("Готов к скачиванию", card)
+        self.lbl_dl_detail = CaptionLabel("Ready to download", card)
         self.lbl_dl_detail.setStyleSheet("color: #94a3b8; font-size: 11px;")
         layout.addWidget(self.lbl_dl_detail)
 
@@ -197,7 +197,7 @@ class SettingsView(QWidget):
         layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(10)
 
-        head = CaptionLabel("ПАРАМЕТРЫ ПРОИЗВОДИТЕЛЬНОСТИ И ОБРАБОТКИ", card)
+        head = CaptionLabel("PERFORMANCE & PROCESSING SETTINGS", card)
         head.setStyleSheet("color: #38bdf8; font-weight: 700; font-size: 11px;")
         layout.addWidget(head)
 
@@ -208,34 +208,34 @@ class SettingsView(QWidget):
         self.spin_context.setRange(2048, 32768)
         self.spin_context.setSingleStep(512)
         self.spin_context.setValue(int(self.config.get("qwen_context_length", 4096)))
-        form.addRow("Контекст токенов (4096):", self.spin_context)
+        form.addRow("Token Context (4096):", self.spin_context)
 
         self.spin_max_dim = SpinBox(card)
         self.spin_max_dim.setRange(1024, 2560)
         self.spin_max_dim.setSingleStep(100)
         self.spin_max_dim.setValue(int(self.config.get("vlm_max_dim", 1600)))
-        form.addRow("Лимит размера кадра VLM (1600 px):", self.spin_max_dim)
+        form.addRow("VLM Max Frame Dimension (1600 px):", self.spin_max_dim)
 
         self.spin_dpi = SpinBox(card)
         self.spin_dpi.setRange(100, 400)
         self.spin_dpi.setSingleStep(25)
         self.spin_dpi.setValue(int(self.config.get("dpi", 200)))
-        form.addRow("DPI рендеринга PDF (200):", self.spin_dpi)
+        form.addRow("PDF Rendering DPI (200):", self.spin_dpi)
 
         self.spin_smt_tokens = SpinBox(card)
         self.spin_smt_tokens.setRange(128, 1024)
         self.spin_smt_tokens.setSingleStep(64)
         self.spin_smt_tokens.setValue(int(self.config.get("smt_max_tokens", 512)))
-        form.addRow("Лимит токенов OMR (512):", self.spin_smt_tokens)
+        form.addRow("OMR Max Tokens (512):", self.spin_smt_tokens)
 
         # Switches
-        self.sw_skip_vlm = SwitchButton("Пропустить VLM (только ноты и OMR)", card)
+        self.sw_skip_vlm = SwitchButton("Skip VLM (Music and OMR only)", card)
         self.sw_skip_vlm.setChecked(bool(self.config.get("skip_vlm", False)))
-        form.addRow("Быстрый OMR режим:", self.sw_skip_vlm)
+        form.addRow("Fast OMR Mode:", self.sw_skip_vlm)
 
-        self.sw_skip_front = SwitchButton("Пропускать оглавление/вводную часть", card)
+        self.sw_skip_front = SwitchButton("Skip Front-matter / TOC", card)
         self.sw_skip_front.setChecked(bool(self.config.get("skip_front_matter", True)))
-        form.addRow("Фильтр разделов:", self.sw_skip_front)
+        form.addRow("Section Filter:", self.sw_skip_front)
 
         layout.addLayout(form)
         return card
@@ -261,10 +261,10 @@ class SettingsView(QWidget):
             tot_f = dl_state.get("total_files", 2)
 
             self.dl_progress_bar.setValue(int(pct))
-            self.lbl_model_status.setText(f"Скачивание файла {f_idx}/{tot_f}: {cur_f}")
+            self.lbl_model_status.setText(f"Downloading file {f_idx}/{tot_f}: {cur_f}")
             self.lbl_model_status.setStyleSheet("color: #38bdf8; font-weight: 600;")
             self.lbl_dl_detail.setText(
-                f"Прогресс: {pct:.1f}% | Скорость: {spd:.1f} МБ/с | Осталось: ~{int(eta)} с"
+                f"Progress: {pct:.1f}% | Speed: {spd:.1f} MB/s | ETA: ~{int(eta)} s"
             )
             return
 
@@ -288,16 +288,16 @@ class SettingsView(QWidget):
         self.btn_download.setEnabled(True)
         if st.get("ready", False):
             self._last_status_ready = True
-            self.lbl_model_status.setText("Файлы модели найдены и готовы к работе")
+            self.lbl_model_status.setText("Model files found and ready to use")
             self.lbl_model_status.setStyleSheet("color: #4ade80; font-weight: 700;")
             self.dl_progress_bar.setValue(100)
-            self.lbl_dl_detail.setText(f"Модель: {st.get('model_path', '')}")
+            self.lbl_dl_detail.setText(f"Model: {st.get('model_path', '')}")
         else:
             self._last_status_ready = False
             missing = st.get("missing", [])
-            self.lbl_model_status.setText(f"Файлы не найдены ({len(missing)} шт.)")
+            self.lbl_model_status.setText(f"Files not found ({len(missing)} missing)")
             self.lbl_model_status.setStyleSheet("color: #fb923c; font-weight: 600;")
-            self.lbl_dl_detail.setText("Нажмите 'Скачать с Hugging Face' для автозагрузки весов")
+            self.lbl_dl_detail.setText("Click 'Download from Hugging Face' to auto-download weights")
 
 
     def _on_download_clicked(self) -> None:
@@ -336,8 +336,8 @@ class SettingsView(QWidget):
         self.worker_client.send_command("update_config", config=updates)
 
         InfoBar.success(
-            title="Параметры сохранены",
-            content="Конфигурация успешно обновлена и синхронизирована с конвейером.",
+            title="Settings Saved",
+            content="Configuration updated and synchronized with pipeline.",
             orient=Qt.Orientation.Horizontal,
             isClosable=True,
             position=InfoBarPosition.TOP_RIGHT,

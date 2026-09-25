@@ -87,7 +87,7 @@ class PipelineWorker:
                         crops_count = len(list(crops_dir.glob(f"*{p_num:04d}*.png"))) if crops_dir.is_dir() else 0
                         pages.append({
                             "page_id": page_id,
-                            "title": f"Стр. {p_num}",
+                            "title": f"Page {p_num}",
                             "crops_count": crops_count,
                             "has_debug": True,
                             "has_mask": True,
@@ -364,7 +364,7 @@ class PipelineWorker:
             if raw_file:
                 markdown_text = raw_file.read_text(encoding="utf-8", errors="replace")
             else:
-                markdown_text = "*(Текст страницы еще не распознан. Запустите пакетную обработку в Панели управления)*\n"
+                markdown_text = "*(Page text not yet recognized. Start batch processing from the Control Panel)*\n"
 
         # 2. Dynamic music stub injection: inject BOTH ABC and Humdrum **kern blocks for LLM reading
         crops_dir = book_dir / "1_crops"
@@ -396,7 +396,7 @@ class PipelineWorker:
 
                 if blocks:
                     return "\n\n" + "\n\n".join(blocks) + "\n\n"
-                return f"\n\n<!-- MUSIC_STUB_ID:{cid} (Ноты не найдены, ожидают OMR) -->\n\n"
+                return f"\n\n<!-- MUSIC_STUB_ID:{cid} (Notes not found, awaiting OMR) -->\n\n"
 
             assembled = re.sub(r"<!--\s*MUSIC_STUB_ID:\s*(.*?)\s*-->", inject_music_blocks, markdown_text)
 
@@ -449,7 +449,7 @@ class PipelineWorker:
 
         result = {
             "page_id": page_id,
-            "title": f"Стр. {p_num}",
+            "title": f"Page {p_num}",
             "original_url": sheet_info["sheet_url"],
             "debug_url": debug_rel,
             "mask_url": mask_rel,

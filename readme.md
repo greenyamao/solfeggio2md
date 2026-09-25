@@ -1,35 +1,35 @@
 # Solfeggio OCR Studio
 
-Промышленный комплекс для распознавания учебников по теории музыки, сольфеджио и полифонии в формат Markdown с многоголосым ABC-кодом нот.
+Production-grade pipeline for converting music theory textbooks, solfeggio exercises, and polyphonic sheet music into hybrid Markdown with embedded polyphonic ABC notation.
 
 ---
 
-## Быстрый запуск
+## Quick Start
 
-Запустите командный файл:
+Launch via the batch runner:
 ```bat
 start.bat
 ```
-Или выполните команду вручную в терминале:
+Or execute directly using the virtual environment:
 ```powershell
-.\.venv\Scripts\python.exe run_workbench.py
+.\.venv\Scripts\python.exe run_native_app.py
 ```
 
 ---
 
-## Архитектура и стек
+## Architecture & Technology Stack
 
-- **Графический интерфейс**: Автономное окно Windows 11 на базе Microsoft Edge WebView2 (`pywebview`) и локального бэкенда `Bottle`.
-- **Детекция верстки и нарезка**: YOLOv8/v11 OLA v2.0 (`weights/ola-layout-analysis-2.0-2025-03-09.pt`) с динамическим объединением коллинеарных станов (`heal_collinear_segments`) и разделением двухстраничных разворотов.
-- **Оптическое распознавание нот (OMR)**: Двухмодельный маршрутизатор `Transcoda-59M` (`btrkeks/transcoda-59M-zeroshot-v1`) и `SMT-GrandStaff`.
-- **Валидация и экспорт нотации**: C++ ядро `verovio` + `xml2abc.py` (чистый многоголосый экспорт `V:1 treble`, `V:2 bass`).
-- **Текстовое распознавание (VLM)**: Локальный сервер LM Studio (Qwen 3.5 9B / Qwen 2.5-VL) через REST API (`POST /api/v1/chat`, `reasoning: "off"`).
-- **Восстановление и чекпоинты**: Атомарный журнал `checkpoint.json` внутри папки каждого документа обеспечивает 100% продолжение работы с места остановки при сбоях.
+- **Desktop GUI**: Native Windows 11 Fluent interface built with PySide6 and QFluentWidgets, featuring zero-copy shared memory frame streaming and sub-millisecond IPC.
+- **Layout Analysis & Slicing**: YOLO OLA v2.0 (`weights/ola-layout-analysis-2.0-2025-03-09.pt`) with dynamic collinear segment healing (`heal_collinear_segments`) and automatic two-page spread bisection.
+- **Optical Music Recognition (OMR)**: Routed neural engine using `Transcoda-59M` (`btrkeks/transcoda-59M-zeroshot-v1`) for single staves and `SMT-GrandStaff` for piano systems.
+- **Notation Validation & Export**: C++ `verovio` core coupled with `xml2abc.py` for pristine polyphonic ABC notation export (`V:1 treble`, `V:2 bass`).
+- **Vision-Language Model (VLM)**: Embedded `llama-server` or local LM Studio server running Qwen vision models via REST API (`POST /v1/chat/completions`) with strict masking.
+- **Fault-Tolerant Checkpoints**: Atomic `checkpoint.json` per document directory ensures zero-overhead idempotency and crash resilience across all 4 pipeline phases.
 
 ---
 
-## Требования и окружение
+## Requirements & Environment
 
-- Python 3.12 (в виртуальном окружении `.venv`).
-- Обязательно использование `opencv-python-headless` (никогда не устанавливайте обычный `opencv-python`).
-- Видеокарта: NVIDIA GeForce RTX 5070 Mobile (8 GB VRAM, архитектура `sm_120`). Реализован строгий барьер последовательного владения GPU (Sequential GPU Ownership) с полной выгрузкой VRAM перед запуском VLM.
+- Python 3.12 (inside `.venv` virtual environment).
+- `opencv-python-headless` (never install standard `opencv-python`).
+- GPU: CUDA-compatible NVIDIA GPU (8 GB+ VRAM recommended). Strictly enforces Sequential GPU Ownership with memory purge barriers between batch passes.

@@ -15,13 +15,13 @@ import pymupdf
 
 
 TOC_KEYWORDS = {
-    "contents", "table of contents", "содержание", "оглавление",
+    "contents", "table of contents",
     "sommaire", "inhaltsverzeichnis", "table des matieres"
 }
 
 BACK_MATTER_KEYWORDS = {
-    "index", "subject index", "general index", "указатель", "алфавитный указатель",
-    "bibliography", "selected bibliography", "библиография", "literaturverzeichnis"
+    "index", "subject index", "general index",
+    "bibliography", "selected bibliography", "literaturverzeichnis"
 }
 
 FRONT_MATTER_KEYWORDS = {
@@ -81,21 +81,21 @@ class BookSectionFilter:
                     if self.skip_front_matter and any(kw in raw_text for kw in TOC_KEYWORDS):
                         sections[p_idx] = {
                             "skip": True,
-                            "reason": "Оглавление книги (Table of Contents)",
+                            "reason": "Table of Contents",
                             "section": "toc",
                         }
                     # Digital Front-matter check
                     elif self.skip_front_matter and p_idx <= front_limit and any(kw in raw_text for kw in FRONT_MATTER_KEYWORDS):
                         sections[p_idx] = {
                             "skip": True,
-                            "reason": "Вводная служебная часть (Preface/Copyright)",
+                            "reason": "Front-matter (Preface/Copyright)",
                             "section": "front_matter",
                         }
                     # Digital Index / Back-matter check
                     elif self.skip_back_matter and p_idx >= back_start and any(kw in raw_text for kw in BACK_MATTER_KEYWORDS):
                         sections[p_idx] = {
                             "skip": True,
-                            "reason": "Предметный указатель книги (Index)",
+                            "reason": "Back-matter (Index)",
                             "section": "index",
                         }
         except Exception:
@@ -120,7 +120,7 @@ class BookSectionFilter:
         # 1. Front-matter: before music has started
         if not self.music_started and p_num <= front_limit:
             if detections_count == 0:
-                return self.skip_front_matter, "Вводная часть / Оглавление без нот (Front-matter)"
+                return self.skip_front_matter, "Front-matter without music"
             else:
                 self.music_started = True
                 self.first_music_page = p_num
@@ -136,12 +136,12 @@ class BookSectionFilter:
         # 2. Back-matter: index and end pages
         if p_num >= back_start:
             if self.index_started:
-                return self.skip_back_matter, "Окончание книги / Указатель (Back-matter)"
+                return self.skip_back_matter, "Back-matter / Appendix"
 
             # Check if multi-column index page
             if gray is not None and self.is_multi_column_index_page(gray):
                 self.index_started = True
-                return self.skip_back_matter, "Предметный указатель книги (Index)"
+                return self.skip_back_matter, "Back-matter (Index)"
 
         return False, ""
 

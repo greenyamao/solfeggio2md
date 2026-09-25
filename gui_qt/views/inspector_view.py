@@ -148,7 +148,7 @@ class InspectorView(QWidget):
         l_layout.setContentsMargins(0, 0, 4, 0)
         l_layout.setSpacing(6)
 
-        self.lbl_left_title = CaptionLabel("ИСХОДНЫЙ СКАН / РАЗМЕТКА", left_box)
+        self.lbl_left_title = CaptionLabel("SOURCE SCAN / ANNOTATION", left_box)
         self.lbl_left_title.setStyleSheet("color: #38bdf8; font-weight: 700; font-size: 11px;")
         l_layout.addWidget(self.lbl_left_title)
 
@@ -164,12 +164,12 @@ class InspectorView(QWidget):
         r_layout.setSpacing(6)
 
         r_header = QHBoxLayout()
-        self.lbl_right_title = CaptionLabel("РЕЗУЛЬТАТ ОБРАБОТКИ", right_box)
+        self.lbl_right_title = CaptionLabel("PROCESSING RESULT", right_box)
         self.lbl_right_title.setStyleSheet("color: #4ade80; font-weight: 700; font-size: 11px;")
         r_header.addWidget(self.lbl_right_title)
         r_header.addStretch()
 
-        self.btn_copy = PushButton(FluentIcon.COPY, "Копировать код", right_box)
+        self.btn_copy = PushButton(FluentIcon.COPY, "Copy Code", right_box)
         self.btn_copy.setVisible(False)
         self.btn_copy.clicked.connect(self._copy_code)
         r_header.addWidget(self.btn_copy)
@@ -234,16 +234,16 @@ class InspectorView(QWidget):
         layout.setSpacing(10)
 
         # Book selector
-        layout.addWidget(CaptionLabel("Книга:", bar))
+        layout.addWidget(CaptionLabel("Book:", bar))
         self.combo_books = ComboBox(bar)
         self.combo_books.setMinimumWidth(240)
         self.combo_books.currentIndexChanged.connect(self._on_book_changed)
         layout.addWidget(self.combo_books)
 
         # Page navigation
-        layout.addWidget(CaptionLabel("Стр:", bar))
+        layout.addWidget(CaptionLabel("Page:", bar))
         self.btn_prev = ToolButton(FluentIcon.LEFT_ARROW, bar)
-        self.btn_prev.setToolTip("Предыдущая страница (Клавиши: Влево, A, PageUp)")
+        self.btn_prev.setToolTip("Previous page (Keys: Left, A, PageUp)")
         self.btn_prev.clicked.connect(self._prev_page)
         layout.addWidget(self.btn_prev)
 
@@ -256,12 +256,12 @@ class InspectorView(QWidget):
         layout.addWidget(self.lbl_max_page)
 
         self.btn_next = ToolButton(FluentIcon.RIGHT_ARROW, bar)
-        self.btn_next.setToolTip("Следующая страница (Клавиши: Вправо, D, PageDown)")
+        self.btn_next.setToolTip("Next page (Keys: Right, D, PageDown)")
         self.btn_next.clicked.connect(self._next_page)
         layout.addWidget(self.btn_next)
 
         # Staff Crop Selector (visible in Mode 2 & Mode 3 when multiple crops exist)
-        self.lbl_crop = CaptionLabel("Стан:", bar)
+        self.lbl_crop = CaptionLabel("Staff:", bar)
         self.lbl_crop.setVisible(False)
         layout.addWidget(self.lbl_crop)
 
@@ -275,9 +275,9 @@ class InspectorView(QWidget):
 
         # Mode Selector
         self.mode_segmented = SegmentedWidget(bar)
-        self.mode_segmented.addItem("mode1", "1. Скан vs Маска")
-        self.mode_segmented.addItem("mode2", "2. Дескев")
-        self.mode_segmented.addItem("mode3", "3. ABC Ноты")
+        self.mode_segmented.addItem("mode1", "1. Scan vs Mask")
+        self.mode_segmented.addItem("mode2", "2. Deskew")
+        self.mode_segmented.addItem("mode3", "3. ABC Notes")
         self.mode_segmented.addItem("mode4", "4. Markdown")
         self.mode_segmented.setCurrentItem("mode1")
         self.mode_segmented.currentItemChanged.connect(self._on_mode_changed)
@@ -285,7 +285,7 @@ class InspectorView(QWidget):
 
         # Refresh
         self.btn_refresh = ToolButton(FluentIcon.SYNC, bar)
-        self.btn_refresh.setToolTip("Обновить книги и страницы")
+        self.btn_refresh.setToolTip("Refresh books and pages")
         self.btn_refresh.clicked.connect(lambda: self.refresh_books(preserve_current=True))
         layout.addWidget(self.btn_refresh)
 
@@ -445,7 +445,7 @@ class InspectorView(QWidget):
         book_dir = self.output_root / book_title
         p_num = self._current_page
 
-        cur_text = self.mode_segmented.currentItem().text() if self.mode_segmented.currentItem() else "1. Скан vs Маска"
+        cur_text = self.mode_segmented.currentItem().text() if self.mode_segmented.currentItem() else "1. Scan vs Mask"
 
         # Standard file locations
         crops_dir = book_dir / "1_crops"
@@ -462,7 +462,7 @@ class InspectorView(QWidget):
         self._current_crops = crops
 
         # Update crops combo visibility
-        is_crop_mode = ("2. Дескев" in cur_text or "3. ABC" in cur_text)
+        is_crop_mode = ("2. Deskew" in cur_text or "3. ABC" in cur_text)
         if is_crop_mode and len(crops) > 0:
             self.lbl_crop.setVisible(True)
             self.combo_crops.setVisible(True)
@@ -472,7 +472,7 @@ class InspectorView(QWidget):
             for i, c in enumerate(crops):
                 tag_match = re.search(r"_S(\d+)_", c.name)
                 tag_str = f"S{tag_match.group(1)}" if tag_match else f"S{i+1:02d}"
-                self.combo_crops.addItem(f"Стан {i+1} ({tag_str})", c)
+                self.combo_crops.addItem(f"Staff {i+1} ({tag_str})", c)
             if 0 <= prev_crop_idx < len(crops):
                 self.combo_crops.setCurrentIndex(prev_crop_idx)
             else:
@@ -488,35 +488,35 @@ class InspectorView(QWidget):
         # -------------------------------------------------------------
         # Mode 1: Scan vs Mask
         # -------------------------------------------------------------
-        if "1. Скан" in cur_text:
+        if "1. Scan" in cur_text:
             self.right_stack.setCurrentIndex(0)
             self.btn_copy.setVisible(False)
-            self.lbl_left_title.setText(f"СТР. {p_num}: РАЗМЕТКА YOLO (BBOX)")
-            self.lbl_right_title.setText(f"СТР. {p_num}: МАСКИРОВАННАЯ СТРАНИЦА")
+            self.lbl_left_title.setText(f"PAGE {p_num}: YOLO BBOX ANNOTATION")
+            self.lbl_right_title.setText(f"PAGE {p_num}: MASKED PAGE")
 
             src_left = debug_file if debug_file.is_file() else mask_file
             if src_left and src_left.is_file():
                 self.canvas_left.load_file(str(src_left))
             else:
                 self.canvas_left.clear_view()
-                self.lbl_left_title.setText(f"СТР. {p_num}: ЕЩЁ НЕ ОБРАБОТАНА (СЛАЙСИНГ)")
+                self.lbl_left_title.setText(f"PAGE {p_num}: NOT YET PROCESSED (SLICING)")
 
             if mask_file.is_file():
                 self.canvas_right.load_file(str(mask_file))
             else:
                 self.canvas_right.clear_view()
-                self.lbl_right_title.setText(f"СТР. {p_num}: МАСКА НЕ СФОРМИРОВАНА")
+                self.lbl_right_title.setText(f"PAGE {p_num}: MASK NOT GENERATED")
 
         # -------------------------------------------------------------
         # Mode 2: Deskew
         # -------------------------------------------------------------
-        elif "2. Дескев" in cur_text:
+        elif "2. Deskew" in cur_text:
             self.right_stack.setCurrentIndex(0)
             self.btn_copy.setVisible(False)
 
             if active_crop is not None and active_crop.is_file():
-                self.lbl_left_title.setText(f"СТР. {p_num} (СТАН {selected_crop_idx + 1}/{len(crops)}): ИСХОДНЫЙ КРОП")
-                self.lbl_right_title.setText(f"СТР. {p_num} (СТАН {selected_crop_idx + 1}/{len(crops)}): 2D-DFT ВЫРАВНИВАНИЕ")
+                self.lbl_left_title.setText(f"PAGE {p_num} (STAFF {selected_crop_idx + 1}/{len(crops)}): RAW CROP")
+                self.lbl_right_title.setText(f"PAGE {p_num} (STAFF {selected_crop_idx + 1}/{len(crops)}): 2D-DFT DESKEW")
 
                 self.canvas_left.load_file(str(active_crop))
 
@@ -534,8 +534,8 @@ class InspectorView(QWidget):
                     self.canvas_left.clear_view()
                 self.canvas_right.clear_view()
 
-                self.lbl_left_title.setText(f"СТР. {p_num}: ТЕКСТОВАЯ СТРАНИЦА")
-                self.lbl_right_title.setText(f"СТР. {p_num}: НОТНЫХ СТАНОВ НЕ ОБНАРУЖЕНО")
+                self.lbl_left_title.setText(f"PAGE {p_num}: TEXT PAGE")
+                self.lbl_right_title.setText(f"PAGE {p_num}: NO STAVES DETECTED")
 
         # -------------------------------------------------------------
         # Mode 3: ABC Notes
@@ -545,7 +545,7 @@ class InspectorView(QWidget):
             self.btn_copy.setVisible(True)
 
             if active_crop is not None and active_crop.is_file():
-                self.lbl_left_title.setText(f"СТР. {p_num} (СТАН {selected_crop_idx + 1}/{len(crops)}): НОТНЫЙ СТАН")
+                self.lbl_left_title.setText(f"PAGE {p_num} (STAFF {selected_crop_idx + 1}/{len(crops)}): MUSIC STAFF")
                 deskew_path = active_crop.parent / f"{active_crop.stem}_deskew.png"
                 disp_crop = deskew_path if deskew_path.is_file() else active_crop
                 self.canvas_left.load_file(str(disp_crop))
@@ -555,7 +555,7 @@ class InspectorView(QWidget):
                     self.canvas_left.load_file(str(src_page))
                 else:
                     self.canvas_left.clear_view()
-                self.lbl_left_title.setText(f"СТР. {p_num}: НОТНЫХ СТАНОВ НЕ ОБНАРУЖЕНО")
+                self.lbl_left_title.setText(f"PAGE {p_num}: NO STAVES DETECTED")
 
             # Collect ABC codes
             abc_texts = []
@@ -564,20 +564,20 @@ class InspectorView(QWidget):
                     abc_f = c.with_suffix(".abc")
                     if abc_f.is_file() and abc_f.stat().st_size > 0:
                         code = abc_f.read_text(encoding="utf-8").strip()
-                        abc_texts.append(f"% --- Стан {i + 1} ({c.name}) ---\n{code}")
+                        abc_texts.append(f"% --- Staff {i + 1} ({c.name}) ---\n{code}")
 
             if abc_texts:
                 self.text_editor.setPlainText("\n\n".join(abc_texts))
-                self.lbl_right_title.setText(f"СТР. {p_num}: ДЕКОДИРОВАННЫЕ НОТЫ (ABC)")
+                self.lbl_right_title.setText(f"PAGE {p_num}: DECODED NOTES (ABC)")
             elif crops:
                 self.text_editor.setPlainText(
-                    f"На странице {p_num} обнаружено {len(crops)} нотных станов.\n"
-                    "Они находятся в очереди OMR-распознавания модели Transcoda-59M."
+                    f"Page {p_num} contains {len(crops)} musical staves.\n"
+                    "They are queued for Transcoda-59M OMR recognition."
                 )
-                self.lbl_right_title.setText(f"СТР. {p_num}: ОЖИДАЕТ OMR РАСПОЗНАВАНИЯ")
+                self.lbl_right_title.setText(f"PAGE {p_num}: AWAITING OMR RECOGNITION")
             else:
-                self.text_editor.setPlainText(f"На странице {p_num} нотные станы не обнаружены (текстовая страница).")
-                self.lbl_right_title.setText(f"СТР. {p_num}: НОТ НЕТ")
+                self.text_editor.setPlainText(f"No musical staves detected on page {p_num} (text page).")
+                self.lbl_right_title.setText(f"PAGE {p_num}: NO NOTES")
 
         # -------------------------------------------------------------
         # Mode 4: Markdown
@@ -585,7 +585,7 @@ class InspectorView(QWidget):
         elif "4. Markdown" in cur_text:
             self.right_stack.setCurrentIndex(1)
             self.btn_copy.setVisible(True)
-            self.lbl_left_title.setText(f"СТР. {p_num}: СКАН СТРАНИЦЫ")
+            self.lbl_left_title.setText(f"PAGE {p_num}: PAGE SCAN")
 
             src_page = debug_file if debug_file.is_file() else mask_file
             if src_page and src_page.is_file():
@@ -595,24 +595,24 @@ class InspectorView(QWidget):
 
             if final_md_file.is_file():
                 self.text_editor.setPlainText(final_md_file.read_text(encoding="utf-8"))
-                self.lbl_right_title.setText(f"СТР. {p_num}: СОБРАННЫЙ MARKDOWN ДОКУМЕНТ")
+                self.lbl_right_title.setText(f"PAGE {p_num}: ASSEMBLED MARKDOWN DOCUMENT")
             elif raw_md_file.is_file():
                 self.text_editor.setPlainText(raw_md_file.read_text(encoding="utf-8"))
-                self.lbl_right_title.setText(f"СТР. {p_num}: ЧЕРНОВИК VLM OCR (БЕЗ НОТ)")
+                self.lbl_right_title.setText(f"PAGE {p_num}: RAW VLM DRAFT (WITHOUT NOTES)")
             else:
                 self.text_editor.setPlainText(
-                    f"Markdown документ для страницы {p_num} ещё не сформирован.\n"
-                    "Страница ожидает этапа VLM OCR (Qwen 3.5) или финальной сборки."
+                    f"Markdown document for page {p_num} has not been generated yet.\n"
+                    "Page is awaiting VLM OCR (Qwen 3.5) or final assembly."
                 )
-                self.lbl_right_title.setText(f"СТР. {p_num}: ОЖИДАЕТ ОБРАБОТКИ")
+                self.lbl_right_title.setText(f"PAGE {p_num}: AWAITING PROCESSING")
 
     def _copy_code(self) -> None:
         txt = self.text_editor.toPlainText()
         if txt:
             QApplication.clipboard().setText(txt)
             InfoBar.success(
-                title="Скопировано",
-                content="Код скопирован в буфер обмена.",
+                title="Copied",
+                content="Code copied to clipboard.",
                 orient=Qt.Orientation.Horizontal,
                 isClosable=True,
                 position=InfoBarPosition.TOP_RIGHT,

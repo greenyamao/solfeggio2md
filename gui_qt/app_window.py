@@ -59,7 +59,7 @@ class MainWindow(FluentWindow):
         self.addSubInterface(
             self.pipeline_view,
             FluentIcon.SPEED_HIGH,
-            "Конвейер",
+            "Pipeline",
         )
 
         # 2. Page Inspector View
@@ -67,7 +67,7 @@ class MainWindow(FluentWindow):
         self.addSubInterface(
             self.inspector_view,
             FluentIcon.VIEW,
-            "Инспектор",
+            "Inspector",
         )
 
         # 3. Settings View (Bottom Position)
@@ -75,7 +75,7 @@ class MainWindow(FluentWindow):
         self.addSubInterface(
             self.settings_view,
             FluentIcon.SETTING,
-            "Параметры",
+            "Settings",
             NavigationItemPosition.BOTTOM,
         )
 

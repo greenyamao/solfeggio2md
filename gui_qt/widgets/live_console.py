@@ -53,21 +53,21 @@ class LiveConsoleWidget(QWidget):
         h_layout.setContentsMargins(6, 4, 6, 4)
         h_layout.setSpacing(10)
 
-        self.title_label = CaptionLabel("ЖУРНАЛ НЕЙРОСЕТИ И КОНВЕЙЕРА (0 строк)", header)
+        self.title_label = CaptionLabel("LIVE PIPELINE & NEURAL LOG (0 lines)", header)
         self.title_label.setStyleSheet("color: #94a3b8; font-weight: 600; font-size: 11px;")
         h_layout.addWidget(self.title_label)
 
         h_layout.addStretch()
 
         # Auto-scroll switch
-        self.scroll_switch = SwitchButton("Автоскролл", header)
+        self.scroll_switch = SwitchButton("Autoscroll", header)
         self.scroll_switch.setChecked(True)
         self.scroll_switch.checkedChanged.connect(self._on_auto_scroll_changed)
         h_layout.addWidget(self.scroll_switch)
 
         # Clear button
         self.clear_btn = ToolButton(FluentIcon.DELETE, header)
-        self.clear_btn.setToolTip("Очистить журнал")
+        self.clear_btn.setToolTip("Clear log")
         self.clear_btn.clicked.connect(self.clear_logs)
         h_layout.addWidget(self.clear_btn)
 
@@ -119,7 +119,7 @@ class LiveConsoleWidget(QWidget):
 
         self.text_edit.appendHtml(line_html)
         self._line_count += 1
-        self.title_label.setText(f"ЖУРНАЛ НЕЙРОСЕТИ И КОНВЕЙЕРА ({self._line_count} строк)")
+        self.title_label.setText(f"LIVE PIPELINE & NEURAL LOG ({self._line_count} lines)")
 
         if self._auto_scroll:
             self.text_edit.moveCursor(QTextCursor.MoveOperation.End)
@@ -128,4 +128,4 @@ class LiveConsoleWidget(QWidget):
         """Clears the console log window."""
         self.text_edit.clear()
         self._line_count = 0
-        self.title_label.setText("ЖУРНАЛ НЕЙРОСЕТИ И КОНВЕЙЕРА (0 строк)")
+        self.title_label.setText("LIVE PIPELINE & NEURAL LOG (0 lines)")

@@ -1,19 +1,18 @@
 # Runtime dependencies for PDF -> Markdown music pipeline.
-# Install PyTorch separately using the official selector for the target CUDA/CPU setup.
-streamlit>=1.63,<2
-PyMuPDF>=1.28,<2
-opencv-python-headless>=5,<6
-numpy>=2.5,<3
-Pillow>=12,<13
-music21>=10.5,<11
-transformers>=5.16,<6
-huggingface-hub>=1.5,<2
-safetensors>=0.8,<1
-
-# Optional SMT augmentation/training dependencies.
-scikit-image>=0.25,<1
+# PyTorch is installed separately for the target CUDA/CPU architecture.
+PyMuPDF>=1.24,<2
+opencv-python-headless>=4.9,<5
+numpy>=1.26,<3
+Pillow>=10.0,<13
+music21>=9.1,<11
+transformers>=4.40,<6
+huggingface-hub>=0.20,<2
+safetensors>=0.4,<1
+ultralytics>=8.0.0
+requests>=2.31.0
+psutil>=5.9.0
+nvidia-ml-py>=12.535.0
 
 # High-Performance Windows 11 Native GUI (PySide6 + QFluentWidgets)
-PySide6>=6.11,<7
-PySide6-Fluent-Widgets>=1.11,<2
-
+PySide6>=6.6,<7
+PySide6-Fluent-Widgets>=1.5,<2

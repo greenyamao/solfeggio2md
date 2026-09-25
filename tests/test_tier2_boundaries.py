@@ -460,7 +460,7 @@ class TestTier2Boundaries(unittest.TestCase):
 
         raw_file = raw_md_dir / "page_0001_raw.md"
         text = raw_file.read_text(encoding="utf-8")
-        self.assertIn("Страница без нотного материала", text)
+        self.assertIn("Page contains no musical material", text)
 
     def test_f9_bnd_02_vlm_fallback_with_special_characters_in_stub(self):
         """F9 Boundary: Special characters in stub ID are preserved exactly."""
@@ -509,7 +509,7 @@ class TestTier2Boundaries(unittest.TestCase):
         runner._phase_4_assembly(book_dir, raw_md_dir, crops_dir, final_dir, chk)
 
         final_text = (final_dir / "page_0001.md").read_text(encoding="utf-8")
-        self.assertIn("не найдены", final_text)
+        self.assertIn("not found", final_text)
 
     def test_f9_bnd_04_assembly_multiline_abc_content(self):
         """F9 Boundary: Multiline ABC content properly wrapped in markdown code fence."""
