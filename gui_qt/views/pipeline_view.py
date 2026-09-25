@@ -109,10 +109,6 @@ class PipelineView(QWidget):
         mon_layout.setContentsMargins(8, 0, 0, 0)
         mon_layout.setSpacing(8)
 
-        # Monitor Header Card
-        mon_header = self._create_monitor_header()
-        mon_layout.addWidget(mon_header)
-
         # Horizontal Splitter between Live Visual Canvas and Live Markdown/ABC Text
         self.mon_splitter = QSplitter(Qt.Orientation.Horizontal, monitor_container)
         self.mon_splitter.setChildrenCollapsible(False)
@@ -128,6 +124,9 @@ class PipelineView(QWidget):
         # Proportions: 55% visual canvas, 45% live text
         self.mon_splitter.setSizes([450, 370])
 
+        # Monitor Header Card (instantiated after canvas_view and text_preview_card)
+        mon_header = self._create_monitor_header()
+        mon_layout.addWidget(mon_header)
         mon_layout.addWidget(self.mon_splitter, stretch=1)
 
 
