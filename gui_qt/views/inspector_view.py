@@ -14,7 +14,8 @@ import json
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, Qt
+from PySide6.QtGui import QKeyEvent, QWheelEvent
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -62,16 +63,69 @@ class InspectorView(QWidget):
     def showEvent(self, event) -> None:
         super().showEvent(event)
         self.refresh_books(preserve_current=True)
+        self.setFocus()
 
-    def keyPressEvent(self, event) -> None:
-        if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_PageUp):
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        key = event.key()
+        if key in (Qt.Key.Key_Left, Qt.Key.Key_PageUp, Qt.Key.Key_A):
             self._prev_page()
             event.accept()
-        elif event.key() in (Qt.Key.Key_Right, Qt.Key.Key_PageDown):
+        elif key in (Qt.Key.Key_Right, Qt.Key.Key_PageDown, Qt.Key.Key_D):
             self._next_page()
+            event.accept()
+        elif key == Qt.Key.Key_Home:
+            self._set_page(1)
+            event.accept()
+        elif key == Qt.Key.Key_End:
+            self._set_page(self._max_page)
             event.accept()
         else:
             super().keyPressEvent(event)
+
+    def eventFilter(self, watched, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+            is_spinbox_input = (
+                watched == self.spin_page
+                or (hasattr(self.spin_page, "lineEdit") and watched == self.spin_page.lineEdit())
+            )
+            if key in (Qt.Key.Key_Left, Qt.Key.Key_PageUp):
+                self._prev_page()
+                return True
+            elif key in (Qt.Key.Key_Right, Qt.Key.Key_PageDown):
+                self._next_page()
+                return True
+            elif key == Qt.Key.Key_Home and not is_spinbox_input:
+                self._set_page(1)
+                return True
+            elif key == Qt.Key.Key_End and not is_spinbox_input:
+                self._set_page(self._max_page)
+                return True
+            elif key == Qt.Key.Key_A and not is_spinbox_input:
+                self._prev_page()
+                return True
+            elif key == Qt.Key.Key_D and not is_spinbox_input:
+                self._next_page()
+                return True
+
+        elif event.type() == QEvent.Type.Wheel:
+            # Allow mouse wheel to flip pages when scrolling over navigation widgets
+            if watched in (
+                self.toolbar_card,
+                self.spin_page,
+                self.lbl_max_page,
+                self.btn_prev,
+                self.btn_next,
+            ):
+                angle = event.angleDelta().y()
+                if angle > 0:
+                    self._prev_page()
+                    return True
+                elif angle < 0:
+                    self._next_page()
+                    return True
+
+        return super().eventFilter(watched, event)
 
     def _init_ui(self) -> None:
         self.setObjectName("InspectorView")
@@ -81,7 +135,8 @@ class InspectorView(QWidget):
         main_layout.setSpacing(10)
 
         # 1. Header Toolbar
-        main_layout.addWidget(self._create_toolbar())
+        self.toolbar_card = self._create_toolbar()
+        main_layout.addWidget(self.toolbar_card)
 
         # 2. Split Workspace
         self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
@@ -151,6 +206,27 @@ class InspectorView(QWidget):
 
         main_layout.addWidget(self.splitter, stretch=1)
 
+        # Install universal arrow key and scroll event filters across all child components
+        filter_targets = [
+            self,
+            self.toolbar_card,
+            self.canvas_left,
+            self.canvas_right,
+            self.text_editor,
+            self.splitter,
+            self.btn_prev,
+            self.btn_next,
+            self.btn_refresh,
+            self.combo_books,
+            self.combo_crops,
+            self.mode_segmented,
+            self.spin_page,
+        ]
+        for w in filter_targets:
+            w.installEventFilter(self)
+            if hasattr(w, "viewport") and w.viewport():
+                w.viewport().installEventFilter(self)
+
     def _create_toolbar(self) -> CardWidget:
         bar = CardWidget(self)
         layout = QHBoxLayout(bar)
@@ -167,7 +243,7 @@ class InspectorView(QWidget):
         # Page navigation
         layout.addWidget(CaptionLabel("Стр:", bar))
         self.btn_prev = ToolButton(FluentIcon.LEFT_ARROW, bar)
-        self.btn_prev.setToolTip("Предыдущая страница (Клавиша: Влево)")
+        self.btn_prev.setToolTip("Предыдущая страница (Клавиши: Влево, A, PageUp)")
         self.btn_prev.clicked.connect(self._prev_page)
         layout.addWidget(self.btn_prev)
 
@@ -180,7 +256,7 @@ class InspectorView(QWidget):
         layout.addWidget(self.lbl_max_page)
 
         self.btn_next = ToolButton(FluentIcon.RIGHT_ARROW, bar)
-        self.btn_next.setToolTip("Следующая страница (Клавиша: Вправо)")
+        self.btn_next.setToolTip("Следующая страница (Клавиши: Вправо, D, PageDown)")
         self.btn_next.clicked.connect(self._next_page)
         layout.addWidget(self.btn_next)
 
@@ -331,18 +407,28 @@ class InspectorView(QWidget):
         self.btn_prev.setEnabled(self._current_page > 1)
         self.btn_next.setEnabled(self._current_page < self._max_page)
 
+    def _set_page(self, new_page: int) -> None:
+        """Single source of truth for page changes."""
+        new_page = max(1, min(new_page, self._max_page))
+        if new_page == self._current_page and self.spin_page.value() == new_page:
+            return
+        self._current_page = new_page
+        self.spin_page.blockSignals(True)
+        self.spin_page.setValue(new_page)
+        self.spin_page.blockSignals(False)
+        self._update_nav_buttons()
+        self._load_current_view()
+
     def _prev_page(self) -> None:
         if self._current_page > 1:
-            self.spin_page.setValue(self._current_page - 1)
+            self._set_page(self._current_page - 1)
 
     def _next_page(self) -> None:
         if self._current_page < self._max_page:
-            self.spin_page.setValue(self._current_page + 1)
+            self._set_page(self._current_page + 1)
 
     def _on_page_changed(self, val: int) -> None:
-        self._current_page = val
-        self._update_nav_buttons()
-        self._load_current_view()
+        self._set_page(val)
 
     def _on_mode_changed(self, key: str) -> None:
         self._load_current_view()

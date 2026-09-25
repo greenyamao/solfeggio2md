@@ -139,6 +139,24 @@ class StaffGraphicsView(QGraphicsView):
 
         event.accept()
 
+    def keyPressEvent(self, event) -> None:
+        """Forwards arrow and page navigation keys to parent views."""
+        if event.key() in (
+            Qt.Key.Key_Left,
+            Qt.Key.Key_Right,
+            Qt.Key.Key_Up,
+            Qt.Key.Key_Down,
+            Qt.Key.Key_PageUp,
+            Qt.Key.Key_PageDown,
+            Qt.Key.Key_Home,
+            Qt.Key.Key_End,
+            Qt.Key.Key_A,
+            Qt.Key.Key_D,
+        ):
+            event.ignore()
+            return
+        super().keyPressEvent(event)
+
     def clear_bboxes(self) -> None:
         """Removes all bounding box overlays."""
         for item in self._bbox_items:
