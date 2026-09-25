@@ -1672,31 +1672,19 @@ class PipelineBatchRunner:
             page_stubs_set = set(page_stubs)
             p_val = int(p_num) if p_num.isdigit() else m_idx
 
-            # Update live preview image for current page
-            try:
-                rel_mask = mask_file.relative_to(self.output_root).as_posix()
-                with self._lock:
-                    self.metrics["current_page_image_url"] = f"/output/{rel_mask}"
-                    self.metrics["current_page_image_path"] = str(mask_file)
-                if self.on_frame_update is not None:
-                    self.on_frame_update(None, {
-                        "path": str(mask_file),
-                        "stage": "phase3",
-                        "book": masked_dir.parent.name,
-                        "page": p_val,
-                        "title": f"Page {p_val} — VLM masked page",
-                    })
-            except Exception:
-                pass
-
             # Blank page check: zero music staves and pure white unprinted paper
             if len(page_stubs) == 0 and self._is_blank_image(mask_file):
                 self.log_event("VLM", f"Page {p_num}: blank page (VLM skipped)")
                 blank_txt = f"## Page {p_val}\n\n<!-- Blank page -->\n"
                 raw_md_file.write_text(blank_txt, encoding="utf-8")
-                with self._lock:
-                    self.metrics["current_vlm_text"] = blank_txt
-                    self.metrics["current_page_image_path"] = str(mask_file)
+                try:
+                    rel_mask = mask_file.relative_to(self.output_root).as_posix()
+                    with self._lock:
+                        self.metrics["current_vlm_text"] = blank_txt
+                        self.metrics["current_page_image_path"] = str(mask_file)
+                        self.metrics["current_page_image_url"] = f"/output/{rel_mask}"
+                except Exception:
+                    pass
                 if self.on_text_update is not None:
                     self.on_text_update({
                         "page": p_val,
@@ -1727,6 +1715,14 @@ class PipelineBatchRunner:
             def _vlm_token_cb(chunk: str) -> None:
                 is_first = (len(streamed_tokens) == 0)
                 streamed_tokens.append(chunk)
+                if is_first:
+                    try:
+                        rel_mask = mask_file.relative_to(self.output_root).as_posix()
+                        with self._lock:
+                            self.metrics["current_page_image_url"] = f"/output/{rel_mask}"
+                            self.metrics["current_page_image_path"] = str(mask_file)
+                    except Exception:
+                        pass
                 if self.on_text_update is not None:
                     self.on_text_update({
                         "page": p_val,

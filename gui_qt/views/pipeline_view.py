@@ -364,7 +364,7 @@ class PipelineView(QWidget):
             return
 
         if stage == "phase3_analyzing":
-            # Keep previous page image and text visible while vision encoder is deciphering page
+            # Keep previous page image, title, and text visible while vision encoder is deciphering page
             self.badge_text_status.setText(f"ANALYZING PAGE {page}...")
             self.badge_text_status.setStyleSheet("""
                 QLabel {
@@ -377,25 +377,29 @@ class PipelineView(QWidget):
                     border-radius: 4px;
                 }
             """)
-            self.lbl_mon_title.setText(f"LIVE MONITOR: VLM analyzing page {page} (image decoding)")
             return
 
         # Phase 3: VLM Markdown
-        title_str = f"RECOGNIZED TEXT (MARKDOWN • PAGE {page})" if page else "RECOGNIZED TEXT (MARKDOWN)"
-        self.lbl_text_title.setText(title_str)
-        self.lbl_text_title.setStyleSheet("color: #38bdf8; font-weight: 700; font-size: 11px;")
-
-        # Synchronize image switch with text generation
         img_path = data.get("image_path")
-        if img_path and os.path.isfile(img_path):
+        first_chunk = data.get("first_chunk", False)
+
+        # Synchronize visual canvas and titles strictly when new page tokens begin
+        is_new_page = first_chunk or (page and page != self._active_text_page)
+        if is_new_page:
+            self._active_text_page = page
+            self.text_preview.clear()
+            title_str = f"RECOGNIZED TEXT (MARKDOWN • PAGE {page})" if page else "RECOGNIZED TEXT (MARKDOWN)"
+            self.lbl_text_title.setText(title_str)
+            self.lbl_text_title.setStyleSheet("color: #38bdf8; font-weight: 700; font-size: 11px;")
+            if img_path and os.path.isfile(img_path):
+                if img_path != self._current_image_path:
+                    self._current_image_path = img_path
+                    self.canvas_view.load_file(img_path)
+                self.lbl_mon_title.setText(f"LIVE MONITOR: Page {page} — VLM masked page")
+        elif img_path and os.path.isfile(img_path) and img_path != self._current_image_path:
             self._current_image_path = img_path
             self.canvas_view.load_file(img_path)
             self.lbl_mon_title.setText(f"LIVE MONITOR: Page {page} — VLM masked page")
-
-        first_chunk = data.get("first_chunk", False)
-        if first_chunk:
-            self._active_text_page = page
-            self.text_preview.clear()
 
         if is_comp:
             self.text_preview.setPlainText(full_text)
@@ -452,11 +456,11 @@ class PipelineView(QWidget):
                 path = meta.get("path", "")
                 title = meta.get("title", "")
                 stage = meta.get("stage", "")
-                if title and self.lbl_mon_title.text() != f"LIVE MONITOR: {title}":
-                    self.lbl_mon_title.setText(f"LIVE MONITOR: {title}")
 
                 # For Phase 1 & 2, update canvas immediately. For Phase 3, canvas updates on token generation!
                 if stage != "phase3":
+                    if title and self.lbl_mon_title.text() != f"LIVE MONITOR: {title}":
+                        self.lbl_mon_title.setText(f"LIVE MONITOR: {title}")
                     if path and path != self._current_image_path and os.path.isfile(path):
                         self._current_image_path = path
                         self.canvas_view.load_file(path)
@@ -520,11 +524,14 @@ class PipelineView(QWidget):
         # Telemetry
         self.telemetry_hud.update_metrics(metrics)
 
-        # Image from metrics if not already loaded
-        img_path = metrics.get("current_page_image_path", "")
-        if img_path and img_path != self._current_image_path and os.path.isfile(img_path):
-            self._current_image_path = img_path
-            self.canvas_view.load_file(img_path)
+        # Image from metrics if not already loaded (Phase 1 & 2 only, or initial idle state)
+        phase_str = str(metrics.get("current_phase_name", "")).lower()
+        is_phase3_active = ("vlm" in phase_str or "phase 3" in phase_str or "phase3" in phase_str)
+        if not is_phase3_active or not self._current_image_path:
+            img_path = metrics.get("current_page_image_path", "")
+            if img_path and img_path != self._current_image_path and os.path.isfile(img_path):
+                self._current_image_path = img_path
+                self.canvas_view.load_file(img_path)
 
         # Text fallback from metrics if preview is empty
         vlm_text = metrics.get("current_vlm_text", "")
