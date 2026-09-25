@@ -654,11 +654,23 @@ class PipelineBatchRunner:
                 chk["phases"]["omr"]["total_crops"] = len(c_files)
 
             m_files = list(masked_dir.glob("page_*_masked.png"))
-            existing_r = len([f for f in raw_md_dir.glob("page_*_raw.md") if f.stat().st_size > 0])
+            existing_r = len([
+                f for f in raw_md_dir.glob("page_*_raw.md")
+                if f.stat().st_size > 0
+                and "LM_STUDIO_ERROR" not in f.read_text(encoding="utf-8", errors="replace")
+                and "[Текст не распознан" not in f.read_text(encoding="utf-8", errors="replace")
+            ])
             if len(m_files) > 0 and existing_r >= len(m_files):
                 chk["phases"]["vlm"]["completed"] = True
                 chk["phases"]["vlm"]["pages_done"] = len(m_files)
                 chk["phases"]["vlm"]["total_pages"] = len(m_files)
+            elif len(m_files) > 0:
+                chk["phases"]["vlm"]["completed"] = False
+                chk["phases"]["vlm"]["pages_done"] = existing_r
+                chk["phases"]["vlm"]["total_pages"] = len(m_files)
+                chk["phases"]["assembly"]["completed"] = False
+                if chk.get("status") == "completed":
+                    chk["status"] = "in_progress"
 
             self._write_checkpoint(book_title, chk)
 
@@ -1530,6 +1542,12 @@ class PipelineBatchRunner:
         if not overwrite:
             for f in raw_md_dir.glob("page_*_raw.md"):
                 if f.stat().st_size > 0:
+                    try:
+                        content = f.read_text(encoding="utf-8", errors="replace")
+                        if "<!-- LM_STUDIO_ERROR" in content or "[Текст не распознан" in content:
+                            continue
+                    except Exception:
+                        continue
                     m = re.search(r"page_(\d+)_raw", f.stem)
                     if m:
                         existing_valid_mds.add(m.group(1))
@@ -1575,7 +1593,6 @@ class PipelineBatchRunner:
                     )
                     if started:
                         self.lm_client.port = str(self.embedded_runner.port)
-                        self.lm_client.base_url = f"http://{self.lm_client.host}:{self.lm_client.port}"
                     else:
                         self.log_event("WARN", "Не удалось запустить автономный llama-server, проверка порта 1234...")
                 else:
@@ -1627,12 +1644,13 @@ class PipelineBatchRunner:
                     self.metrics["current_page_image_url"] = f"/output/{rel_mask}"
                     self.metrics["current_page_image_path"] = str(mask_file)
                 if self.on_frame_update is not None:
+                    p_val = int(p_num) if p_num.isdigit() else m_idx
                     self.on_frame_update(None, {
                         "path": str(mask_file),
                         "stage": "phase3",
-                        "book": pdf_path.stem,
-                        "page": page_num,
-                        "title": f"Стр. {page_num} — VLM маскированная страница",
+                        "book": masked_dir.parent.name,
+                        "page": p_val,
+                        "title": f"Стр. {p_val} — VLM маскированная страница",
                     })
             except Exception:
                 pass

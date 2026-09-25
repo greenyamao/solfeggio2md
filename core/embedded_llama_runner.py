@@ -176,7 +176,7 @@ class EmbeddedLlamaRunner:
                 "-np", str(int(parallel)),
                 "--port", str(self.port),
                 "--host", self.host,
-                "--ubatch", "512",
+                "--ubatch-size", "512",
             ]
             if flash_attention:
                 cmd.extend(["-fa", "1"])

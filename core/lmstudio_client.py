@@ -6,6 +6,7 @@ Handles connection health, model loading/unloading, and vision-language OCR requ
 import base64
 import json
 import re
+import time
 import urllib.request
 import urllib.error
 from typing import Dict, Any, Optional, List, Tuple
@@ -26,6 +27,10 @@ class LMStudioClient:
     @property
     def base_url(self) -> str:
         return f"http://{self.host}:{self.port}"
+
+    @base_url.setter
+    def base_url(self, val: str) -> None:
+        pass
 
     def _post(self, path: str, payload: Dict[str, Any], timeout: Optional[int] = None) -> Dict[str, Any]:
         url = f"{self.base_url}{path}"
