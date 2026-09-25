@@ -82,12 +82,29 @@ class StaffGraphicsView(QGraphicsView):
 
         self._scene.setSceneRect(self._pixmap_item.boundingRect())
 
-    def load_file(self, filepath: str) -> bool:
+    def clear_view(self) -> None:
+        """Clears the canvas and resets transformations."""
+        self.clear_bboxes()
+        if self._pixmap_item is not None:
+            try:
+                self._scene.removeItem(self._pixmap_item)
+            except Exception:
+                pass
+            self._pixmap_item = None
+        self._scene.clear()
+        self._pixmap_item = None
+        self._zoom_factor = 1.0
+        self.resetTransform()
+
+    def load_file(self, filepath: str, auto_fit: bool = True) -> bool:
         """Loads an image directly from disk using Qt's native C++ image reader."""
         pix = QPixmap(filepath)
         if pix.isNull():
+            self.clear_view()
             return False
         self.set_pixmap(pix)
+        if auto_fit:
+            self.fit_to_view()
         return True
 
     def fit_to_view(self) -> None:

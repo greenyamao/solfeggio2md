@@ -37,6 +37,11 @@ def _ml_worker_main(command_queue: mp.Queue, status_queue: mp.Queue, shm_name: s
         except Exception:
             pass
 
+    import warnings
+    warnings.filterwarnings("ignore")
+    os.environ["PYTHONWARNINGS"] = "ignore"
+    os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+
     from core.windows_perf import enable_windows_high_performance
     from core.pipeline_batch_runner import PipelineBatchRunner
 

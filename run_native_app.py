@@ -43,6 +43,12 @@ def main() -> None:
     # Mandatory for Windows multiprocessing spawn
     mp.freeze_support()
 
+    # Suppress non-critical third-party deprecation notices (torch pytree, triton flop_counter, transformers)
+    import warnings
+    warnings.filterwarnings("ignore")
+    os.environ["PYTHONWARNINGS"] = "ignore"
+    os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+
     # Hardware power optimization and timer resolution
     enable_windows_high_performance()
 
@@ -54,6 +60,12 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("PDF to Markdown Music Workbench")
     app.setOrganizationName("Antigravity")
+
+    # Ensure font has a positive pointSize on Windows to avoid QFont::setPointSize warnings
+    default_font = app.font()
+    if default_font.pointSize() <= 0:
+        default_font.setPointSize(9)
+        app.setFont(default_font)
 
     window = MainWindow()
     window.show()

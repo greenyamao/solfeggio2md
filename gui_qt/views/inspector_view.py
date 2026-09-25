@@ -11,6 +11,7 @@ Allows deep inspection of any processed book across 4 modes:
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from PySide6.QtCore import Qt
@@ -54,18 +55,27 @@ class InspectorView(QWidget):
         self._books: List[str] = []
         self._current_page: int = 1
         self._max_page: int = 1
-        self._book_page_counts: Dict[str, int] = {}
+        self._current_crops: List[Path] = []
 
         self._init_ui()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        if not self._books:
-            self.refresh_books()
+        self.refresh_books(preserve_current=True)
 
+    def keyPressEvent(self, event) -> None:
+        if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_PageUp):
+            self._prev_page()
+            event.accept()
+        elif event.key() in (Qt.Key.Key_Right, Qt.Key.Key_PageDown):
+            self._next_page()
+            event.accept()
+        else:
+            super().keyPressEvent(event)
 
     def _init_ui(self) -> None:
         self.setObjectName("InspectorView")
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(16, 12, 16, 12)
         main_layout.setSpacing(10)
@@ -129,6 +139,7 @@ class InspectorView(QWidget):
                 border: 1px solid #1e293b;
                 border-radius: 8px;
                 padding: 10px;
+                line-height: 1.4;
             }
         """)
         self.right_stack.addWidget(self.text_editor)
@@ -144,18 +155,19 @@ class InspectorView(QWidget):
         bar = CardWidget(self)
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(12, 8, 12, 8)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
         # Book selector
         layout.addWidget(CaptionLabel("Книга:", bar))
         self.combo_books = ComboBox(bar)
-        self.combo_books.setMinimumWidth(220)
+        self.combo_books.setMinimumWidth(240)
         self.combo_books.currentIndexChanged.connect(self._on_book_changed)
         layout.addWidget(self.combo_books)
 
         # Page navigation
         layout.addWidget(CaptionLabel("Стр:", bar))
         self.btn_prev = ToolButton(FluentIcon.LEFT_ARROW, bar)
+        self.btn_prev.setToolTip("Предыдущая страница (Клавиша: Влево)")
         self.btn_prev.clicked.connect(self._prev_page)
         layout.addWidget(self.btn_prev)
 
@@ -168,8 +180,20 @@ class InspectorView(QWidget):
         layout.addWidget(self.lbl_max_page)
 
         self.btn_next = ToolButton(FluentIcon.RIGHT_ARROW, bar)
+        self.btn_next.setToolTip("Следующая страница (Клавиша: Вправо)")
         self.btn_next.clicked.connect(self._next_page)
         layout.addWidget(self.btn_next)
+
+        # Staff Crop Selector (visible in Mode 2 & Mode 3 when multiple crops exist)
+        self.lbl_crop = CaptionLabel("Стан:", bar)
+        self.lbl_crop.setVisible(False)
+        layout.addWidget(self.lbl_crop)
+
+        self.combo_crops = ComboBox(bar)
+        self.combo_crops.setMinimumWidth(130)
+        self.combo_crops.setVisible(False)
+        self.combo_crops.currentIndexChanged.connect(self._on_crop_changed)
+        layout.addWidget(self.combo_crops)
 
         layout.addStretch()
 
@@ -185,13 +209,74 @@ class InspectorView(QWidget):
 
         # Refresh
         self.btn_refresh = ToolButton(FluentIcon.SYNC, bar)
-        self.btn_refresh.setToolTip("Обновить список книг")
-        self.btn_refresh.clicked.connect(self.refresh_books)
+        self.btn_refresh.setToolTip("Обновить книги и страницы")
+        self.btn_refresh.clicked.connect(lambda: self.refresh_books(preserve_current=True))
         layout.addWidget(self.btn_refresh)
 
         return bar
 
-    def refresh_books(self) -> None:
+    def _calculate_book_pages(self, book_dir: Path) -> int:
+        """Dynamically scans book output directory and checkpoint for available pages."""
+        max_p = 1
+
+        # 1. Check checkpoint.json
+        chk_file = book_dir / "checkpoint.json"
+        if chk_file.is_file():
+            try:
+                data = json.loads(chk_file.read_text(encoding="utf-8"))
+                slicing = data.get("phases", {}).get("slicing", {})
+                tot = slicing.get("total_pages", 0)
+                done = slicing.get("pages_done", 0)
+                if tot > 0:
+                    max_p = max(max_p, tot)
+                elif done > 0:
+                    max_p = max(max_p, done)
+            except Exception:
+                pass
+
+        # 2. Check 2_masked_pages
+        masked_dir = book_dir / "2_masked_pages"
+        if masked_dir.is_dir():
+            for f in masked_dir.glob("page_*_*.png"):
+                parts = f.stem.split("_")
+                if len(parts) >= 2 and parts[1].isdigit():
+                    max_p = max(max_p, int(parts[1]))
+
+        # 3. Check 1_crops
+        crops_dir = book_dir / "1_crops"
+        if crops_dir.is_dir():
+            for f in crops_dir.glob("*.png"):
+                m = re.search(r"_P(\d+)_", f.stem)
+                if m:
+                    max_p = max(max_p, int(m.group(1)))
+
+        # 4. Check 4_final_pages
+        final_dir = book_dir / "4_final_pages"
+        if final_dir.is_dir():
+            for f in final_dir.glob("page_*.md"):
+                parts = f.stem.split("_")
+                if len(parts) >= 2 and parts[1].isdigit():
+                    max_p = max(max_p, int(parts[1]))
+
+        return max(1, max_p)
+
+    def _find_page_crops(self, crops_dir: Path, p_num: int) -> List[Path]:
+        """Finds all non-deskew crop images belonging to page p_num."""
+        if not crops_dir.is_dir():
+            return []
+        pat = re.compile(rf"_P0*{p_num}_S\d+", re.IGNORECASE)
+        crops = []
+        for f in crops_dir.glob("*.png"):
+            if f.name.endswith("_deskew.png") or "preview" in f.name:
+                continue
+            if pat.search(f.name):
+                crops.append(f)
+        return sorted(crops)
+
+    def refresh_books(self, preserve_current: bool = False) -> None:
+        curr_book = self.combo_books.currentText() if preserve_current else None
+        curr_page = self._current_page if preserve_current else 1
+
         self.combo_books.blockSignals(True)
         self.combo_books.clear()
         self._books.clear()
@@ -202,36 +287,49 @@ class InspectorView(QWidget):
                     self._books.append(d.name)
                     self.combo_books.addItem(d.name)
 
-        self.combo_books.blockSignals(False)
-        if self._books:
-            self._on_book_changed(0)
+        if not self._books:
+            self.combo_books.blockSignals(False)
+            self._current_page = 1
+            self._max_page = 1
+            self.spin_page.setRange(1, 1)
+            self.spin_page.setValue(1)
+            self.lbl_max_page.setText("/ 1")
+            self.canvas_left.clear_view()
+            self.canvas_right.clear_view()
+            self.text_editor.clear()
+            self._update_nav_buttons()
+            return
 
-    def _on_book_changed(self, idx: int) -> None:
+        target_idx = 0
+        if curr_book and curr_book in self._books:
+            target_idx = self._books.index(curr_book)
+
+        self.combo_books.setCurrentIndex(target_idx)
+        self.combo_books.blockSignals(False)
+        self._on_book_changed(target_idx, initial_page=curr_page)
+
+    def _on_book_changed(self, idx: int, initial_page: int = 1) -> None:
         if idx < 0 or idx >= len(self._books):
             return
         book_title = self._books[idx]
         book_dir = self.output_root / book_title
-        raw_pages_dir = book_dir / "1_raw_pages"
 
-        # Count pages (cached)
-        if book_title in self._book_page_counts:
-            self._max_page = self._book_page_counts[book_title]
-        else:
-            pages = list(raw_pages_dir.glob("page_*_raw.png"))
-            if not pages:
-                pages = list(raw_pages_dir.glob("page_*.png"))
-            self._max_page = max(1, len(pages))
-            self._book_page_counts[book_title] = self._max_page
+        self._max_page = self._calculate_book_pages(book_dir)
 
+        target_p = max(1, min(initial_page, self._max_page))
         self.spin_page.blockSignals(True)
-        self.spin_page.setMaximum(self._max_page)
-        self.spin_page.setValue(1)
+        self.spin_page.setRange(1, self._max_page)
+        self.spin_page.setValue(target_p)
         self.spin_page.blockSignals(False)
 
         self.lbl_max_page.setText(f"/ {self._max_page}")
-
-        self._current_page = 1
+        self._current_page = target_p
+        self._update_nav_buttons()
         self._load_current_view()
+
+    def _update_nav_buttons(self) -> None:
+        self.btn_prev.setEnabled(self._current_page > 1)
+        self.btn_next.setEnabled(self._current_page < self._max_page)
 
     def _prev_page(self) -> None:
         if self._current_page > 1:
@@ -243,10 +341,15 @@ class InspectorView(QWidget):
 
     def _on_page_changed(self, val: int) -> None:
         self._current_page = val
+        self._update_nav_buttons()
         self._load_current_view()
 
     def _on_mode_changed(self, key: str) -> None:
         self._load_current_view()
+
+    def _on_crop_changed(self, idx: int) -> None:
+        if idx >= 0:
+            self._load_current_view()
 
     def _load_current_view(self) -> None:
         if not self._books:
@@ -255,81 +358,167 @@ class InspectorView(QWidget):
         book_title = self.combo_books.currentText()
         book_dir = self.output_root / book_title
         p_num = self._current_page
-        mode_key = self.mode_segmented.currentItem().property("name") if hasattr(self.mode_segmented.currentItem(), "property") else "mode1"
-        # Fallback to text check if property is empty
+
         cur_text = self.mode_segmented.currentItem().text() if self.mode_segmented.currentItem() else "1. Скан vs Маска"
 
-        raw_file = book_dir / "1_raw_pages" / f"page_{p_num:04d}_raw.png"
-        if not raw_file.is_file():
-            raw_file = book_dir / "1_raw_pages" / f"page_{p_num:04d}.png"
+        # Standard file locations
+        crops_dir = book_dir / "1_crops"
+        masked_dir = book_dir / "2_masked_pages"
+        raw_md_dir = book_dir / "3_raw_md"
+        final_dir = book_dir / "4_final_pages"
 
-        deskew_file = book_dir / "1_raw_pages" / f"page_{p_num:04d}_deskew.png"
-        mask_file = book_dir / "2_masked_pages" / f"page_{p_num:04d}_masked.png"
-        debug_file = book_dir / "2_masked_pages" / f"page_{p_num:04d}_debug.png"
-        md_file = book_dir / "4_final_pages" / f"page_{p_num:04d}.md"
+        debug_file = masked_dir / f"page_{p_num:04d}_debug.png"
+        mask_file = masked_dir / f"page_{p_num:04d}_masked.png"
+        raw_md_file = raw_md_dir / f"page_{p_num:04d}_raw.md"
+        final_md_file = final_dir / f"page_{p_num:04d}.md"
 
+        crops = self._find_page_crops(crops_dir, p_num)
+        self._current_crops = crops
+
+        # Update crops combo visibility
+        is_crop_mode = ("2. Дескев" in cur_text or "3. ABC" in cur_text)
+        if is_crop_mode and len(crops) > 0:
+            self.lbl_crop.setVisible(True)
+            self.combo_crops.setVisible(True)
+            prev_crop_idx = self.combo_crops.currentIndex()
+            self.combo_crops.blockSignals(True)
+            self.combo_crops.clear()
+            for i, c in enumerate(crops):
+                tag_match = re.search(r"_S(\d+)_", c.name)
+                tag_str = f"S{tag_match.group(1)}" if tag_match else f"S{i+1:02d}"
+                self.combo_crops.addItem(f"Стан {i+1} ({tag_str})", c)
+            if 0 <= prev_crop_idx < len(crops):
+                self.combo_crops.setCurrentIndex(prev_crop_idx)
+            else:
+                self.combo_crops.setCurrentIndex(0)
+            self.combo_crops.blockSignals(False)
+        else:
+            self.lbl_crop.setVisible(False)
+            self.combo_crops.setVisible(False)
+
+        selected_crop_idx = max(0, min(self.combo_crops.currentIndex(), len(crops) - 1)) if crops else 0
+        active_crop = crops[selected_crop_idx] if crops else None
+
+        # -------------------------------------------------------------
+        # Mode 1: Scan vs Mask
+        # -------------------------------------------------------------
         if "1. Скан" in cur_text:
             self.right_stack.setCurrentIndex(0)
             self.btn_copy.setVisible(False)
-            self.lbl_left_title.setText(f"СТР. {p_num}: РАЗМЕТКА BBOX")
+            self.lbl_left_title.setText(f"СТР. {p_num}: РАЗМЕТКА YOLO (BBOX)")
             self.lbl_right_title.setText(f"СТР. {p_num}: МАСКИРОВАННАЯ СТРАНИЦА")
 
-            src_left = debug_file if debug_file.is_file() else raw_file
-            if src_left.is_file():
+            src_left = debug_file if debug_file.is_file() else mask_file
+            if src_left and src_left.is_file():
                 self.canvas_left.load_file(str(src_left))
+            else:
+                self.canvas_left.clear_view()
+                self.lbl_left_title.setText(f"СТР. {p_num}: ЕЩЁ НЕ ОБРАБОТАНА (СЛАЙСИНГ)")
+
             if mask_file.is_file():
                 self.canvas_right.load_file(str(mask_file))
+            else:
+                self.canvas_right.clear_view()
+                self.lbl_right_title.setText(f"СТР. {p_num}: МАСКА НЕ СФОРМИРОВАНА")
 
+        # -------------------------------------------------------------
+        # Mode 2: Deskew
+        # -------------------------------------------------------------
         elif "2. Дескев" in cur_text:
             self.right_stack.setCurrentIndex(0)
             self.btn_copy.setVisible(False)
-            self.lbl_left_title.setText(f"СТР. {p_num}: ИСХОДНЫЙ СКАН")
-            self.lbl_right_title.setText(f"СТР. {p_num}: 2D-DFT ВЫРАВНИВАНИЕ")
 
-            if raw_file.is_file():
-                self.canvas_left.load_file(str(raw_file))
-            if deskew_file.is_file():
-                self.canvas_right.load_file(str(deskew_file))
+            if active_crop is not None and active_crop.is_file():
+                self.lbl_left_title.setText(f"СТР. {p_num} (СТАН {selected_crop_idx + 1}/{len(crops)}): ИСХОДНЫЙ КРОП")
+                self.lbl_right_title.setText(f"СТР. {p_num} (СТАН {selected_crop_idx + 1}/{len(crops)}): 2D-DFT ВЫРАВНИВАНИЕ")
 
+                self.canvas_left.load_file(str(active_crop))
+
+                deskew_path = active_crop.parent / f"{active_crop.stem}_deskew.png"
+                if deskew_path.is_file():
+                    self.canvas_right.load_file(str(deskew_path))
+                else:
+                    self.canvas_right.load_file(str(active_crop))
+            else:
+                # No crops on this page: show page scan
+                src_page = debug_file if debug_file.is_file() else mask_file
+                if src_page and src_page.is_file():
+                    self.canvas_left.load_file(str(src_page))
+                else:
+                    self.canvas_left.clear_view()
+                self.canvas_right.clear_view()
+
+                self.lbl_left_title.setText(f"СТР. {p_num}: ТЕКСТОВАЯ СТРАНИЦА")
+                self.lbl_right_title.setText(f"СТР. {p_num}: НОТНЫХ СТАНОВ НЕ ОБНАРУЖЕНО")
+
+        # -------------------------------------------------------------
+        # Mode 3: ABC Notes
+        # -------------------------------------------------------------
         elif "3. ABC" in cur_text:
             self.right_stack.setCurrentIndex(1)
             self.btn_copy.setVisible(True)
-            self.lbl_left_title.setText(f"СТР. {p_num}: НОТНЫЕ СТАНЫ")
-            self.lbl_right_title.setText(f"СТР. {p_num}: ДЕКОДИРОВАННЫЕ НОТЫ (ABC)")
 
-            crops_dir = book_dir / "1_crops"
-            crops = sorted(crops_dir.glob(f"*_P{p_num:04d}_*.png"))
-            crops = [c for c in crops if not c.name.endswith("_deskew.png")]
-
-            if crops:
-                self.canvas_left.load_file(str(crops[0]))
+            if active_crop is not None and active_crop.is_file():
+                self.lbl_left_title.setText(f"СТР. {p_num} (СТАН {selected_crop_idx + 1}/{len(crops)}): НОТНЫЙ СТАН")
+                deskew_path = active_crop.parent / f"{active_crop.stem}_deskew.png"
+                disp_crop = deskew_path if deskew_path.is_file() else active_crop
+                self.canvas_left.load_file(str(disp_crop))
+            else:
+                src_page = debug_file if debug_file.is_file() else mask_file
+                if src_page and src_page.is_file():
+                    self.canvas_left.load_file(str(src_page))
+                else:
+                    self.canvas_left.clear_view()
+                self.lbl_left_title.setText(f"СТР. {p_num}: НОТНЫХ СТАНОВ НЕ ОБНАРУЖЕНО")
 
             # Collect ABC codes
             abc_texts = []
-            abcs_dir = book_dir / "3_abcs"
-            for c in crops:
-                abc_f = abcs_dir / f"{c.stem}.abc"
-                if abc_f.is_file():
-                    abc_texts.append(f"%% --- {c.name} ---\n" + abc_f.read_text(encoding="utf-8"))
+            if crops:
+                for i, c in enumerate(crops):
+                    abc_f = c.with_suffix(".abc")
+                    if abc_f.is_file() and abc_f.stat().st_size > 0:
+                        code = abc_f.read_text(encoding="utf-8").strip()
+                        abc_texts.append(f"% --- Стан {i + 1} ({c.name}) ---\n{code}")
 
             if abc_texts:
                 self.text_editor.setPlainText("\n\n".join(abc_texts))
+                self.lbl_right_title.setText(f"СТР. {p_num}: ДЕКОДИРОВАННЫЕ НОТЫ (ABC)")
+            elif crops:
+                self.text_editor.setPlainText(
+                    f"На странице {p_num} обнаружено {len(crops)} нотных станов.\n"
+                    "Они находятся в очереди OMR-распознавания модели Transcoda-59M."
+                )
+                self.lbl_right_title.setText(f"СТР. {p_num}: ОЖИДАЕТ OMR РАСПОЗНАВАНИЯ")
             else:
-                self.text_editor.setPlainText("Ноты для данной страницы пока не распознаны.")
+                self.text_editor.setPlainText(f"На странице {p_num} нотные станы не обнаружены (текстовая страница).")
+                self.lbl_right_title.setText(f"СТР. {p_num}: НОТ НЕТ")
 
+        # -------------------------------------------------------------
+        # Mode 4: Markdown
+        # -------------------------------------------------------------
         elif "4. Markdown" in cur_text:
             self.right_stack.setCurrentIndex(1)
             self.btn_copy.setVisible(True)
             self.lbl_left_title.setText(f"СТР. {p_num}: СКАН СТРАНИЦЫ")
-            self.lbl_right_title.setText(f"СТР. {p_num}: СОБРАННЫЙ MARKDOWN ДОКУМЕНТ")
 
-            if raw_file.is_file():
-                self.canvas_left.load_file(str(raw_file))
-
-            if md_file.is_file():
-                self.text_editor.setPlainText(md_file.read_text(encoding="utf-8"))
+            src_page = debug_file if debug_file.is_file() else mask_file
+            if src_page and src_page.is_file():
+                self.canvas_left.load_file(str(src_page))
             else:
-                self.text_editor.setPlainText(f"Финальный документ {md_file.name} ещё не собран.")
+                self.canvas_left.clear_view()
+
+            if final_md_file.is_file():
+                self.text_editor.setPlainText(final_md_file.read_text(encoding="utf-8"))
+                self.lbl_right_title.setText(f"СТР. {p_num}: СОБРАННЫЙ MARKDOWN ДОКУМЕНТ")
+            elif raw_md_file.is_file():
+                self.text_editor.setPlainText(raw_md_file.read_text(encoding="utf-8"))
+                self.lbl_right_title.setText(f"СТР. {p_num}: ЧЕРНОВИК VLM OCR (БЕЗ НОТ)")
+            else:
+                self.text_editor.setPlainText(
+                    f"Markdown документ для страницы {p_num} ещё не сформирован.\n"
+                    "Страница ожидает этапа VLM OCR (Qwen 3.5) или финальной сборки."
+                )
+                self.lbl_right_title.setText(f"СТР. {p_num}: ОЖИДАЕТ ОБРАБОТКИ")
 
     def _copy_code(self) -> None:
         txt = self.text_editor.toPlainText()
