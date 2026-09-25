@@ -1649,6 +1649,10 @@ class PipelineBatchRunner:
 
         system_prompt = self.config.get("system_prompt", DEFAULT_CONFIG["system_prompt"])
         vlm_done_count = len(existing_valid_mds)
+        init_pct_p3 = round((vlm_done_count / max(1, total_masks)) * 100.0, 1)
+        init_msg = f"{vlm_done_count}/{total_masks} pages completed"
+        self._update_phase_progress("phase3", init_pct_p3, vlm_done_count, total_masks, "running", init_msg)
+        self._update_hud("Phase 3/4: Text VLM pass", 55.0 + (vlm_done_count / total_masks) * 35.0, init_msg)
 
         for m_idx, mask_file in enumerate(mask_files, start=1):
             if self._stop_event.is_set():
@@ -1697,10 +1701,10 @@ class PipelineBatchRunner:
                 vlm_done_count += 1
                 chk["phases"]["vlm"]["pages_done"] = vlm_done_count
                 self._write_checkpoint(masked_dir.parent.name, chk)
-                pct_p3 = round((m_idx / max(1, total_masks)) * 100.0, 1)
-                detail_msg = f"Page {m_idx}/{total_masks} (Blank page)"
-                self._update_phase_progress("phase3", pct_p3, m_idx, total_masks, "running", detail_msg)
-                self._update_hud("Phase 3/4: Text VLM pass", 55.0 + (m_idx / total_masks) * 35.0, detail_msg)
+                pct_p3 = round((vlm_done_count / max(1, total_masks)) * 100.0, 1)
+                detail_msg = f"Page {p_num} • {vlm_done_count}/{total_masks} done (Blank)"
+                self._update_phase_progress("phase3", pct_p3, vlm_done_count, total_masks, "running", detail_msg)
+                self._update_hud("Phase 3/4: Text VLM pass", 55.0 + (vlm_done_count / total_masks) * 35.0, detail_msg)
                 continue
 
             # Notify UI that image analysis is in progress for page p_val (without wiping previous page preview)
@@ -1748,6 +1752,8 @@ class PipelineBatchRunner:
                 )
                 extracted_text = detailed["text"]
                 sanitized_text = self._sanitize_vlm_text(extracted_text, valid_stubs=page_stubs_set)
+                if not sanitized_text.strip():
+                    sanitized_text = f"## Page {p_val}\n\n<!-- No text detected on page -->\n"
                 tok_per_sec = detailed.get("tokens_per_second", 0.0)
                 duration = detailed.get("duration", 0.0)
                 tok_count = detailed.get("tokens_count", 0)
@@ -1798,12 +1804,12 @@ class PipelineBatchRunner:
             chk["phases"]["vlm"]["pages_done"] = vlm_done_count
             self._write_checkpoint(masked_dir.parent.name, chk)
 
-            pct_p3 = round((m_idx / max(1, total_masks)) * 100.0, 1)
-            detail_msg = f"Page {m_idx}/{total_masks} (Qwen VLM)"
-            self._update_phase_progress("phase3", pct_p3, m_idx, total_masks, "running", detail_msg)
+            pct_p3 = round((vlm_done_count / max(1, total_masks)) * 100.0, 1)
+            detail_msg = f"Page {p_num} • {vlm_done_count}/{total_masks} done (Qwen VLM)"
+            self._update_phase_progress("phase3", pct_p3, vlm_done_count, total_masks, "running", detail_msg)
             self._update_hud(
                 "Phase 3/4: Text VLM pass",
-                55.0 + (m_idx / total_masks) * 35.0,
+                55.0 + (vlm_done_count / total_masks) * 35.0,
                 detail_msg,
             )
 
