@@ -51,7 +51,7 @@ DEFAULT_CONFIG = {
     "vlm_embedded_port": 1234,
     "lm_temperature": 0.1,
     "lm_max_tokens": 2048,
-    "output_dir": str(ROOT_DIR / "output"),
+    "output_dir": "output",
     "dpi": 200,
     "delay": 0.2,
     "smt_max_tokens": 512,
@@ -88,17 +88,40 @@ class PipelineBatchRunner:
         self.config_path = config_path or DEFAULT_CONFIG_FILE
         self.config = self.load_config()
         cfg_out = self.config.get("output_dir", "output")
-        p_out = Path(cfg_out)
-        if not p_out.is_absolute():
-            self.output_root = (ROOT_DIR / p_out).resolve()
-        else:
-            if not p_out.exists() or "Users" in str(p_out):
-                self.output_root = (ROOT_DIR / "output").resolve()
+        try:
+            p_out = Path(cfg_out)
+            if not p_out.is_absolute():
+                target_out = (self.config_path.parent / p_out).resolve()
             else:
-                self.output_root = p_out
-        self.output_root.mkdir(parents=True, exist_ok=True)
-        self.input_dir = ROOT_DIR / "in"
-        self.input_dir.mkdir(parents=True, exist_ok=True)
+                target_out = p_out.resolve()
+            target_out.mkdir(parents=True, exist_ok=True)
+            self.output_root = target_out
+        except Exception:
+            fallback = (self.config_path.parent / "output").resolve()
+            try:
+                fallback.mkdir(parents=True, exist_ok=True)
+                self.output_root = fallback
+            except Exception:
+                self.output_root = (ROOT_DIR / "output").resolve()
+                self.output_root.mkdir(parents=True, exist_ok=True)
+
+        cfg_in = self.config.get("input_dir", "in")
+        try:
+            p_in = Path(cfg_in)
+            if not p_in.is_absolute():
+                target_in = (self.config_path.parent / p_in).resolve()
+            else:
+                target_in = p_in.resolve()
+            target_in.mkdir(parents=True, exist_ok=True)
+            self.input_dir = target_in
+        except Exception:
+            fallback_in = (self.config_path.parent / "in").resolve()
+            try:
+                fallback_in.mkdir(parents=True, exist_ok=True)
+                self.input_dir = fallback_in
+            except Exception:
+                self.input_dir = (ROOT_DIR / "in").resolve()
+                self.input_dir.mkdir(parents=True, exist_ok=True)
 
         # Queue of items: [{"id": "1", "name": "1.pdf", "path": "in/1.pdf", "pages": 48, "status": "pending"}]
         self.queue: List[Dict[str, Any]] = []
@@ -202,17 +225,40 @@ class PipelineBatchRunner:
                 json.dumps(self.config, indent=2, ensure_ascii=False), encoding="utf-8"
             )
             cfg_out = self.config.get("output_dir", "output")
-            p_out = Path(cfg_out)
-            if not p_out.is_absolute():
-                self.output_root = (ROOT_DIR / p_out).resolve()
-            else:
-                if not p_out.exists() or "Users" in str(p_out):
-                    self.output_root = (ROOT_DIR / "output").resolve()
+            try:
+                p_out = Path(cfg_out)
+                if not p_out.is_absolute():
+                    target_out = (self.config_path.parent / p_out).resolve()
                 else:
-                    self.output_root = p_out
-            self.output_root.mkdir(parents=True, exist_ok=True)
-            self.input_dir = ROOT_DIR / "in"
-            self.input_dir.mkdir(parents=True, exist_ok=True)
+                    target_out = p_out.resolve()
+                target_out.mkdir(parents=True, exist_ok=True)
+                self.output_root = target_out
+            except Exception:
+                fallback = (self.config_path.parent / "output").resolve()
+                try:
+                    fallback.mkdir(parents=True, exist_ok=True)
+                    self.output_root = fallback
+                except Exception:
+                    self.output_root = (ROOT_DIR / "output").resolve()
+                    self.output_root.mkdir(parents=True, exist_ok=True)
+
+            cfg_in = self.config.get("input_dir", "in")
+            try:
+                p_in = Path(cfg_in)
+                if not p_in.is_absolute():
+                    target_in = (self.config_path.parent / p_in).resolve()
+                else:
+                    target_in = p_in.resolve()
+                target_in.mkdir(parents=True, exist_ok=True)
+                self.input_dir = target_in
+            except Exception:
+                fallback_in = (self.config_path.parent / "in").resolve()
+                try:
+                    fallback_in.mkdir(parents=True, exist_ok=True)
+                    self.input_dir = fallback_in
+                except Exception:
+                    self.input_dir = (ROOT_DIR / "in").resolve()
+                    self.input_dir.mkdir(parents=True, exist_ok=True)
             self.lm_client.host = self.config.get("lm_host", "127.0.0.1")
             self.lm_client.port = str(self.config.get("lm_port", "1234"))
 
