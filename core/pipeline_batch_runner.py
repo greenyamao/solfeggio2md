@@ -761,6 +761,43 @@ class PipelineBatchRunner:
             if detail:
                 self.metrics["current_item_detail"] = detail
 
+    def _create_batch_composite(
+        self, crops_bgr: List[np.ndarray], titles: List[str], classes: List[str]
+    ) -> Optional[np.ndarray]:
+        """Creates a unified vertical collage of all crops in the current OMR batch."""
+        if not crops_bgr:
+            return None
+
+        max_w = max(c.shape[1] for c in crops_bgr)
+        pad_x = 24
+        banner_h = 24
+        gap = 12
+
+        total_h = sum(c.shape[0] + banner_h + gap for c in crops_bgr) + gap
+        canvas = np.full((total_h, max_w + pad_x * 2, 3), (15, 23, 42), dtype=np.uint8)  # Deep slate #0f172a
+
+        y = gap
+        for i, (c, t, cls_name) in enumerate(zip(crops_bgr, titles, classes)):
+            h, w = c.shape[:2]
+            header_text = f"[{i+1}/{len(crops_bgr)}] {t} ({cls_name})"
+            col = (250, 204, 21) if "grand" in cls_name else (56, 189, 248)  # Gold for grand, Cyan for staff
+            cv2.putText(
+                canvas,
+                header_text,
+                (pad_x, y + 16),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.46,
+                col,
+                1,
+                cv2.LINE_AA,
+            )
+            y += banner_h
+            canvas[y : y + h, pad_x : pad_x + w] = c
+            cv2.rectangle(canvas, (pad_x - 1, y - 1), (pad_x + w, y + h), (51, 65, 85), 1)
+            y += h + gap
+
+        return canvas
+
     def _transcribe_crops_batch_files(self, crops_dir: Path, batch_files: List[Path]) -> int:
         """Transcribes a batch of crop image files via self.omr_engine and persists .abc and .kern outputs."""
         if not batch_files or self.omr_engine is None:
@@ -805,11 +842,31 @@ class PipelineBatchRunner:
         if not batch_crops_bgr:
             return 0
 
+        # Generate and broadcast consolidated multi-crop visual batch preview
+        composite_bgr = self._create_batch_composite(batch_crops_bgr, batch_titles, batch_classes)
+        if composite_bgr is not None:
+            preview_file = crops_dir.parent / "omr_batch_preview.png"
+            try:
+                cv2.imwrite(str(preview_file), composite_bgr)
+                rel_prev = preview_file.relative_to(self.output_root).as_posix()
+                with self._lock:
+                    self.metrics["current_page_image_url"] = f"/output/{rel_prev}"
+                    self.metrics["current_page_image_path"] = str(preview_file)
+                if self.on_frame_update is not None:
+                    self.on_frame_update(composite_bgr, {
+                        "path": str(preview_file),
+                        "stage": "phase2",
+                        "title": f"OMR Пачка ({len(batch_crops_bgr)} станов)",
+                    })
+            except Exception:
+                pass
+
         results = self.omr_engine.transcribe_crops_batch(
             crops_bgr=batch_crops_bgr,
             notation_classes=batch_classes,
             titles=batch_titles
         )
+
 
         saved_count = 0
         for cf, res in zip(valid_batch_files, results):
@@ -1132,22 +1189,8 @@ class PipelineBatchRunner:
                             chk["phases"]["omr"]["crops_done"] = cd
                             self._write_checkpoint(pdf_path.stem, chk)
 
-                            try:
-                                rel_crop = batch[-1].relative_to(self.output_root).as_posix()
-                                with self._lock:
-                                    self.metrics["current_page_image_url"] = f"/output/{rel_crop}"
-                                    self.metrics["current_page_image_path"] = str(batch[-1])
-                                if self.on_frame_update is not None:
-                                    self.on_frame_update(None, {
-                                        "path": str(batch[-1]),
-                                        "stage": "phase2",
-                                        "book": pdf_path.stem,
-                                        "page": cd,
-                                        "title": f"Стан {cd}/{tc} — OMR распознавание",
-                                    })
-                            except Exception:
-                                pass
                             self.log_event("OMR", f"Распознана пачка ({saved} станов, всего: {cd}/{tc})")
+
 
                             pct_p2 = round((cd / tc) * 100.0, 1)
                             omr_detail = f"Стан {cd}/{tc} (пачка {len(batch)})"
