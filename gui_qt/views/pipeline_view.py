@@ -403,18 +403,18 @@ class PipelineView(QWidget):
         if is_new_page:
             self._active_text_page = page
             self.text_preview.clear()
-            title_str = f"RECOGNIZED TEXT (MARKDOWN • PAGE {page})" if page else "RECOGNIZED TEXT (MARKDOWN)"
+            title_str = f"RECOGNIZED TEXT & MUSIC (PAGE {page})" if page else "RECOGNIZED TEXT & MUSIC"
             self.lbl_text_title.setText(title_str)
             self.lbl_text_title.setStyleSheet("color: #38bdf8; font-weight: 700; font-size: 11px;")
             if img_path and os.path.isfile(img_path):
                 if img_path != self._current_image_path:
                     self._current_image_path = img_path
                     self.canvas_view.load_file(img_path)
-                self.lbl_mon_title.setText(f"LIVE MONITOR: Page {page} — VLM masked page")
+                self.lbl_mon_title.setText(f"LIVE MONITOR: Page {page} — Text & Music")
         elif img_path and os.path.isfile(img_path) and img_path != self._current_image_path:
             self._current_image_path = img_path
             self.canvas_view.load_file(img_path)
-            self.lbl_mon_title.setText(f"LIVE MONITOR: Page {page} — VLM masked page")
+            self.lbl_mon_title.setText(f"LIVE MONITOR: Page {page} — Text & Music")
 
         if is_comp:
             self.text_preview.setPlainText(full_text)

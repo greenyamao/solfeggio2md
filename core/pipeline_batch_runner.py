@@ -742,7 +742,7 @@ class PipelineBatchRunner:
         if not (slicing_done and omr_done):
             if slicing_done:
                 # Slicing already done on disk; only run remaining OMR
-                self._update_hud("Phase 2/4: Optical Music Recognition (Transcoda-59M)", 25.0)
+                self._update_hud("Phase 2/3: Optical Music Recognition (Transcoda-59M)", 30.0)
                 ok = self._phase_2_omr(crops_dir, chk, overwrite)
                 if not ok:
                     return False
@@ -759,23 +759,18 @@ class PipelineBatchRunner:
                 self._write_checkpoint(book_title, chk)
 
         # ---------------- VRAM Purge Barrier before VLM ---------------- #
-        self._update_hud("Purging GPU VRAM before VLM...", 50.0)
+        self._update_hud("Purging GPU VRAM before VLM...", 60.0)
         self._purge_vram()
 
-        # ---------------- Phase 3: VLM Text Recognition ---------------- #
+        # ---------------- Phase 3: Text VLM & Music Integration ---------------- #
         if not chk["phases"]["vlm"]["completed"] or overwrite:
-            self._update_hud("Phase 3/4: Book text extraction (VLM)", 55.0)
+            self._update_hud("Phase 3/3: Text OCR & Music Integration", 60.0)
             ok = self._phase_3_vlm(masked_dir, raw_md_dir, chk, overwrite)
             if not ok:
                 return False
             chk["phases"]["vlm"]["completed"] = True
+            chk["phases"]["assembly"]["completed"] = True
             self._write_checkpoint(book_title, chk)
-
-        # ---------------- Phase 4: Final Assembly ---------------- #
-        self._update_hud("Phase 4/4: Assembling final Markdown edition", 90.0)
-        ok = self._phase_4_assembly(book_dir, raw_md_dir, crops_dir, final_dir, chk)
-        if not ok:
-            return False
 
         chk["phases"]["assembly"]["completed"] = True
         chk["status"] = "completed"
@@ -798,7 +793,7 @@ class PipelineBatchRunner:
                     "phase1": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": ""},
                     "phase2": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": ""},
                     "phase3": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": ""},
-                    "phase4": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": ""},
+                    "phase4": {"pct": 100.0, "done": 1, "total": 1, "status": "completed", "detail": "Integrated"},
                 }
             p = self.metrics["phase_progress"].setdefault(phase_id, {})
             p["pct"] = round(min(100.0, max(0.0, float(pct))), 1)
@@ -808,12 +803,11 @@ class PipelineBatchRunner:
             if detail:
                 p["detail"] = str(detail)
 
-            # Recalculate book_progress_pct across all 4 phases (weights: P1=25%, P2=25%, P3=35%, P4=15%)
+            # Recalculate book_progress_pct across 3 phases (weights: P1=30%, P2=30%, P3=40%)
             p1 = self.metrics["phase_progress"]["phase1"]["pct"]
             p2 = self.metrics["phase_progress"]["phase2"]["pct"]
             p3 = self.metrics["phase_progress"]["phase3"]["pct"]
-            p4 = self.metrics["phase_progress"]["phase4"]["pct"]
-            book_overall_pct = round((p1 * 0.25) + (p2 * 0.25) + (p3 * 0.35) + (p4 * 0.15), 1)
+            book_overall_pct = round((p1 * 0.30) + (p2 * 0.30) + (p3 * 0.40), 1)
             self.metrics["book_progress_pct"] = book_overall_pct
 
             # Calculate continuous queue_progress_pct
@@ -1551,7 +1545,67 @@ class PipelineBatchRunner:
         self._write_checkpoint(crops_dir.parent.name, chk)
         return True
 
-    # ---------------- Phase 3 Implementation ---------------- #
+    # ---------------- Music Notation Injection Helper ---------------- #
+
+    def _inject_music_stubs(self, text: str, page_stubs: List[str], crops_dir: Path) -> str:
+        """
+        Replaces <!-- MUSIC_STUB_ID:xyz --> tags with ```abc and ```kern blocks from crops_dir.
+        If any stubs from page_stubs were omitted by the model, appends them cleanly as recovered stubs.
+        """
+        injected_stubs = set()
+
+        def _inject(match: re.Match) -> str:
+            cid = match.group(1).strip()
+            injected_stubs.add(cid)
+            abc_file = crops_dir / f"{cid}.abc"
+            kern_file = crops_dir / f"{cid}.kern"
+
+            blocks = []
+            if abc_file.is_file():
+                abc = abc_file.read_text(encoding="utf-8", errors="replace").strip()
+                if abc and not abc.startswith("% [OMR Conversion Error"):
+                    blocks.append(f"```abc\n{abc}\n```")
+
+            if kern_file.is_file():
+                raw_kern = kern_file.read_text(encoding="utf-8", errors="replace").strip()
+                if raw_kern:
+                    try:
+                        healed_kern = self.bridge.normalize_humdrum(raw_kern)
+                        blocks.append(f"```kern\n{healed_kern}\n```")
+                    except Exception:
+                        blocks.append(f"```kern\n{raw_kern}\n```")
+
+            if blocks:
+                return "\n\n" + "\n\n".join(blocks) + "\n\n"
+            return f"\n\n<!-- MUSIC_STUB_ID:{cid} (Notes not found, awaiting OMR) -->\n\n"
+
+        result = re.sub(r"<!--\s*MUSIC_STUB_ID:\s*(.*?)\s*-->", _inject, text)
+
+        # Fallback recovery for omitted stubs
+        missing_stubs = [s for s in page_stubs if s not in injected_stubs]
+        if missing_stubs:
+            recovered_blocks = []
+            for ms in missing_stubs:
+                abc_file = crops_dir / f"{ms}.abc"
+                kern_file = crops_dir / f"{ms}.kern"
+                if abc_file.is_file():
+                    abc = abc_file.read_text(encoding="utf-8", errors="replace").strip()
+                    if abc and not abc.startswith("% [OMR Conversion Error"):
+                        recovered_blocks.append(f"```abc\n{abc}\n```")
+                if kern_file.is_file():
+                    raw_kern = kern_file.read_text(encoding="utf-8", errors="replace").strip()
+                    if raw_kern:
+                        try:
+                            healed_kern = self.bridge.normalize_humdrum(raw_kern)
+                            recovered_blocks.append(f"```kern\n{healed_kern}\n```")
+                        except Exception:
+                            recovered_blocks.append(f"```kern\n{raw_kern}\n```")
+            if recovered_blocks:
+                result += "\n\n<!-- RECOVERED_MUSIC_STUBS -->\n\n" + "\n\n".join(recovered_blocks) + "\n"
+
+        return result
+
+    # ---------------- Phase 3: Text OCR & Music Integration ---------------- #
 
     def _phase_3_vlm(
         self, masked_dir: Path, raw_md_dir: Path, chk: Dict[str, Any], overwrite: bool
@@ -1559,6 +1613,11 @@ class PipelineBatchRunner:
         mask_files = sorted(masked_dir.glob("page_*_masked.png"))
         total_masks = len(mask_files)
         chk["phases"]["vlm"]["total_pages"] = total_masks
+
+        book_dir = masked_dir.parent
+        crops_dir = book_dir / "1_crops"
+        final_dir = book_dir / "4_final_pages"
+        final_dir.mkdir(parents=True, exist_ok=True)
 
         if total_masks == 0:
             chk["phases"]["vlm"]["completed"] = True
@@ -1584,7 +1643,8 @@ class PipelineBatchRunner:
             chk["phases"]["vlm"]["pages_done"] = total_masks
             self._write_checkpoint(masked_dir.parent.name, chk)
             self._update_phase_progress("phase3", 100.0, total_masks, total_masks, "completed", f"All {total_masks} pages ready")
-            self._update_hud("Phase 3/4: VLM text already extracted on disk", 90.0, f"All {total_masks} pages ready")
+            self._update_hud("Phase 3/3: Text OCR & Music Integration complete", 100.0, f"All {total_masks} pages ready")
+            self._phase_4_assembly(book_dir, raw_md_dir, crops_dir, final_dir, chk)
             return True
 
         # Check if VLM is explicitly skipped by configuration
@@ -1594,7 +1654,8 @@ class PipelineBatchRunner:
             chk["phases"]["vlm"]["pages_done"] = total_masks
             self._write_checkpoint(masked_dir.parent.name, chk)
             self._update_phase_progress("phase3", 100.0, total_masks, total_masks, "skipped", "Skipped (skip_vlm=True)")
-            self._update_hud("Phase 3/4: VLM OCR skipped (skip_vlm=True)", 90.0, "Text VLM disabled in settings")
+            self._update_hud("Phase 3/3: VLM OCR skipped (skip_vlm=True)", 100.0, "Text VLM disabled in settings")
+            self._phase_4_assembly(book_dir, raw_md_dir, crops_dir, final_dir, chk)
             return True
 
         # Check VLM backend choice
@@ -1633,6 +1694,7 @@ class PipelineBatchRunner:
             self.log_event("WARN", f"VLM server unavailable: {msg}. Running fallback...")
             ok = self._vlm_fallback_mode(mask_files, raw_md_dir, chk)
             self._update_phase_progress("phase3", 100.0, total_masks, total_masks, "completed", "Generated (fallback)")
+            self._phase_4_assembly(book_dir, raw_md_dir, crops_dir, final_dir, chk)
             return ok
 
         # If backend is LM Studio, attempt explicit model loading
@@ -1654,7 +1716,7 @@ class PipelineBatchRunner:
         init_pct_p3 = round((vlm_done_count / max(1, total_masks)) * 100.0, 1)
         init_msg = f"{vlm_done_count}/{total_masks} pages completed"
         self._update_phase_progress("phase3", init_pct_p3, vlm_done_count, total_masks, "running", init_msg)
-        self._update_hud("Phase 3/4: Text VLM pass", 55.0 + (vlm_done_count / total_masks) * 35.0, init_msg)
+        self._update_hud("Phase 3/3: Text OCR & Music Integration", 60.0 + (vlm_done_count / total_masks) * 40.0, init_msg)
 
         for m_idx, mask_file in enumerate(mask_files, start=1):
             if self._stop_event.is_set():
@@ -1664,9 +1726,7 @@ class PipelineBatchRunner:
             p_num_str = re.search(r"page_(\d+)_masked", mask_file.stem)
             p_num = p_num_str.group(1) if p_num_str else f"{m_idx:04d}"
             raw_md_file = raw_md_dir / f"page_{p_num}_raw.md"
-
-            if not overwrite and p_num in existing_valid_mds:
-                continue
+            final_file = final_dir / f"page_{p_num}.md"
 
             crops_dir = masked_dir.parent / "1_crops"
             page_stubs = []
@@ -1678,11 +1738,30 @@ class PipelineBatchRunner:
             page_stubs_set = set(page_stubs)
             p_val = int(p_num) if p_num.isdigit() else m_idx
 
+            if not overwrite and p_num in existing_valid_mds:
+                if not final_file.is_file() or final_file.stat().st_size == 0:
+                    try:
+                        existing_txt = raw_md_file.read_text(encoding="utf-8")
+                        injected = self._inject_music_stubs(existing_txt, page_stubs, crops_dir)
+                        final_file.write_text(injected, encoding="utf-8")
+                        try:
+                            (final_dir / f"page_{p_val:04d}_final.md").write_text(injected, encoding="utf-8")
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                continue
+
             # Blank page check: zero music staves and pure white unprinted paper
             if len(page_stubs) == 0 and self._is_blank_image(mask_file):
                 self.log_event("VLM", f"Page {p_num}: blank page (VLM skipped)")
                 blank_txt = f"## Page {p_val}\n\n<!-- Blank page -->\n"
                 raw_md_file.write_text(blank_txt, encoding="utf-8")
+                final_file.write_text(blank_txt, encoding="utf-8")
+                try:
+                    (final_dir / f"page_{p_val:04d}_final.md").write_text(blank_txt, encoding="utf-8")
+                except Exception:
+                    pass
                 try:
                     rel_mask = mask_file.relative_to(self.output_root).as_posix()
                     with self._lock:
@@ -1706,7 +1785,7 @@ class PipelineBatchRunner:
                 pct_p3 = round((vlm_done_count / max(1, total_masks)) * 100.0, 1)
                 detail_msg = f"Page {p_num} • {vlm_done_count}/{total_masks} done (Blank)"
                 self._update_phase_progress("phase3", pct_p3, vlm_done_count, total_masks, "running", detail_msg)
-                self._update_hud("Phase 3/4: Text VLM pass", 55.0 + (vlm_done_count / total_masks) * 35.0, detail_msg)
+                self._update_hud("Phase 3/3: Text OCR & Music Integration", 60.0 + (vlm_done_count / total_masks) * 40.0, detail_msg)
                 continue
 
             # Notify UI that image analysis is in progress for page p_val (without wiping previous page preview)
@@ -1768,6 +1847,16 @@ class PipelineBatchRunner:
                     sanitized_text = self._sanitize_vlm_text(extracted_text, valid_stubs=page_stubs_set)
                     if not sanitized_text.strip():
                         sanitized_text = f"## Page {p_val}\n\n<!-- No text detected on page -->\n"
+                    raw_md_file.write_text(sanitized_text, encoding="utf-8")
+
+                    # On-the-fly music notation integration: embed ABC and Humdrum blocks
+                    injected_text = self._inject_music_stubs(sanitized_text, page_stubs, crops_dir)
+                    final_file.write_text(injected_text, encoding="utf-8")
+                    try:
+                        (final_dir / f"page_{p_val:04d}_final.md").write_text(injected_text, encoding="utf-8")
+                    except Exception:
+                        pass
+
                     tok_per_sec = detailed.get("tokens_per_second", 0.0)
                     duration = detailed.get("duration", 0.0)
                     tok_count = detailed.get("tokens_count", 0)
@@ -1776,17 +1865,16 @@ class PipelineBatchRunner:
                         self.metrics["vlm_tok_per_sec"] = tok_per_sec
                         self.metrics["last_page_seconds"] = duration
                         self.metrics["last_page_tokens"] = tok_count
-                        self.metrics["current_vlm_text"] = sanitized_text
+                        self.metrics["current_vlm_text"] = injected_text
                         self.metrics["current_page_image_path"] = str(mask_file)
 
                     self.log_event("VLM", f"Page {p_num}: {tok_count} tokens ({tok_per_sec:.1f} tok/s, {duration:.1f}s)")
-                    raw_md_file.write_text(sanitized_text, encoding="utf-8")
 
                     if self.on_text_update is not None:
                         self.on_text_update({
                             "page": p_val,
                             "book": masked_dir.parent.name,
-                            "text": sanitized_text,
+                            "text": injected_text,
                             "completed": True,
                             "stage": "phase3",
                             "image_path": str(mask_file),
@@ -1850,11 +1938,17 @@ class PipelineBatchRunner:
                         self.log_event("ERROR", f"Page {p_num}: VLM error ({err_msg})", level="ERROR")
                         fallback_txt = f"<!-- VLM_ERROR: {err_msg} -->\n\n## Page {int(p_num)}\n\n[Text not recognized]\n"
                         raw_md_file.write_text(fallback_txt, encoding="utf-8")
+                        injected_fallback = self._inject_music_stubs(fallback_txt, page_stubs, crops_dir)
+                        final_file.write_text(injected_fallback, encoding="utf-8")
+                        try:
+                            (final_dir / f"page_{p_val:04d}_final.md").write_text(injected_fallback, encoding="utf-8")
+                        except Exception:
+                            pass
                         if self.on_text_update is not None:
                             self.on_text_update({
                                 "page": p_val,
                                 "book": masked_dir.parent.name,
-                                "text": fallback_txt,
+                                "text": injected_fallback,
                                 "completed": True,
                                 "stage": "phase3",
                                 "image_path": str(mask_file),
@@ -1872,25 +1966,31 @@ class PipelineBatchRunner:
             detail_msg = f"Page {p_num} • {vlm_done_count}/{total_masks} done (Qwen VLM)"
             self._update_phase_progress("phase3", pct_p3, vlm_done_count, total_masks, "running", detail_msg)
             self._update_hud(
-                "Phase 3/4: Text VLM pass",
-                55.0 + (vlm_done_count / total_masks) * 35.0,
+                "Phase 3/3: Text OCR & Music Integration",
+                60.0 + (vlm_done_count / total_masks) * 40.0,
                 detail_msg,
             )
 
         self._update_phase_progress("phase3", 100.0, total_masks, total_masks, "completed", f"All {total_masks} pages processed by VLM")
         chk["phases"]["vlm"]["completed"] = True
         self._write_checkpoint(masked_dir.parent.name, chk)
+
+        # Assemble the full book into <book>_complete.md
+        self._phase_4_assembly(book_dir, raw_md_dir, crops_dir, final_dir, chk)
         return True
 
     def _vlm_fallback_mode(self, mask_files: List[Path], raw_md_dir: Path, chk: Dict[str, Any]) -> bool:
         """Creates clean structured markdown files with preserved MUSIC_STUB_ID tags if LM Studio is offline/skipped."""
         crops_dir = raw_md_dir.parent / "1_crops"
+        final_dir = raw_md_dir.parent / "4_final_pages"
+        final_dir.mkdir(parents=True, exist_ok=True)
         overwrite = self.config.get("overwrite", False)
 
         for m_idx, mask_file in enumerate(mask_files, start=1):
             p_num_str = re.search(r"page_(\d+)_masked", mask_file.stem)
             p_num = p_num_str.group(1) if p_num_str else f"{m_idx:04d}"
             raw_md_file = raw_md_dir / f"page_{p_num}_raw.md"
+            final_file = final_dir / f"page_{p_num}.md"
             if not raw_md_file.is_file() or overwrite:
                 stubs = []
                 if crops_dir.is_dir():
@@ -1906,10 +2006,17 @@ class PipelineBatchRunner:
                 else:
                     lines.append("<!-- Page contains no musical material -->\n")
 
-                raw_md_file.write_text("\n".join(lines), encoding="utf-8")
+                content = "\n".join(lines)
+                raw_md_file.write_text(content, encoding="utf-8")
+                injected = self._inject_music_stubs(content, stubs, crops_dir)
+                final_file.write_text(injected, encoding="utf-8")
+                try:
+                    (final_dir / f"page_{int(p_num):04d}_final.md").write_text(injected, encoding="utf-8")
+                except Exception:
+                    pass
         return True
 
-    # ---------------- Phase 4 Implementation ---------------- #
+    # ---------------- Phase 4: Markdown Assembly (Complete Book) ---------------- #
 
     def _phase_4_assembly(
         self, book_dir: Path, raw_md_dir: Path, crops_dir: Path, final_dir: Path, chk: Dict[str, Any]
@@ -1917,41 +2024,16 @@ class PipelineBatchRunner:
         overwrite = self.config.get("overwrite", False)
         complete_book_file = book_dir / f"{book_dir.name}_complete.md"
         if not overwrite and complete_book_file.is_file() and complete_book_file.stat().st_size > 0:
-            chk["phases"]["assembly"]["completed"] = True
+            chk.setdefault("phases", {}).setdefault("assembly", {})["completed"] = True
             self._update_phase_progress("phase4", 100.0, 1, 1, "completed", "Book already assembled on disk")
             return True
 
         raw_files = sorted(raw_md_dir.glob("page_*_raw.md"))
         total_raw = len(raw_files)
+        final_dir.mkdir(parents=True, exist_ok=True)
         self._update_phase_progress("phase4", 10.0, 0, total_raw, "running", "Assembling Markdown pages...")
 
         all_pages_content = []
-        injected_stubs = set()
-
-        def inject_music_blocks(match):
-            cid = match.group(1).strip()
-            injected_stubs.add(cid)
-            abc_file = crops_dir / f"{cid}.abc"
-            kern_file = crops_dir / f"{cid}.kern"
-
-            blocks = []
-            if abc_file.is_file():
-                abc = abc_file.read_text(encoding="utf-8", errors="replace").strip()
-                if abc and not abc.startswith("% [OMR Conversion Error"):
-                    blocks.append(f"```abc\n{abc}\n```")
-
-            if kern_file.is_file():
-                raw_kern = kern_file.read_text(encoding="utf-8", errors="replace").strip()
-                if raw_kern:
-                    try:
-                        healed_kern = self.bridge.normalize_humdrum(raw_kern)
-                        blocks.append(f"```kern\n{healed_kern}\n```")
-                    except Exception:
-                        blocks.append(f"```kern\n{raw_kern}\n```")
-
-            if blocks:
-                return "\n\n" + "\n\n".join(blocks) + "\n\n"
-            return f"\n\n<!-- MUSIC_STUB_ID:{cid} (Notes not found, awaiting OMR) -->\n\n"
 
         for r_idx, r_file in enumerate(raw_files, start=1):
             p_num_str = re.search(r"page_(\d+)_raw", r_file.stem)
@@ -1969,30 +2051,7 @@ class PipelineBatchRunner:
                     if not f.name.endswith("_deskew.png")
                 ])
 
-            injected_stubs.clear()
-            final_text = re.sub(r"<!--\s*MUSIC_STUB_ID:\s*(.*?)\s*-->", inject_music_blocks, raw_text)
-
-            # Fallback recovery: if any stubs were omitted by VLM, append them cleanly to the bottom
-            missing_stubs = [s for s in page_stubs if s not in injected_stubs]
-            if missing_stubs:
-                recovered_blocks = []
-                for ms in missing_stubs:
-                    abc_file = crops_dir / f"{ms}.abc"
-                    kern_file = crops_dir / f"{ms}.kern"
-                    if abc_file.is_file():
-                        abc = abc_file.read_text(encoding="utf-8", errors="replace").strip()
-                        if abc and not abc.startswith("% [OMR Conversion Error"):
-                            recovered_blocks.append(f"```abc\n{abc}\n```")
-                    if kern_file.is_file():
-                        raw_kern = kern_file.read_text(encoding="utf-8", errors="replace").strip()
-                        if raw_kern:
-                            try:
-                                healed_kern = self.bridge.normalize_humdrum(raw_kern)
-                                recovered_blocks.append(f"```kern\n{healed_kern}\n```")
-                            except Exception:
-                                recovered_blocks.append(f"```kern\n{raw_kern}\n```")
-                if recovered_blocks:
-                    final_text += "\n\n<!-- RECOVERED_MUSIC_STUBS -->\n\n" + "\n\n".join(recovered_blocks) + "\n"
+            final_text = self._inject_music_stubs(raw_text, page_stubs, crops_dir)
 
             final_file.write_text(final_text, encoding="utf-8")
             try:
@@ -2006,7 +2065,7 @@ class PipelineBatchRunner:
 
         full_content = "\n\n---\n\n".join(all_pages_content)
         complete_book_file.write_text(full_content, encoding="utf-8")
-        chk["phases"]["assembly"]["completed"] = True
+        chk.setdefault("phases", {}).setdefault("assembly", {})["completed"] = True
         self._update_phase_progress("phase4", 100.0, total_raw, total_raw, "completed", f"Edition {book_dir.name} assembled")
         self.log_event("ASSEMBLY", f"Edition {book_dir.name} successfully assembled ({total_raw} pages)")
         return True

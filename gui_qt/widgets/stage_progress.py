@@ -147,7 +147,7 @@ class PhaseRow(QWidget):
 
 
 class StageProgressWidget(CardWidget):
-    """Card containing all 4 phase rows."""
+    """Card containing the 3 pipeline stage rows."""
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -165,14 +165,11 @@ class StageProgressWidget(CardWidget):
         self.row2 = PhaseRow(2, "Music Recognition (OMR)", "Mini-batched Transcoda-59M to ABC & Humdrum", self)
         layout.addWidget(self.row2)
 
-        self.row3 = PhaseRow(3, "Neural Inference (VLM)", "Qwen3.5-9B OCR printed text and stubs", self)
+        self.row3 = PhaseRow(3, "Text & Music Integration", "Qwen VLM text transcription with embedded ABC notes", self)
         layout.addWidget(self.row3)
 
-        self.row4 = PhaseRow(4, "Markdown Assembly", "Music block injection & edition export", self)
-        layout.addWidget(self.row4)
-
     def update_phases(self, phase_data: Dict[str, Any]) -> None:
-        """Updates all 4 rows from the pipeline phase_progress metrics."""
+        """Updates all 3 rows from the pipeline phase_progress metrics."""
         p1 = phase_data.get("phase1", {})
         self.row1.set_progress(
             p1.get("pct", 0.0), p1.get("done", 0), p1.get("total", 0),
@@ -189,10 +186,4 @@ class StageProgressWidget(CardWidget):
         self.row3.set_progress(
             p3.get("pct", 0.0), p3.get("done", 0), p3.get("total", 0),
             p3.get("status", "pending"), p3.get("detail", "")
-        )
-
-        p4 = phase_data.get("phase4", {})
-        self.row4.set_progress(
-            p4.get("pct", 0.0), p4.get("done", 0), p4.get("total", 0),
-            p4.get("status", "pending"), p4.get("detail", "")
         )
