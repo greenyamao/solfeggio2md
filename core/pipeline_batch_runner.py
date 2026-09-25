@@ -72,6 +72,8 @@ DEFAULT_CONFIG = {
     "system_prompt": (
         "You are a strict OCR transcriber. Transcribe all printed text from the book page into clean verbatim Markdown.\n"
         "Preserve heading hierarchy (#, ##, ###), tables, and lists.\n"
+        "DO NOT analyze the image, DO NOT explain, and DO NOT output reasoning or thinking steps.\n"
+        "Output ONLY the transcribed Markdown text appearing on the page.\n"
         "IMPORTANT: If you see <!-- MUSIC_STUB_ID:... --> tags on the white masked areas, copy the EXACT text of each tag "
         "into its corresponding position in the text. Do NOT invent or insert MUSIC_STUB_ID tags if they are not present on the image.\n"
         "If the page contains no text, output nothing."
@@ -2035,6 +2037,13 @@ class PipelineBatchRunner:
         """
         if not text:
             return text
+        text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.DOTALL)
+        text = re.sub(r"^[\s\S]*?</think>", "", text, flags=re.DOTALL)
+        if text.strip().startswith("The user wants me to transcribe"):
+            parts = re.split(r"\n(?=#{1,6}\s|<!--|\*\*Chapter|\*[A-Za-z0-9])", text, maxsplit=1)
+            if len(parts) > 1:
+                text = parts[1]
+
         text = re.sub(r"&lt;!--\s*MUSIC_STUB_ID:([^\s>]+)\s*--&gt;", r"<!-- MUSIC_STUB_ID:\1 -->", text, flags=re.IGNORECASE)
         text = re.sub(r"<!--\s*MUSIC_STUB_ID:([^\s>]+)\s*-->", r"<!-- MUSIC_STUB_ID:\1 -->", text)
         text = re.sub(r"`\s*(<!--\s*MUSIC_STUB_ID:[^\s>]+?\s*-->)\s*`", r"\1", text)

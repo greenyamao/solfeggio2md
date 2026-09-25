@@ -226,6 +226,8 @@ class LMStudioClient:
         stats: Dict[str, Any] = {}
         result: Dict[str, Any] = {}
 
+        ocr_prompt = "Transcribe this page verbatim into clean Markdown. Output ONLY the recognized text appearing on the page. Do NOT explain, do NOT analyze, do NOT output thinking or reasoning."
+
         # If on_chunk callback provided, attempt real-time SSE streaming first via OpenAI endpoint
         if on_chunk is not None:
             stream_payload = {
@@ -235,7 +237,7 @@ class LMStudioClient:
                     {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": "Recognize printed text and music annotations on this page."},
+                            {"type": "text", "text": ocr_prompt},
                             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
                         ],
                     },
@@ -243,8 +245,11 @@ class LMStudioClient:
                 "temperature": float(temperature),
                 "max_tokens": int(max_tokens),
                 "stream": True,
+                "reasoning_effort": "minimal",
+                "chat_template_kwargs": {"reasoning_effort": "none"},
             }
             streamed_any = False
+            in_think = False
             try:
                 url = f"{self.base_url}/v1/chat/completions"
                 req = urllib.request.Request(
@@ -275,11 +280,24 @@ class LMStudioClient:
                                     choices = chunk_json.get("choices", [])
                                     if choices:
                                         delta_obj = choices[0].get("delta", {})
-                                        delta = delta_obj.get("content") or delta_obj.get("reasoning_content") or ""
+                                        # Strictly drop reasoning_content to prevent displaying internal thinking
+                                        delta = delta_obj.get("content") or ""
                                         if delta:
-                                            accumulated.append(delta)
-                                            streamed_any = True
-                                            on_chunk(delta)
+                                            # Filter out inline <think> tags if model produces them in content
+                                            if "<think>" in delta:
+                                                in_think = True
+                                                parts = delta.split("<think>")
+                                                delta = parts[0]
+                                            if in_think:
+                                                if "</think>" in delta:
+                                                    in_think = False
+                                                    delta = delta.split("</think>", 1)[-1]
+                                                else:
+                                                    delta = ""
+                                            if delta:
+                                                accumulated.append(delta)
+                                                streamed_any = True
+                                                on_chunk(delta)
                                 except Exception:
                                     pass
                 if accumulated:
@@ -295,7 +313,7 @@ class LMStudioClient:
                     "model": target_model,
                     "system_prompt": system_prompt,
                     "input": [
-                        {"type": "text", "content": "Recognize printed text and music annotations on this page."},
+                        {"type": "text", "content": ocr_prompt},
                         {"type": "image", "data_url": f"data:image/jpeg;base64,{b64}"},
                     ],
                     "reasoning": "off",
@@ -317,7 +335,7 @@ class LMStudioClient:
                         {
                             "role": "user",
                             "content": [
-                                {"type": "text", "text": "Recognize printed text and music annotations on this page."},
+                                {"type": "text", "text": ocr_prompt},
                                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
                             ],
                         },
@@ -325,6 +343,8 @@ class LMStudioClient:
                     "temperature": float(temperature),
                     "max_tokens": int(max_tokens),
                     "stream": False,
+                    "reasoning_effort": "minimal",
+                    "chat_template_kwargs": {"reasoning_effort": "none"},
                 }
                 result = self._post("/v1/chat/completions", openai_payload)
                 choices = result.get("choices", [])
@@ -397,6 +417,9 @@ class LMStudioClient:
     @staticmethod
     def _strip_markdown_fences(text: str) -> str:
         cleaned = text.strip()
+        # Strip thinking tags if any leaked through
+        cleaned = re.sub(r"<think>[\s\S]*?</think>", "", cleaned, flags=re.DOTALL).strip()
+        cleaned = re.sub(r"^[\s\S]*?</think>", "", cleaned, flags=re.DOTALL).strip()
         if cleaned.startswith("```markdown"):
             cleaned = cleaned[11:].strip()
         elif cleaned.startswith("```md"):
