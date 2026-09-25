@@ -16,7 +16,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Set
 
 import cv2
 import numpy as np
@@ -70,10 +70,11 @@ DEFAULT_CONFIG = {
     "skip_front_matter": True,
     "skip_back_matter": True,
     "system_prompt": (
-        "Ты — строгий OCR-транскрибатор. Перенеси весь печатный текст страницы в чистый Markdown дословно.\n"
+        "Ты — строгий OCR-транскрибатор. Перенеси весь печатный текст страницы книги в чистый Markdown дословно.\n"
         "Сохраняй иерархию заголовков (#, ##, ###), таблицы и списки.\n"
-        "ВАЖНО: Если на странице встречаются технические метки вида <!-- MUSIC_STUB_ID:... -->, "
-        "ОБЯЗАТЕЛЬНО оставь их в тексте на тех же местах без малейших изменений. Ничего не додумывай от себя."
+        "ВАЖНО: Если на белых плашках страницы видны метки <!-- MUSIC_STUB_ID:... -->, скопируй ТОЧНЫЙ текст этой метки "
+        "в соответствующее место текста. НЕ придумывай и НЕ вставляй метки MUSIC_STUB_ID самостоятельно, если их нет на изображении.\n"
+        "Если страница пуста — не выводи никакого текста."
     ),
 }
 
@@ -159,6 +160,7 @@ class PipelineBatchRunner:
             "last_page_tokens": 0,
             "current_page_image_url": "",
             "current_page_image_path": "",
+            "current_vlm_text": "",
             "phase_progress": {
                 "phase1": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Ожидание"},
                 "phase2": {"pct": 0.0, "done": 0, "total": 0, "status": "pending", "detail": "Ожидание"},
@@ -182,6 +184,7 @@ class PipelineBatchRunner:
         self.bridge = ABCBridge()
         self.on_log_event: Optional[Any] = None
         self.on_frame_update: Optional[Any] = None
+        self.on_text_update: Optional[Any] = None
 
         # Log initial event
         self.log_event("SYSTEM", "Система инициализирована. Готова к обработке очереди.")
@@ -938,6 +941,21 @@ class PipelineBatchRunner:
                 kern_file.write_text(kern_content, encoding="utf-8")
             saved_count += 1
 
+        if self.on_text_update is not None and valid_batch_files:
+            batch_abcs = []
+            for cf in valid_batch_files:
+                abc_file = crops_dir / f"{cf.stem}.abc"
+                if abc_file.is_file():
+                    atxt = abc_file.read_text(encoding="utf-8", errors="replace").strip()
+                    if atxt:
+                        batch_abcs.append(f"% --- [{cf.stem}] ---\n{atxt}")
+            if batch_abcs:
+                self.on_text_update({
+                    "stage": "phase2",
+                    "text": "\n\n".join(batch_abcs),
+                    "completed": True,
+                })
+
         return saved_count
 
     # ---------------- Streaming Pipelined Phase 1 & 2 ---------------- #
@@ -1637,6 +1655,16 @@ class PipelineBatchRunner:
             if not overwrite and p_num in existing_valid_mds:
                 continue
 
+            crops_dir = masked_dir.parent / "1_crops"
+            page_stubs = []
+            if crops_dir.is_dir():
+                page_stubs = sorted([
+                    f.stem for f in crops_dir.glob(f"*_P{p_num}_S*.png")
+                    if not f.name.endswith("_deskew.png")
+                ])
+            page_stubs_set = set(page_stubs)
+            p_val = int(p_num) if p_num.isdigit() else m_idx
+
             # Update live preview image for current page
             try:
                 rel_mask = mask_file.relative_to(self.output_root).as_posix()
@@ -1644,7 +1672,6 @@ class PipelineBatchRunner:
                     self.metrics["current_page_image_url"] = f"/output/{rel_mask}"
                     self.metrics["current_page_image_path"] = str(mask_file)
                 if self.on_frame_update is not None:
-                    p_val = int(p_num) if p_num.isdigit() else m_idx
                     self.on_frame_update(None, {
                         "path": str(mask_file),
                         "stage": "phase3",
@@ -1654,6 +1681,52 @@ class PipelineBatchRunner:
                     })
             except Exception:
                 pass
+
+            # Blank page check: zero music staves and pure white unprinted paper
+            if len(page_stubs) == 0 and self._is_blank_image(mask_file):
+                self.log_event("VLM", f"Стр. {p_num}: пустая страница (пропуск VLM)")
+                blank_txt = f"## Страница {p_val}\n\n<!-- Пустая страница -->\n"
+                raw_md_file.write_text(blank_txt, encoding="utf-8")
+                with self._lock:
+                    self.metrics["current_vlm_text"] = blank_txt
+                if self.on_text_update is not None:
+                    self.on_text_update({
+                        "page": p_val,
+                        "book": masked_dir.parent.name,
+                        "text": blank_txt,
+                        "completed": True,
+                        "stage": "phase3",
+                    })
+                vlm_done_count += 1
+                chk["phases"]["vlm"]["pages_done"] = vlm_done_count
+                self._write_checkpoint(masked_dir.parent.name, chk)
+                pct_p3 = round((m_idx / max(1, total_masks)) * 100.0, 1)
+                detail_msg = f"Стр. {m_idx}/{total_masks} (Пустая страница)"
+                self._update_phase_progress("phase3", pct_p3, m_idx, total_masks, "running", detail_msg)
+                self._update_hud("Фаза 3/4: Текстовый VLM проход", 55.0 + (m_idx / total_masks) * 35.0, detail_msg)
+                continue
+
+            # Signal beginning of text extraction for current page
+            if self.on_text_update is not None:
+                self.on_text_update({
+                    "page": p_val,
+                    "book": masked_dir.parent.name,
+                    "text": "",
+                    "completed": False,
+                    "stage": "phase3",
+                })
+
+            streamed_tokens: List[str] = []
+            def _vlm_token_cb(chunk: str) -> None:
+                streamed_tokens.append(chunk)
+                if self.on_text_update is not None:
+                    self.on_text_update({
+                        "page": p_val,
+                        "book": masked_dir.parent.name,
+                        "chunk": chunk,
+                        "completed": False,
+                        "stage": "phase3",
+                    })
 
             try:
                 img_bytes = mask_file.read_bytes()
@@ -1665,8 +1738,10 @@ class PipelineBatchRunner:
                     max_tokens=int(self.config.get("lm_max_tokens", 2048)),
                     context_length=int(self.config.get("qwen_context_length", 4096)),
                     max_dim=int(self.config.get("vlm_max_dim", 1600)),
+                    on_chunk=_vlm_token_cb,
                 )
                 extracted_text = detailed["text"]
+                sanitized_text = self._sanitize_vlm_text(extracted_text, valid_stubs=page_stubs_set)
                 tok_per_sec = detailed.get("tokens_per_second", 0.0)
                 duration = detailed.get("duration", 0.0)
                 tok_count = detailed.get("tokens_count", 0)
@@ -1675,13 +1750,31 @@ class PipelineBatchRunner:
                     self.metrics["vlm_tok_per_sec"] = tok_per_sec
                     self.metrics["last_page_seconds"] = duration
                     self.metrics["last_page_tokens"] = tok_count
+                    self.metrics["current_vlm_text"] = sanitized_text
 
                 self.log_event("VLM", f"Стр. {p_num}: {tok_count} токенов ({tok_per_sec:.1f} tok/s, {duration:.1f}s)")
-                raw_md_file.write_text(self._sanitize_vlm_text(extracted_text), encoding="utf-8")
+                raw_md_file.write_text(sanitized_text, encoding="utf-8")
+
+                if self.on_text_update is not None:
+                    self.on_text_update({
+                        "page": p_val,
+                        "book": masked_dir.parent.name,
+                        "text": sanitized_text,
+                        "completed": True,
+                        "stage": "phase3",
+                    })
             except Exception as e:
                 self.log_event("ERROR", f"Стр. {p_num}: ошибка VLM ({str(e)})", level="ERROR")
                 fallback_txt = f"<!-- LM_STUDIO_ERROR: {str(e)} -->\n\n## Страница {int(p_num)}\n\n[Текст не распознан: ошибка связи с VLM]\n"
                 raw_md_file.write_text(fallback_txt, encoding="utf-8")
+                if self.on_text_update is not None:
+                    self.on_text_update({
+                        "page": p_val,
+                        "book": masked_dir.parent.name,
+                        "text": fallback_txt,
+                        "completed": True,
+                        "stage": "phase3",
+                    })
 
             vlm_done_count += 1
             chk["phases"]["vlm"]["pages_done"] = vlm_done_count
@@ -1831,17 +1924,43 @@ class PipelineBatchRunner:
         return True
 
     @staticmethod
-    def _sanitize_vlm_text(text: str) -> str:
+    def _is_blank_image(image_path: Path, min_ink_ratio: float = 0.0008, max_mean: float = 248.0) -> bool:
+        """
+        Determines whether a page image is blank (pure white or unprinted paper).
+        Uses fast grayscale ink-ratio and brightness thresholding.
+        """
+        try:
+            img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                return False
+            ink_ratio = float(np.mean(img < 230))
+            mean_val = float(np.mean(img))
+            return (ink_ratio < min_ink_ratio) and (mean_val > max_mean)
+        except Exception:
+            return False
+
+    @staticmethod
+    def _sanitize_vlm_text(text: str, valid_stubs: Optional[Set[str]] = None) -> str:
         """
         Sanitizes VLM text output:
         1. Fixes HTML entity escapes for stub tags: &lt;!-- MUSIC_STUB_ID:... --&gt; -> <!-- MUSIC_STUB_ID:... -->
         2. Fixes stray backticks around stub tags: `<!-- MUSIC_STUB_ID:... -->` -> <!-- MUSIC_STUB_ID:... -->
+        3. Strips hallucinated stub tags that do not belong to the valid stubs of the page.
         """
         if not text:
             return text
         text = re.sub(r"&lt;!--\s*MUSIC_STUB_ID:([^\s>]+)\s*--&gt;", r"<!-- MUSIC_STUB_ID:\1 -->", text, flags=re.IGNORECASE)
         text = re.sub(r"<!--\s*MUSIC_STUB_ID:([^\s>]+)\s*-->", r"<!-- MUSIC_STUB_ID:\1 -->", text)
         text = re.sub(r"`\s*(<!--\s*MUSIC_STUB_ID:[^\s>]+?\s*-->)\s*`", r"\1", text)
+
+        if valid_stubs is not None:
+            def _filter_stub(match: re.Match) -> str:
+                stub_id = match.group(1).strip()
+                if stub_id in valid_stubs:
+                    return f"<!-- MUSIC_STUB_ID:{stub_id} -->"
+                return ""
+            text = re.sub(r"<!--\s*MUSIC_STUB_ID:\s*([^\s>]+?)\s*-->", _filter_stub, text)
+
         return text
 
     # ---------------- Purge VRAM Barrier ---------------- #

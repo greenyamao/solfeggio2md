@@ -17,12 +17,13 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QColor, QFont, QTextCursor
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QPlainTextEdit,
     QSplitter,
     QTableWidgetItem,
     QVBoxLayout,
@@ -108,13 +109,26 @@ class PipelineView(QWidget):
         mon_layout.setContentsMargins(8, 0, 0, 0)
         mon_layout.setSpacing(8)
 
-        # Graphics Canvas
-        self.canvas_view = StaffGraphicsView(monitor_container)
-
         # Monitor Header Card
         mon_header = self._create_monitor_header()
         mon_layout.addWidget(mon_header)
-        mon_layout.addWidget(self.canvas_view, stretch=1)
+
+        # Horizontal Splitter between Live Visual Canvas and Live Markdown/ABC Text
+        self.mon_splitter = QSplitter(Qt.Orientation.Horizontal, monitor_container)
+        self.mon_splitter.setChildrenCollapsible(False)
+
+        # Left: Live Graphics Canvas
+        self.canvas_view = StaffGraphicsView(self.mon_splitter)
+        self.mon_splitter.addWidget(self.canvas_view)
+
+        # Right: Live Text Card (Markdown / ABC)
+        self.text_preview_card = self._create_text_preview_card()
+        self.mon_splitter.addWidget(self.text_preview_card)
+
+        # Proportions: 55% visual canvas, 45% live text
+        self.mon_splitter.setSizes([450, 370])
+
+        mon_layout.addWidget(self.mon_splitter, stretch=1)
 
 
         # Telemetry Ribbon
@@ -256,7 +270,138 @@ class PipelineView(QWidget):
         self.btn_fit.clicked.connect(self.canvas_view.fit_to_view)
         layout.addWidget(self.btn_fit)
 
+        self.btn_toggle_text = ToolButton(FluentIcon.DOCUMENT, card)
+        self.btn_toggle_text.setToolTip("Показать / скрыть панель распознанного текста")
+        self.btn_toggle_text.clicked.connect(self._toggle_text_panel)
+        layout.addWidget(self.btn_toggle_text)
+
         return card
+
+    def _create_text_preview_card(self) -> CardWidget:
+        card = CardWidget(self)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
+
+        hdr_layout = QHBoxLayout()
+        self.lbl_text_title = CaptionLabel("РАСПОЗНАННЫЙ ТЕКСТ (MARKDOWN / ABC)", card)
+        self.lbl_text_title.setStyleSheet("color: #38bdf8; font-weight: 700; font-size: 11px;")
+        hdr_layout.addWidget(self.lbl_text_title)
+
+        hdr_layout.addStretch()
+
+        self.badge_text_status = QLabel("ОЖИДАНИЕ", card)
+        self.badge_text_status.setStyleSheet("""
+            QLabel {
+                background-color: #1e293b;
+                color: #94a3b8;
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 10px;
+                font-weight: 700;
+                padding: 2px 8px;
+                border-radius: 4px;
+            }
+        """)
+        hdr_layout.addWidget(self.badge_text_status)
+
+        self.btn_copy_text = ToolButton(FluentIcon.COPY, card)
+        self.btn_copy_text.setToolTip("Копировать распознанный текст")
+        self.btn_copy_text.clicked.connect(self._copy_live_text)
+        hdr_layout.addWidget(self.btn_copy_text)
+
+        layout.addLayout(hdr_layout)
+
+        self.text_preview = QPlainTextEdit(card)
+        self.text_preview.setReadOnly(True)
+        self.text_preview.setPlaceholderText("Здесь в реальном времени отображается генерируемый нейросетью Markdown текст или OMR код нот...")
+        self.text_preview.setStyleSheet("""
+            QPlainTextEdit {
+                background-color: #0b0f17;
+                color: #e2e8f0;
+                font-family: 'Cascadia Code', 'Consolas', monospace;
+                font-size: 12px;
+                border: 1px solid #1e293b;
+                border-radius: 6px;
+                padding: 8px;
+                line-height: 1.4;
+            }
+        """)
+        layout.addWidget(self.text_preview, stretch=1)
+        return card
+
+    def _toggle_text_panel(self) -> None:
+        vis = not self.text_preview_card.isVisible()
+        self.text_preview_card.setVisible(vis)
+
+    def _copy_live_text(self) -> None:
+        txt = self.text_preview.toPlainText()
+        if txt:
+            from PySide6.QtWidgets import QApplication
+            QApplication.clipboard().setText(txt)
+
+    def _update_live_text(self, data: Dict[str, Any]) -> None:
+        stage = data.get("stage", "phase3")
+        is_comp = data.get("completed", False)
+        chunk = data.get("chunk")
+        full_text = data.get("text", "")
+        page = data.get("page", 0)
+
+        if stage == "phase2":
+            self.lbl_text_title.setText("РАСПОЗНАННЫЕ НОТЫ (ABC CODE)")
+            self.lbl_text_title.setStyleSheet("color: #facc15; font-weight: 700; font-size: 11px;")
+            self.text_preview.setPlainText(full_text)
+            self.badge_text_status.setText("OMR ГОТОВО")
+            self.badge_text_status.setStyleSheet("""
+                QLabel {
+                    background-color: #854d0e;
+                    color: #fef08a;
+                    font-family: 'Segoe UI', sans-serif;
+                    font-size: 10px;
+                    font-weight: 700;
+                    padding: 2px 8px;
+                    border-radius: 4px;
+                }
+            """)
+            return
+
+        # Phase 3: VLM Markdown
+        title_str = f"РАСПОЗНАННЫЙ ТЕКСТ (MARKDOWN • СТР. {page})" if page else "РАСПОЗНАННЫЙ ТЕКСТ (MARKDOWN)"
+        self.lbl_text_title.setText(title_str)
+        self.lbl_text_title.setStyleSheet("color: #38bdf8; font-weight: 700; font-size: 11px;")
+
+        if is_comp:
+            self.text_preview.setPlainText(full_text)
+            self.badge_text_status.setText("ГОТОВО")
+            self.badge_text_status.setStyleSheet("""
+                QLabel {
+                    background-color: #14532d;
+                    color: #86efac;
+                    font-family: 'Segoe UI', sans-serif;
+                    font-size: 10px;
+                    font-weight: 700;
+                    padding: 2px 8px;
+                    border-radius: 4px;
+                }
+            """)
+        else:
+            if chunk is not None:
+                self.text_preview.moveCursor(QTextCursor.MoveOperation.End)
+                self.text_preview.insertPlainText(chunk)
+                self.text_preview.moveCursor(QTextCursor.MoveOperation.End)
+            elif full_text:
+                self.text_preview.setPlainText(full_text)
+            self.badge_text_status.setText("ГЕНЕРАЦИЯ...")
+            self.badge_text_status.setStyleSheet("""
+                QLabel {
+                    background-color: #1e3a8a;
+                    color: #93c5fd;
+                    font-family: 'Segoe UI', sans-serif;
+                    font-size: 10px;
+                    font-weight: 700;
+                    padding: 2px 8px;
+                    border-radius: 4px;
+                }
+            """)
 
     def _setup_timer(self) -> None:
         """Polls status queue and shared memory frame buffer every 100 ms."""
@@ -278,12 +423,25 @@ class PipelineView(QWidget):
                 meta = msg.get("meta", {})
                 path = meta.get("path", "")
                 title = meta.get("title", "")
+                stage = meta.get("stage", "")
+                page = meta.get("page")
                 if title and self.lbl_mon_title.text() != f"ЖИВОЙ МОНИТОР: {title}":
                     self.lbl_mon_title.setText(f"ЖИВОЙ МОНИТОР: {title}")
 
                 if path and path != self._current_image_path and os.path.isfile(path):
                     self._current_image_path = path
                     self.canvas_view.load_file(path)
+
+                if stage == "phase3" and page is not None and page != getattr(self, "_active_text_page", None):
+                    self._active_text_page = page
+                    self.text_preview.clear()
+                    self.lbl_text_title.setText(f"РАСПОЗНАННЫЙ ТЕКСТ (MARKDOWN • СТР. {page})")
+                    self.badge_text_status.setText("ОЖИДАНИЕ VLM")
+                    self.badge_text_status.setStyleSheet("background-color: #1e293b; color: #94a3b8; font-family: 'Segoe UI', sans-serif; font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 4px;")
+
+            elif mtype == "text_update":
+                data = msg.get("data", {})
+                self._update_live_text(data)
 
             elif mtype == "status":
                 metrics = msg.get("metrics", {})
@@ -345,6 +503,11 @@ class PipelineView(QWidget):
         if img_path and img_path != self._current_image_path and os.path.isfile(img_path):
             self._current_image_path = img_path
             self.canvas_view.load_file(img_path)
+
+        # Text fallback from metrics if preview is empty
+        vlm_text = metrics.get("current_vlm_text", "")
+        if vlm_text and not self.text_preview.toPlainText():
+            self.text_preview.setPlainText(vlm_text)
 
     def _update_queue_table(self, queue_items: List[Dict[str, Any]]) -> None:
         sig = tuple((it.get("name", ""), it.get("pages", 0), it.get("status", "")) for it in queue_items)

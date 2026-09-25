@@ -9,7 +9,7 @@ import re
 import time
 import urllib.request
 import urllib.error
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List, Tuple, Callable
 
 
 class LMStudioClient:
@@ -188,10 +188,12 @@ class LMStudioClient:
         max_tokens: int = 2048,
         context_length: int = 4096,
         max_dim: int = 1600,
+        on_chunk: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, Any]:
         """
         Sends a masked book page image to the VLM with strict parameters and returns
         both sanitized text and detailed execution telemetry (tokens, speed, latency).
+        Supports real-time token streaming via on_chunk callback.
         Automatically constrains image dimensions to max_dim (1600px) to prevent vision token
         explosion (cutting ~3700 vision tokens down to ~1900), guaranteeing zero RAM spillover
         and sub-30s inference.
@@ -223,28 +225,9 @@ class LMStudioClient:
         stats: Dict[str, Any] = {}
         result: Dict[str, Any] = {}
 
-        # 1. Try LM Studio API (/api/v1/chat)
-        try:
-            payload = {
-                "model": target_model,
-                "system_prompt": system_prompt,
-                "input": [
-                    {"type": "text", "content": "Распознай печатный текст на этой странице."},
-                    {"type": "image", "data_url": f"data:image/jpeg;base64,{b64}"},
-                ],
-                "reasoning": "off",
-                "temperature": float(temperature),
-                "max_output_tokens": int(max_tokens),
-                "stream": False,
-                "store": False,
-            }
-            result = self._post("/api/v1/chat", payload)
-            output = [item.get("content", "") for item in result.get("output", []) if item.get("type") == "message"]
-            raw_text = "\n".join(output).strip()
-            stats = result.get("stats", {})
-        except Exception:
-            # 2. Fallback to standard OpenAI /v1/chat/completions (standalone llama-server)
-            openai_payload = {
+        # If on_chunk callback provided, attempt real-time SSE streaming first via OpenAI endpoint
+        if on_chunk is not None:
+            stream_payload = {
                 "model": target_model,
                 "messages": [
                     {"role": "system", "content": system_prompt},
@@ -258,23 +241,97 @@ class LMStudioClient:
                 ],
                 "temperature": float(temperature),
                 "max_tokens": int(max_tokens),
-                "stream": False,
+                "stream": True,
             }
-            result = self._post("/v1/chat/completions", openai_payload)
-            choices = result.get("choices", [])
-            if choices:
-                raw_text = choices[0].get("message", {}).get("content", "").strip()
-            usage = result.get("usage", {})
-            timings = result.get("timings", {})
-            stats = {
-                "tokens_per_second": timings.get("predicted_per_second", 0.0),
-                "num_output_tokens": usage.get("completion_tokens", 0),
-                "prompt_tokens": usage.get("prompt_tokens", 0),
-            }
+            try:
+                url = f"{self.base_url}/v1/chat/completions"
+                req = urllib.request.Request(
+                    url,
+                    data=json.dumps(stream_payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json", "Accept": "text/event-stream"},
+                    method="POST",
+                )
+                accumulated: List[str] = []
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    for line_b in resp:
+                        line = line_b.decode("utf-8", errors="replace").strip()
+                        if not line or line.startswith(":"):
+                            continue
+                        if line.startswith("data: "):
+                            d_str = line[6:].strip()
+                            if d_str == "[DONE]":
+                                break
+                            try:
+                                chunk_json = json.loads(d_str)
+                                delta = chunk_json.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                if delta:
+                                    accumulated.append(delta)
+                                    on_chunk(delta)
+                            except Exception:
+                                pass
+                if accumulated:
+                    raw_text = "".join(accumulated).strip()
+            except Exception:
+                raw_text = ""
+
+        # Non-streaming execution if streaming not requested or failed
+        if not raw_text:
+            # 1. Try LM Studio API (/api/v1/chat)
+            try:
+                payload = {
+                    "model": target_model,
+                    "system_prompt": system_prompt,
+                    "input": [
+                        {"type": "text", "content": "Распознай печатный текст на этой странице."},
+                        {"type": "image", "data_url": f"data:image/jpeg;base64,{b64}"},
+                    ],
+                    "reasoning": "off",
+                    "temperature": float(temperature),
+                    "max_output_tokens": int(max_tokens),
+                    "stream": False,
+                    "store": False,
+                }
+                result = self._post("/api/v1/chat", payload)
+                output = [item.get("content", "") for item in result.get("output", []) if item.get("type") == "message"]
+                raw_text = "\n".join(output).strip()
+                stats = result.get("stats", {})
+            except Exception:
+                # 2. Fallback to standard OpenAI /v1/chat/completions (standalone llama-server)
+                openai_payload = {
+                    "model": target_model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "Распознай печатный текст на этой странице."},
+                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                            ],
+                        },
+                    ],
+                    "temperature": float(temperature),
+                    "max_tokens": int(max_tokens),
+                    "stream": False,
+                }
+                result = self._post("/v1/chat/completions", openai_payload)
+                choices = result.get("choices", [])
+                if choices:
+                    raw_text = choices[0].get("message", {}).get("content", "").strip()
+                usage = result.get("usage", {})
+                timings = result.get("timings", {})
+                stats = {
+                    "tokens_per_second": timings.get("predicted_per_second", 0.0),
+                    "num_output_tokens": usage.get("completion_tokens", 0),
+                    "prompt_tokens": usage.get("prompt_tokens", 0),
+                }
 
         t_end = time.time()
         duration = max(0.01, t_end - t_start)
         cleaned_text = self._strip_markdown_fences(raw_text)
+
+        # Ensure on_chunk receives the full text if streaming was bypassed
+        if on_chunk is not None and cleaned_text and not raw_text.startswith(""):
+            on_chunk(cleaned_text)
 
         tok_per_sec = float(stats.get("tokens_per_second") or 0.0)
         num_tokens = int(stats.get("num_output_tokens") or 0)

@@ -70,8 +70,15 @@ def _ml_worker_main(command_queue: mp.Queue, status_queue: mp.Queue, shm_name: s
         except Exception:
             pass
 
+    def _on_text(data: Dict[str, Any]) -> None:
+        try:
+            status_queue.put_nowait({"type": "text_update", "data": data})
+        except Exception:
+            pass
+
     runner.on_log_event = _on_log
     runner.on_frame_update = _on_frame
+    runner.on_text_update = _on_text
 
     # Initial scan
     runner.scan_inputs()
