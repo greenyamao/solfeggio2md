@@ -363,10 +363,39 @@ class PipelineView(QWidget):
             """)
             return
 
+        if stage == "phase3_analyzing":
+            # Keep previous page image and text visible while vision encoder is deciphering page
+            self.badge_text_status.setText(f"АНАЛИЗ СТР. {page}...")
+            self.badge_text_status.setStyleSheet("""
+                QLabel {
+                    background-color: #431407;
+                    color: #fed7aa;
+                    font-family: 'Segoe UI', sans-serif;
+                    font-size: 10px;
+                    font-weight: 700;
+                    padding: 2px 8px;
+                    border-radius: 4px;
+                }
+            """)
+            self.lbl_mon_title.setText(f"ЖИВОЙ МОНИТОР: VLM анализирует стр. {page} (дешифровка фото)")
+            return
+
         # Phase 3: VLM Markdown
         title_str = f"РАСПОЗНАННЫЙ ТЕКСТ (MARKDOWN • СТР. {page})" if page else "РАСПОЗНАННЫЙ ТЕКСТ (MARKDOWN)"
         self.lbl_text_title.setText(title_str)
         self.lbl_text_title.setStyleSheet("color: #38bdf8; font-weight: 700; font-size: 11px;")
+
+        # Synchronize image switch with text generation
+        img_path = data.get("image_path")
+        if img_path and os.path.isfile(img_path):
+            self._current_image_path = img_path
+            self.canvas_view.load_file(img_path)
+            self.lbl_mon_title.setText(f"ЖИВОЙ МОНИТОР: Стр. {page} — VLM маскированная страница")
+
+        first_chunk = data.get("first_chunk", False)
+        if first_chunk:
+            self._active_text_page = page
+            self.text_preview.clear()
 
         if is_comp:
             self.text_preview.setPlainText(full_text)
@@ -423,20 +452,14 @@ class PipelineView(QWidget):
                 path = meta.get("path", "")
                 title = meta.get("title", "")
                 stage = meta.get("stage", "")
-                page = meta.get("page")
                 if title and self.lbl_mon_title.text() != f"ЖИВОЙ МОНИТОР: {title}":
                     self.lbl_mon_title.setText(f"ЖИВОЙ МОНИТОР: {title}")
 
-                if path and path != self._current_image_path and os.path.isfile(path):
-                    self._current_image_path = path
-                    self.canvas_view.load_file(path)
-
-                if stage == "phase3" and page is not None and page != getattr(self, "_active_text_page", None):
-                    self._active_text_page = page
-                    self.text_preview.clear()
-                    self.lbl_text_title.setText(f"РАСПОЗНАННЫЙ ТЕКСТ (MARKDOWN • СТР. {page})")
-                    self.badge_text_status.setText("ОЖИДАНИЕ VLM")
-                    self.badge_text_status.setStyleSheet("background-color: #1e293b; color: #94a3b8; font-family: 'Segoe UI', sans-serif; font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 4px;")
+                # For Phase 1 & 2, update canvas immediately. For Phase 3, canvas updates on token generation!
+                if stage != "phase3":
+                    if path and path != self._current_image_path and os.path.isfile(path):
+                        self._current_image_path = path
+                        self.canvas_view.load_file(path)
 
             elif mtype == "text_update":
                 data = msg.get("data", {})

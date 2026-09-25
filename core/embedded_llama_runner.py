@@ -98,6 +98,7 @@ class EmbeddedLlamaRunner:
         self.last_prompt_eval_speed: float = 0.0
         self.last_eval_tokens: int = 0
         self.last_duration_seconds: float = 0.0
+        self.vram_used_mb: float = 0.0
 
     def find_free_port(self, default_port: int = 1234) -> int:
         """Finds an open port starting from default_port."""
@@ -245,6 +246,7 @@ class EmbeddedLlamaRunner:
                 self._proc = None
 
             self.is_running = False
+            self.vram_used_mb = 0.0
 
     def _read_output_loop(self) -> None:
         """Reads stdout/stderr lines asynchronously, extracts speed timings, and routes logs."""
@@ -269,6 +271,15 @@ class EmbeddedLlamaRunner:
                 if m_tokens:
                     try:
                         self.last_eval_tokens = int(m_tokens.group(1))
+                    except ValueError:
+                        pass
+
+            # Parse VRAM metrics: "total VRAM used = 5911.12 MiB" or "model size = ... MiB"
+            if "total VRAM used" in clean_line or "model size =" in clean_line or "VRAM used:" in clean_line:
+                m_vram = re.search(r"([\d\.]+)\s+(?:MiB|MB)", clean_line)
+                if m_vram:
+                    try:
+                        self.vram_used_mb = round(float(m_vram.group(1)), 1)
                     except ValueError:
                         pass
 

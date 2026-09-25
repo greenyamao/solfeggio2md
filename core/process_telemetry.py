@@ -122,9 +122,17 @@ class ProcessTelemetry:
             except Exception:
                 pass
 
-        # Check NVML process table if available
+        # Check NVML process table and device memory if available
         if self._nvml_initialized and self._gpu_handle:
             try:
+                # Total device VRAM used (captures llama-server, PyTorch, and all active GPU models)
+                mem = pynvml.nvmlDeviceGetMemoryInfo(self._gpu_handle)
+                dev_used_mb = round(mem.used / (1024 * 1024), 1)
+                dev_total_mb = round(mem.total / (1024 * 1024), 1)
+                self._total_vram_mb = dev_total_mb
+                proc_vram_reserved_mb = dev_total_mb
+
+                # On Windows WDDM, per-process usedGpuMemory is None; device memory is tracked in gpu_vram_used_mb
                 all_gpu_pids = set(p.pid for p in all_procs)
                 for proc_fn in (pynvml.nvmlDeviceGetComputeRunningProcesses, pynvml.nvmlDeviceGetGraphicsRunningProcesses):
                     try:
@@ -156,6 +164,7 @@ class ProcessTelemetry:
             "cpu_percent": proc_cpu_percent,
             "ram_rss_mb": proc_ram_rss_mb,
             "vram_allocated_mb": proc_vram_mb,
+            "gpu_vram_used_mb": dev_used_mb,
             "vram_reserved_mb": proc_vram_reserved_mb,
             "gpu_compute_percent": gpu_compute_percent,
             "device_name": self._gpu_name,

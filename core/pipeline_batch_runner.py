@@ -431,7 +431,15 @@ class PipelineBatchRunner:
             m["process_telemetry"] = telemetry
             m["cpu_percent"] = telemetry.get("cpu_percent", 0.0)
             m["ram_rss_mb"] = telemetry.get("ram_rss_mb", 0.0)
-            m["vram_allocated_mb"] = telemetry.get("vram_allocated_mb", 0.0)
+            torch_vram = telemetry.get("vram_allocated_mb", 0.0)
+            if torch_vram > 0.0:
+                m["vram_allocated_mb"] = torch_vram
+            elif hasattr(self, "embedded_runner") and getattr(self.embedded_runner, "vram_used_mb", 0.0) > 0.0:
+                m["vram_allocated_mb"] = self.embedded_runner.vram_used_mb
+            elif (hasattr(self, "embedded_runner") and self.embedded_runner.is_running) or (self.is_running and "VLM" in self.metrics.get("current_phase_name", "")):
+                m["vram_allocated_mb"] = telemetry.get("gpu_vram_used_mb", 0.0)
+            else:
+                m["vram_allocated_mb"] = 0.0
             m["vram_reserved_mb"] = telemetry.get("vram_reserved_mb", 0.0)
             m["gpu_compute_percent"] = telemetry.get("gpu_compute_percent", 0.0)
             m["device_name"] = telemetry.get("device_name", "CPU")
@@ -1689,6 +1697,7 @@ class PipelineBatchRunner:
                 raw_md_file.write_text(blank_txt, encoding="utf-8")
                 with self._lock:
                     self.metrics["current_vlm_text"] = blank_txt
+                    self.metrics["current_page_image_path"] = str(mask_file)
                 if self.on_text_update is not None:
                     self.on_text_update({
                         "page": p_val,
@@ -1696,6 +1705,7 @@ class PipelineBatchRunner:
                         "text": blank_txt,
                         "completed": True,
                         "stage": "phase3",
+                        "image_path": str(mask_file),
                     })
                 vlm_done_count += 1
                 chk["phases"]["vlm"]["pages_done"] = vlm_done_count
@@ -1706,18 +1716,17 @@ class PipelineBatchRunner:
                 self._update_hud("Фаза 3/4: Текстовый VLM проход", 55.0 + (m_idx / total_masks) * 35.0, detail_msg)
                 continue
 
-            # Signal beginning of text extraction for current page
+            # Notify UI that image analysis is in progress for page p_val (without wiping previous page preview)
             if self.on_text_update is not None:
                 self.on_text_update({
+                    "stage": "phase3_analyzing",
                     "page": p_val,
                     "book": masked_dir.parent.name,
-                    "text": "",
-                    "completed": False,
-                    "stage": "phase3",
                 })
 
             streamed_tokens: List[str] = []
             def _vlm_token_cb(chunk: str) -> None:
+                is_first = (len(streamed_tokens) == 0)
                 streamed_tokens.append(chunk)
                 if self.on_text_update is not None:
                     self.on_text_update({
@@ -1726,6 +1735,8 @@ class PipelineBatchRunner:
                         "chunk": chunk,
                         "completed": False,
                         "stage": "phase3",
+                        "first_chunk": is_first,
+                        "image_path": str(mask_file) if is_first else None,
                     })
 
             try:
@@ -1751,6 +1762,7 @@ class PipelineBatchRunner:
                     self.metrics["last_page_seconds"] = duration
                     self.metrics["last_page_tokens"] = tok_count
                     self.metrics["current_vlm_text"] = sanitized_text
+                    self.metrics["current_page_image_path"] = str(mask_file)
 
                 self.log_event("VLM", f"Стр. {p_num}: {tok_count} токенов ({tok_per_sec:.1f} tok/s, {duration:.1f}s)")
                 raw_md_file.write_text(sanitized_text, encoding="utf-8")
@@ -1762,8 +1774,18 @@ class PipelineBatchRunner:
                         "text": sanitized_text,
                         "completed": True,
                         "stage": "phase3",
+                        "image_path": str(mask_file),
                     })
             except Exception as e:
+                if self._stop_event.is_set():
+                    if raw_md_file.is_file():
+                        try:
+                            raw_md_file.unlink()
+                        except Exception:
+                            pass
+                    self.log_event("SYSTEM", f"Стр. {p_num}: распознавание остановлено пользователем")
+                    return False
+
                 self.log_event("ERROR", f"Стр. {p_num}: ошибка VLM ({str(e)})", level="ERROR")
                 fallback_txt = f"<!-- LM_STUDIO_ERROR: {str(e)} -->\n\n## Страница {int(p_num)}\n\n[Текст не распознан: ошибка связи с VLM]\n"
                 raw_md_file.write_text(fallback_txt, encoding="utf-8")
@@ -1774,6 +1796,7 @@ class PipelineBatchRunner:
                         "text": fallback_txt,
                         "completed": True,
                         "stage": "phase3",
+                        "image_path": str(mask_file),
                     })
 
             vlm_done_count += 1
