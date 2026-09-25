@@ -245,8 +245,9 @@ class LMStudioClient:
                 "temperature": float(temperature),
                 "max_tokens": int(max_tokens),
                 "stream": True,
+                "reasoning": "off",
                 "reasoning_effort": "minimal",
-                "chat_template_kwargs": {"reasoning_effort": "none"},
+                "chat_template_kwargs": {"thinking": False, "reasoning_effort": "none"},
             }
             streamed_any = False
             in_think = False
@@ -343,8 +344,9 @@ class LMStudioClient:
                     "temperature": float(temperature),
                     "max_tokens": int(max_tokens),
                     "stream": False,
+                    "reasoning": "off",
                     "reasoning_effort": "minimal",
-                    "chat_template_kwargs": {"reasoning_effort": "none"},
+                    "chat_template_kwargs": {"thinking": False, "reasoning_effort": "none"},
                 }
                 result = self._post("/v1/chat/completions", openai_payload)
                 choices = result.get("choices", [])

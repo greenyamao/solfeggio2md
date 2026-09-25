@@ -178,6 +178,7 @@ class EmbeddedLlamaRunner:
                 "--port", str(self.port),
                 "--host", self.host,
                 "--ubatch-size", "512",
+                "--reasoning", "off",
                 "--reasoning-budget", "0",
                 "--reasoning-effort", "minimal",
             ]
