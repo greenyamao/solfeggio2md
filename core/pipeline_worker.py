@@ -272,7 +272,7 @@ class PipelineWorker:
                 key=lambda f: f.name
             )
             for idx, cf in enumerate(crop_files, start=1):
-                cls_name = "grand_staff" if "grand_staff" in cf.stem else "staff"
+                cls_name = "grand_staff" if "grand_staff" in cf.stem else ("system" if "system" in cf.stem else "staff")
                 abc_file = crops_dir / f"{cf.stem}.abc"
                 abc_txt = abc_file.read_text(encoding="utf-8", errors="replace").strip() if abc_file.is_file() else ""
 
