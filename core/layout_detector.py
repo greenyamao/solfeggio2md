@@ -877,22 +877,72 @@ class LayoutDetector:
             (masked_img_bgr, crops_data)
         """
         masked_img = img_bgr.copy()
+        img_h, img_w = masked_img.shape[:2]
+
+        # Sanitize overly long prefixes (e.g. if caller passed full book title > 24 chars)
+        clean_prefix = tag_prefix
+        if len(tag_prefix) > 24:
+            m = re.search(r"(P\d+.*)$", tag_prefix)
+            if m:
+                clean_prefix = m.group(1)
+
         crops_data = []
-        
         for idx, d in enumerate(detections, start=1):
             px1, py1, px2, py2 = d["padded_box"]
+            px1 = max(0, min(int(px1), img_w - 1))
+            py1 = max(0, min(int(py1), img_h - 1))
+            px2 = max(px1 + 1, min(int(px2), img_w))
+            py2 = max(py1 + 1, min(int(py2), img_h))
+
             crop_bgr = img_bgr[py1:py2, px1:px2].copy()
-            stub_id = f"{tag_prefix}_S{idx:02d}_{d['class']}"
-            
+            stub_id = f"{clean_prefix}_S{idx:02d}_{d['class']}"
+
             # Whiteout region on page
             cv2.rectangle(masked_img, (px1, py1), (px2, py2), (255, 255, 255), -1)
-            
+
             # Add technical tag comment text
             stub_text = f"<!-- MUSIC_STUB_ID:{stub_id} -->"
             font = cv2.FONT_HERSHEY_SIMPLEX
+            box_w = max(10, px2 - px1)
+            box_h = max(10, py2 - py1)
+            avail_w = max(10, box_w - 16)
+            avail_h = max(6, box_h - 6)
+
+            # Fit font size dynamically to stay strictly inside the white box
             font_scale = 0.55
-            cv2.putText(masked_img, stub_text, (px1 + 10, py1 + max(25, (py2 - py1) // 2)), font, font_scale, (90, 90, 90), 2)
-            
+            thickness = 2
+            text_sz, _ = cv2.getTextSize(stub_text, font, font_scale, thickness)
+
+            if text_sz[0] > avail_w:
+                scale_factor = avail_w / float(max(1, text_sz[0]))
+                font_scale = max(0.22, font_scale * scale_factor)
+                thickness = 1 if font_scale < 0.45 else 2
+                text_sz, _ = cv2.getTextSize(stub_text, font, font_scale, thickness)
+
+            if text_sz[1] > avail_h:
+                scale_factor = avail_h / float(max(1, text_sz[1]))
+                font_scale = max(0.20, font_scale * scale_factor)
+                thickness = 1
+                text_sz, _ = cv2.getTextSize(stub_text, font, font_scale, thickness)
+
+            # Position text cleanly inside the white box (never spilling into surrounding text)
+            tx = px1 + 10
+            if tx + text_sz[0] > px2 - 2:
+                tx = max(px1 + 2, px2 - text_sz[0] - 2)
+            tx = max(0, min(tx, img_w - text_sz[0] - 1))
+
+            ty = py1 + max(25, (py2 - py1) // 2)
+
+            cv2.putText(
+                masked_img,
+                stub_text,
+                (int(tx), int(ty)),
+                font,
+                font_scale,
+                (90, 90, 90),
+                thickness,
+            )
+
             crops_data.append({
                 "stub_id": stub_id,
                 "class": d["class"],
@@ -900,5 +950,5 @@ class LayoutDetector:
                 "box": d["padded_box"],
                 "confidence": d["confidence"]
             })
-            
+
         return masked_img, crops_data

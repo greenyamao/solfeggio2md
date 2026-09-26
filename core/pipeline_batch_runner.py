@@ -1129,7 +1129,7 @@ class PipelineBatchRunner:
                                 continue
 
                             masked_img, crops_data = self.layout_detector.mask_page(
-                                deskewed_bgr, detections, tag_prefix=f"{pdf_path.stem}_P{bp:04d}"
+                                deskewed_bgr, detections, tag_prefix=f"P{bp:04d}"
                             )
 
                             debug_img = self.layout_detector.render_debug_image(deskewed_bgr, detections)
@@ -1451,7 +1451,7 @@ class PipelineBatchRunner:
 
                     # Whiteout and save crops
                     masked_img, crops_data = self.layout_detector.mask_page(
-                        deskewed_bgr, detections, tag_prefix=f"{pdf_path.stem}_P{bp:04d}"
+                        deskewed_bgr, detections, tag_prefix=f"P{bp:04d}"
                     )
 
                     # Render and save debug image with YOLO bounding boxes for UI inspection
@@ -1568,19 +1568,33 @@ class PipelineBatchRunner:
         """
         injected_stubs = set()
 
+        def _resolve_crop_file(stem: str, ext: str) -> Optional[Path]:
+            direct = crops_dir / f"{stem}{ext}"
+            if direct.is_file():
+                return direct
+            matches = list(crops_dir.glob(f"*{stem}{ext}"))
+            if matches:
+                return matches[0]
+            m_short = re.search(r"(P\d+.*)$", stem)
+            if m_short:
+                short_match = crops_dir / f"{m_short.group(1)}{ext}"
+                if short_match.is_file():
+                    return short_match
+            return None
+
         def _inject(match: re.Match) -> str:
             cid = match.group(1).strip()
             injected_stubs.add(cid)
-            abc_file = crops_dir / f"{cid}.abc"
-            kern_file = crops_dir / f"{cid}.kern"
+            abc_file = _resolve_crop_file(cid, ".abc")
+            kern_file = _resolve_crop_file(cid, ".kern")
 
             blocks = []
-            if abc_file.is_file():
+            if abc_file is not None and abc_file.is_file():
                 abc = abc_file.read_text(encoding="utf-8", errors="replace").strip()
                 if abc and not abc.startswith("% [OMR Conversion Error"):
                     blocks.append(f"```abc\n{abc}\n```")
 
-            if kern_file.is_file():
+            if kern_file is not None and kern_file.is_file():
                 raw_kern = kern_file.read_text(encoding="utf-8", errors="replace").strip()
                 if raw_kern:
                     try:
@@ -1600,13 +1614,13 @@ class PipelineBatchRunner:
         if missing_stubs:
             recovered_blocks = []
             for ms in missing_stubs:
-                abc_file = crops_dir / f"{ms}.abc"
-                kern_file = crops_dir / f"{ms}.kern"
-                if abc_file.is_file():
+                abc_file = _resolve_crop_file(ms, ".abc")
+                kern_file = _resolve_crop_file(ms, ".kern")
+                if abc_file is not None and abc_file.is_file():
                     abc = abc_file.read_text(encoding="utf-8", errors="replace").strip()
                     if abc and not abc.startswith("% [OMR Conversion Error"):
                         recovered_blocks.append(f"```abc\n{abc}\n```")
-                if kern_file.is_file():
+                if kern_file is not None and kern_file.is_file():
                     raw_kern = kern_file.read_text(encoding="utf-8", errors="replace").strip()
                     if raw_kern:
                         try:
@@ -1745,10 +1759,13 @@ class PipelineBatchRunner:
             crops_dir = masked_dir.parent / "1_crops"
             page_stubs = []
             if crops_dir.is_dir():
-                page_stubs = sorted([
-                    f.stem for f in crops_dir.glob(f"*_P{p_num}_S*.png")
+                page_pats = [f"*P{p_num}_S*.png"]
+                if p_num.isdigit():
+                    page_pats.append(f"*P{int(p_num):04d}_S*.png")
+                page_stubs = sorted({
+                    f.stem for pat in page_pats for f in crops_dir.glob(pat)
                     if not f.name.endswith("_deskew.png")
-                ])
+                })
             page_stubs_set = set(page_stubs)
             p_val = int(p_num) if p_num.isdigit() else m_idx
 
@@ -2008,10 +2025,13 @@ class PipelineBatchRunner:
             if not raw_md_file.is_file() or overwrite:
                 stubs = []
                 if crops_dir.is_dir():
-                    stubs = sorted([
-                        f.stem for f in crops_dir.glob(f"*_P{p_num}_S*.png")
+                    page_pats = [f"*P{p_num}_S*.png"]
+                    if p_num.isdigit():
+                        page_pats.append(f"*P{int(p_num):04d}_S*.png")
+                    stubs = sorted({
+                        f.stem for pat in page_pats for f in crops_dir.glob(pat)
                         if not f.name.endswith("_deskew.png")
-                    ])
+                    })
 
                 lines = [f"## Page {int(p_num)}\n"]
                 if stubs:
@@ -2060,10 +2080,13 @@ class PipelineBatchRunner:
             # Check which stubs were expected for this page from crops_dir
             page_stubs = []
             if crops_dir.is_dir():
-                page_stubs = sorted([
-                    f.stem for f in crops_dir.glob(f"*_P{p_num}_S*.png")
+                page_pats = [f"*P{p_num}_S*.png"]
+                if p_num.isdigit():
+                    page_pats.append(f"*P{int(p_num):04d}_S*.png")
+                page_stubs = sorted({
+                    f.stem for pat in page_pats for f in crops_dir.glob(pat)
                     if not f.name.endswith("_deskew.png")
-                ])
+                })
 
             final_text = self._inject_music_stubs(raw_text, page_stubs, crops_dir)
 
