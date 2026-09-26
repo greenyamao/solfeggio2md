@@ -328,11 +328,22 @@ class LayoutDetector:
             for j in range(i + 1, len(sorted_dets)):
                 if used[j]:
                     continue
+                other_cls = sorted_dets[j]["class"]
+                if other_cls != cur_cls:
+                    continue
                 other_box = sorted_dets[j]["box"]
                 v_ratio = cls.vertical_overlap_ratio(cur_box, other_box)
                 h_rel = cls.horizontal_overlap_or_gap(cur_box, other_box)
 
-                if v_ratio >= v_overlap_thresh and h_rel >= -max_gap_px:
+                h1 = cur_box[3] - cur_box[1]
+                h2 = other_box[3] - other_box[1]
+                cy1 = (cur_box[1] + cur_box[3]) / 2.0
+                cy2 = (other_box[1] + other_box[3]) / 2.0
+
+                if (v_ratio >= v_overlap_thresh 
+                    and abs(h1 - h2) <= max(10, int(0.30 * max(h1, h2)))
+                    and abs(cy1 - cy2) <= max(8, int(0.20 * max(h1, h2)))
+                    and -max_gap_px <= h_rel):
                     cur_box = cls.merge_boxes(cur_box, other_box)
                     cur_conf = max(cur_conf, sorted_dets[j]["confidence"])
                     cur_staves = max(cur_staves, sorted_dets[j].get("staves_count", 1))
@@ -723,7 +734,27 @@ class LayoutDetector:
         multi_staff.sort(key=lambda x: (x['class'] == 'grand_staff', x['conf']), reverse=True)
         kept_multi = []
         for b in multi_staff:
-            if not any(self.box_iou(b['box'], km['box']) > 0.60 for km in kept_multi):
+            conflict = False
+            for km in kept_multi:
+                iou = self.box_iou(b['box'], km['box'])
+                v_ratio = self.vertical_overlap_ratio(b['box'], km['box'])
+                inter_x = max(0, min(b['box'][2], km['box'][2]) - max(b['box'][0], km['box'][0]))
+                min_w = min(b['box'][2] - b['box'][0], km['box'][2] - km['box'][0])
+                h_ratio = inter_x / float(max(1, min_w))
+
+                if iou > 0.50:
+                    conflict = True
+                    break
+                if (b['class'] == 'system' or km['class'] == 'system') and v_ratio >= 0.30 and h_ratio >= 0.40:
+                    conflict = True
+                    break
+                if self.is_contained(b['box'], km['box'], thresh=0.50):
+                    conflict = True
+                    break
+                if self.is_contained(km['box'], b['box'], thresh=0.50):
+                    conflict = True
+                    break
+            if not conflict:
                 kept_multi.append(b)
 
         single_staves = [b for b in yolo_boxes if b['class'] == 'staff']
@@ -732,8 +763,11 @@ class LayoutDetector:
         for s in single_staves:
             contained = False
             for km in kept_multi:
-                if self.is_contained(s['box'], km['box'], thresh=0.50):
-                    # Inherit full horizontal extent of contained single staff so container doesn't truncate it
+                v_ratio = self.vertical_overlap_ratio(s['box'], km['box'])
+                inter_x = max(0, min(s['box'][2], km['box'][2]) - max(s['box'][0], km['box'][0]))
+                min_w = min(s['box'][2] - s['box'][0], km['box'][2] - km['box'][0])
+                h_ratio = inter_x / float(max(1, min_w))
+                if self.is_contained(s['box'], km['box'], thresh=0.50) or (v_ratio >= 0.50 and h_ratio >= 0.50):
                     km['box'][0] = min(km['box'][0], s['box'][0])
                     km['box'][2] = max(km['box'][2], s['box'][2])
                     contained = True
@@ -763,7 +797,7 @@ class LayoutDetector:
                         "s": ps["s"]
                     })
 
-        # 5. Merge adjacent single staves into grand_staff if appropriate
+        # 5. Merge adjacent single staves into grand_staff ONLY with authentic connectors
         kept_single.sort(key=lambda x: x['box'][1])
         merged_singles = []
         skip = set()
@@ -794,20 +828,24 @@ class LayoutDetector:
                     })
                     skip.add(idx + 1)
                     continue
-                elif 0 <= v_gap <= int(staff_s * 6.0) and h_iou >= 0.70:
-                    merged_box = [min(cur['box'][0], nxt['box'][0]), cur['box'][1], max(cur['box'][2], nxt['box'][2]), nxt['box'][3]]
-                    merged_singles.append({
-                        "box": merged_box,
-                        "conf": max(cur['conf'], nxt['conf']),
-                        "class": "grand_staff",
-                        "staves_count": 2,
-                        "s": staff_s
-                    })
-                    skip.add(idx + 1)
-                    continue
             merged_singles.append(cur)
 
         all_blocks = kept_multi + merged_singles
+        all_blocks.sort(key=lambda x: (x['class'] == 'grand_staff', x['conf']), reverse=True)
+        resolved_blocks = []
+        for b in all_blocks:
+            conflict = False
+            for rb in resolved_blocks:
+                v_ratio = self.vertical_overlap_ratio(b['box'], rb['box'])
+                inter_x = max(0, min(b['box'][2], rb['box'][2]) - max(b['box'][0], rb['box'][0]))
+                min_w = min(b['box'][2] - b['box'][0], rb['box'][2] - rb['box'][0])
+                h_ratio = inter_x / float(max(1, min_w))
+                if v_ratio >= 0.40 and h_ratio >= 0.40:
+                    conflict = True
+                    break
+            if not conflict:
+                resolved_blocks.append(b)
+        all_blocks = resolved_blocks
         all_blocks.sort(key=lambda x: x['box'][1])
 
         # 6. Expand vertical envelope to ledger lines
