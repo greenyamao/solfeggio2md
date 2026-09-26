@@ -556,10 +556,25 @@ class LayoutDetector:
         if len(line_centers) < 5:
             return [], 10.0
 
+        # Cluster/merge line centers closer than 3.5 px (from side-by-side columns or slight scan tilt)
+        merged_centers = []
+        for c in line_centers:
+            if not merged_centers:
+                merged_centers.append([c])
+            else:
+                if c - merged_centers[-1][-1] <= 3.5:
+                    merged_centers[-1].append(c)
+                else:
+                    merged_centers.append([c])
+        clean_centers = [float(np.mean(group)) for group in merged_centers]
+
+        if len(clean_centers) < 5:
+            return [], 10.0
+
         staves = []
         i = 0
-        while i <= len(line_centers) - 5:
-            sub = line_centers[i : i + 5]
+        while i <= len(clean_centers) - 5:
+            sub = clean_centers[i : i + 5]
             diffs = np.diff(sub)
             local_s = float(np.mean(diffs))
 
@@ -573,8 +588,8 @@ class LayoutDetector:
                 continue
 
             # Grid table rejection: only reject if embedded in a larger regular grid (>= 7 lines)
-            has_above = (i > 0 and abs((sub[0] - line_centers[i - 1]) - local_s) <= 0.35 * local_s)
-            has_below = (i + 5 < len(line_centers) and abs((line_centers[i + 5] - sub[-1]) - local_s) <= 0.35 * local_s)
+            has_above = (i > 0 and abs((sub[0] - clean_centers[i - 1]) - local_s) <= 0.35 * local_s)
+            has_below = (i + 5 < len(clean_centers) and abs((clean_centers[i + 5] - sub[-1]) - local_s) <= 0.35 * local_s)
             if has_above and has_below:
                 i += 1
                 continue
@@ -681,6 +696,13 @@ class LayoutDetector:
                     continue
                 norm_cls = "grand_staff" if "grand" in cls_name else ("system" if "system" in cls_name else "staff")
                 b_xy = [int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])]
+                b_h = b_xy[3] - b_xy[1]
+                # Physical constraint: a grand_staff or system must be >= 7.0 * staff_s tall (~60px)
+                if norm_cls in ("grand_staff", "system") and b_h < int(staff_s * 7.0):
+                    norm_cls = "staff"
+
+                # Trace authentic staff horizontal extent so clefs, braces, and full measures are never truncated
+                b_xy = self.trace_staff_horizontal_extent(gray, b_xy)
 
                 # Validate candidate with physical filter
                 crop = img_bgr[b_xy[1]:b_xy[3], b_xy[0]:b_xy[2]]
@@ -705,11 +727,40 @@ class LayoutDetector:
         single_staves.sort(key=lambda x: x['conf'], reverse=True)
         kept_single = []
         for s in single_staves:
-            if not any(self.is_contained(s['box'], km['box'], thresh=0.60) for km in kept_multi):
+            contained = False
+            for km in kept_multi:
+                if self.is_contained(s['box'], km['box'], thresh=0.50):
+                    # Inherit full horizontal extent of contained single staff so container doesn't truncate it
+                    km['box'][0] = min(km['box'][0], s['box'][0])
+                    km['box'][2] = max(km['box'][2], s['box'][2])
+                    contained = True
+                    break
+            if not contained:
                 if not any(self.box_iou(s['box'], ks['box']) > 0.50 for ks in kept_single):
                     kept_single.append(s)
 
-        # 4. Merge adjacent single staves into grand_staff if appropriate
+        # 4. Physical staff rescue pass (for any authentic staff missed by YOLO)
+        phys_staves, _ = self.extract_physical_5line_staves(gray)
+        for ps in phys_staves:
+            p_box = [ps["x_left"], ps["y_top"], ps["x_right"], ps["y_bot"]]
+            covered = False
+            for kb in (kept_multi + kept_single):
+                if self.box_iou(p_box, kb['box']) > 0.30 or self.is_contained(p_box, kb['box'], thresh=0.50):
+                    covered = True
+                    break
+            if not covered:
+                p_box = self.trace_staff_horizontal_extent(gray, p_box)
+                crop = img_bgr[p_box[1]:p_box[3], p_box[0]:p_box[2]]
+                if is_valid_music_staff(crop, "staff", 0.90):
+                    kept_single.append({
+                        "box": p_box,
+                        "conf": 0.90,
+                        "class": "staff",
+                        "staves_count": 1,
+                        "s": ps["s"]
+                    })
+
+        # 5. Merge adjacent single staves into grand_staff if appropriate
         kept_single.sort(key=lambda x: x['box'][1])
         merged_singles = []
         skip = set()
@@ -752,26 +803,6 @@ class LayoutDetector:
                     skip.add(idx + 1)
                     continue
             merged_singles.append(cur)
-
-        # 5. Physical staff rescue pass (for any authentic staff completely missed by YOLO)
-        phys_staves, _ = self.extract_physical_5line_staves(gray)
-        for ps in phys_staves:
-            p_box = [ps["x_left"], ps["y_top"], ps["x_right"], ps["y_bot"]]
-            covered = False
-            for kb in (kept_multi + merged_singles):
-                if self.box_iou(p_box, kb['box']) > 0.30 or self.is_contained(p_box, kb['box'], thresh=0.50):
-                    covered = True
-                    break
-            if not covered:
-                crop = img_bgr[p_box[1]:p_box[3], p_box[0]:p_box[2]]
-                if is_valid_music_staff(crop, "staff", 0.90):
-                    merged_singles.append({
-                        "box": p_box,
-                        "conf": 0.90,
-                        "class": "staff",
-                        "staves_count": 1,
-                        "s": ps["s"]
-                    })
 
         all_blocks = kept_multi + merged_singles
         all_blocks.sort(key=lambda x: x['box'][1])
