@@ -79,7 +79,7 @@ def is_valid_music_staff(crop_bgr: np.ndarray, cls_name: str, conf: float) -> bo
     median_s = float(np.median(diffs))
 
     # Scale-adaptive plausible spacing bounds
-    if median_s < 5.0 or median_s > 35.0:
+    if median_s < 5.0 or median_s > 24.0:
         return False
 
     # 3. Check for multi-row table grid (6 or more consecutive equidistant lines)
@@ -578,7 +578,7 @@ class LayoutDetector:
             diffs = np.diff(sub)
             local_s = float(np.mean(diffs))
 
-            if local_s < 5.0 or local_s > 35.0:
+            if local_s < 5.0 or local_s > 24.0:
                 i += 1
                 continue
 
@@ -587,10 +587,10 @@ class LayoutDetector:
                 i += 1
                 continue
 
-            # Grid table rejection: only reject if embedded in a larger regular grid (>= 7 lines)
+            # Grid table rejection: reject if embedded in a larger regular grid (>= 6 lines)
             has_above = (i > 0 and abs((sub[0] - clean_centers[i - 1]) - local_s) <= 0.35 * local_s)
             has_below = (i + 5 < len(clean_centers) and abs((clean_centers[i + 5] - sub[-1]) - local_s) <= 0.35 * local_s)
-            if has_above and has_below:
+            if has_above or has_below:
                 i += 1
                 continue
 
@@ -660,8 +660,11 @@ class LayoutDetector:
         staff_s = 8.5
         try:
             s_est = estimate_staff_spacing(gray)
-            if s_est and 5.0 <= s_est <= 35.0:
-                staff_s = float(s_est)
+            if s_est is not None:
+                if isinstance(s_est, (int, float)) and 5.0 <= s_est <= 24.0:
+                    staff_s = float(s_est)
+                elif isinstance(s_est, (tuple, list)) and len(s_est) >= 1 and 5.0 <= s_est[0] <= 24.0:
+                    staff_s = float(s_est[0])
         except Exception:
             pass
 
