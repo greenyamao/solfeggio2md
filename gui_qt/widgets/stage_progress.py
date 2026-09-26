@@ -119,6 +119,18 @@ class PhaseRow(QWidget):
                     border-radius: 10px;
                 }
             """)
+        elif status == "error":
+            self.status_pill.setText("Error")
+            self.status_pill.setStyleSheet("""
+                QLabel {
+                    background-color: #991b1b;
+                    color: #fca5a5;
+                    font-weight: 700;
+                    font-size: 10px;
+                    padding: 2px 8px;
+                    border-radius: 10px;
+                }
+            """)
         elif status == "skipped":
             self.status_pill.setText("Skipped")
             self.status_pill.setStyleSheet("""

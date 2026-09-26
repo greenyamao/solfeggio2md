@@ -589,7 +589,7 @@ class LayoutDetector:
 
             # Segment detection: handles multiple columns / staves on same line and rejects isolated small arrows
             active_cols = col_s >= 2
-            segs = self.find_segments(active_cols, max_gap=int(local_s * 4.0))
+            segs = cls.find_segments(active_cols, max_gap=int(local_s * 4.0))
 
             found_any = False
             for xl, xr in segs:

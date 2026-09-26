@@ -588,9 +588,17 @@ class PipelineBatchRunner:
                         self.metrics["phase_progress"][p_key]["status"] = "completed"
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.log_event("ERROR", f"Pipeline error: {e}", level="ERROR")
             with self._lock:
                 self.metrics["current_phase_name"] = "Pipeline error"
                 self.metrics["last_log"] = f"Exception: {str(e)}"
+                for p_key in ("phase1", "phase2", "phase3", "phase4"):
+                    if p_key in self.metrics.get("phase_progress", {}):
+                        if self.metrics["phase_progress"][p_key].get("status") == "running":
+                            self.metrics["phase_progress"][p_key]["status"] = "error"
+                            self.metrics["phase_progress"][p_key]["detail"] = f"Error: {str(e)[:45]}"
         finally:
             self._purge_vram()
             if hasattr(self, "embedded_runner"):
@@ -1181,6 +1189,9 @@ class PipelineBatchRunner:
                         self._write_checkpoint(pdf_path.stem, chk)
                         self._update_phase_progress("phase1", 100.0, total_book_pages, total_book_pages, "completed", f"All {total_book_pages} pages sliced")
                 except Exception as ex:
+                    import traceback
+                    traceback.print_exc()
+                    self.log_event("ERROR", f"Slicing error: {ex}", level="ERROR")
                     thread_errors.append(ex)
                 finally:
                     # Immediately unload LayoutDetector (YOLO) from GPU memory to free ~2.0 GB VRAM for OMR
@@ -1286,6 +1297,9 @@ class PipelineBatchRunner:
                         else:
                             self._update_phase_progress("phase2", 100.0, 0, 0, "completed", "No staves for OMR")
                 except Exception as ex:
+                    import traceback
+                    traceback.print_exc()
+                    self.log_event("ERROR", f"OMR worker failed: {ex}", level="ERROR")
                     thread_errors.append(ex)
 
             # Start concurrent threads
