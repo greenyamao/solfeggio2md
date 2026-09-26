@@ -322,7 +322,7 @@ class InspectorView(QWidget):
         crops_dir = book_dir / "1_crops"
         if crops_dir.is_dir():
             for f in crops_dir.glob("*.png"):
-                m = re.search(r"_P(\d+)_", f.stem)
+                m = re.search(r"(?:^|_)P(\d+)_", f.stem)
                 if m:
                     max_p = max(max_p, int(m.group(1)))
 
@@ -340,14 +340,14 @@ class InspectorView(QWidget):
         """Finds all non-deskew crop images belonging to page p_num."""
         if not crops_dir.is_dir():
             return []
-        pat = re.compile(rf"_P0*{p_num}_S\d+", re.IGNORECASE)
+        pat = re.compile(rf"(?:^|_)P0*{p_num}_S\d+", re.IGNORECASE)
         crops = []
-        for f in crops_dir.glob("*.png"):
+        for f in sorted(crops_dir.glob("*.png")):
             if f.name.endswith("_deskew.png") or "preview" in f.name:
                 continue
             if pat.search(f.name):
                 crops.append(f)
-        return sorted(crops)
+        return crops
 
     def refresh_books(self, preserve_current: bool = False) -> None:
         curr_book = self.combo_books.currentText() if preserve_current else None
@@ -470,7 +470,7 @@ class InspectorView(QWidget):
             self.combo_crops.blockSignals(True)
             self.combo_crops.clear()
             for i, c in enumerate(crops):
-                tag_match = re.search(r"_S(\d+)_", c.name)
+                tag_match = re.search(r"_S(\d+)(?:_|\.)", c.name)
                 tag_str = f"S{tag_match.group(1)}" if tag_match else f"S{i+1:02d}"
                 self.combo_crops.addItem(f"Staff {i+1} ({tag_str})", c)
             if 0 <= prev_crop_idx < len(crops):
