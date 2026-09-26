@@ -11,12 +11,27 @@ from pathlib import Path
 import sys
 from typing import Dict, Any, Optional, Tuple, List
 
+import os
+import re
+import logging
+import warnings
 import cv2
 import numpy as np
 from PIL import Image
 import torch
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, PreTrainedTokenizerFast
+from transformers import logging as transformers_logging
+
+# Silence noisy third-party logging
+warnings.filterwarnings("ignore")
+transformers_logging.set_verbosity_error()
+logging.getLogger("torch").setLevel(logging.ERROR)
+try:
+    from loguru import logger
+    logger.disable("transformers_modules")
+except ImportError:
+    pass
 
 ROOT_DIR = Path(__file__).parent.parent.resolve()
 if str(ROOT_DIR) not in sys.path:
@@ -289,6 +304,10 @@ class OMREngine:
             if music_started and line.startswith("*"):
                 if any(line.startswith(h) for h in ("*clef", "*k[", "*M", "**kern")):
                     break
+
+            # 3. Token degeneration check (e.g. runaway repeated characters like 333333... or aaaaaa...)
+            if not is_header and any(re.search(r'([0-9a-zA-Z])\1{5,}', tok) for tok in line.split("\t")):
+                break
 
             if is_header:
                 headers.append(line)

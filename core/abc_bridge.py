@@ -12,8 +12,16 @@ import music21
 import verovio
 from abc_xml_converter import convert_xml2abc
 
-# Silence verbose music21 terminal warnings (e.g. unknown clef types, unterminated spines)
-logging.getLogger("music21").setLevel(logging.ERROR)
+# Silence verbose music21 terminal warnings (e.g. unknown clef types, unterminated spines, spineParser)
+try:
+    from music21.environment import Environment
+    Environment.warn = lambda self, *args, **kwargs: None
+    Environment.printDebug = lambda self, *args, **kwargs: None
+except Exception:
+    pass
+
+for logger_name in ("music21", "music21.humdrum", "music21.musicxml", "humdrum", "humdrum.spineParser"):
+    logging.getLogger(logger_name).setLevel(logging.ERROR)
 
 
 class ABCBridge:
@@ -25,8 +33,7 @@ class ABCBridge:
         self._tk = verovio.toolkit()
 
         # Suppress third-party MIDI channel and syntax warning spam from music21
-        import logging
-        for logger_name in ("music21", "music21.humdrum", "music21.musicxml"):
+        for logger_name in ("music21", "music21.humdrum", "music21.musicxml", "humdrum", "humdrum.spineParser"):
             logging.getLogger(logger_name).setLevel(logging.ERROR)
 
     @staticmethod

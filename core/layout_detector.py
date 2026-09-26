@@ -201,6 +201,18 @@ class LayoutDetector:
         return inter / float(area1 + area2 - inter)
 
     @staticmethod
+    def is_contained(small: List[int], big: List[int], thresh: float = 0.60) -> bool:
+        x1 = max(small[0], big[0])
+        y1 = max(small[1], big[1])
+        x2 = min(small[2], big[2])
+        y2 = min(small[3], big[3])
+        if x2 <= x1 or y2 <= y1:
+            return False
+        inter = (x2 - x1) * (y2 - y1)
+        small_area = (small[2] - small[0]) * (small[3] - small[1])
+        return (inter / float(max(1, small_area))) >= thresh
+
+    @staticmethod
     def vertical_overlap_ratio(b1: List[int], b2: List[int]) -> float:
         """Fraction of the smaller box's height that is vertically overlapped."""
         y1 = max(b1[1], b2[1])
@@ -555,17 +567,15 @@ class LayoutDetector:
                 i += 1
                 continue
 
-            # Spacing uniformity: relative standard deviation <= 12%
-            if (np.std(diffs) / local_s) > 0.12:
+            # Spacing uniformity: relative standard deviation <= 15%
+            if (np.std(diffs) / local_s) > 0.15:
                 i += 1
                 continue
 
-            # Scale-invariant 5-line Isolation Invariant:
-            # Check above line 0
+            # Grid table rejection: only reject if embedded in a larger regular grid (>= 7 lines)
             has_above = (i > 0 and abs((sub[0] - line_centers[i - 1]) - local_s) <= 0.35 * local_s)
-            # Check below line 4
             has_below = (i + 5 < len(line_centers) and abs((line_centers[i + 5] - sub[-1]) - local_s) <= 0.35 * local_s)
-            if has_above or has_below:
+            if has_above and has_below:
                 i += 1
                 continue
 
@@ -576,47 +586,69 @@ class LayoutDetector:
             yt, yb = int(sub[0]), int(sub[-1])
             strip = lines_fine[max(0, yt - 2):min(img_h, yb + 3), :]
             col_s = np.sum(strip > 0, axis=0)
-            act_cols = np.where(col_s >= 2)[0]
-            if len(act_cols) == 0:
-                act_cols = np.where(col_s > 0)[0]
-            if len(act_cols) > 0:
-                xl, xr = int(act_cols[0]), int(act_cols[-1])
+
+            # Segment detection: handles multiple columns / staves on same line and rejects isolated small arrows
+            active_cols = col_s >= 2
+            segs = self.find_segments(active_cols, max_gap=int(local_s * 4.0))
+
+            found_any = False
+            for xl, xr in segs:
+                w_staff = xr - xl
+                h_staff = yb - yt
+                if w_staff >= 80 and (w_staff / float(max(1, h_staff))) >= 2.5:
+                    staves.append({
+                        "y_top": yt,
+                        "y_bot": yb,
+                        "x_left": int(xl),
+                        "x_right": int(xr),
+                        "s": local_s,
+                        "lines": sub
+                    })
+                    found_any = True
+
+            if found_any:
+                i += 5
             else:
-                xl, xr = mx, img_w - mx
-
-            # Aspect ratio guard: staff must be horizontal ribbon W / H >= 3.0
-            w_staff = xr - xl
-            h_staff = yb - yt
-            if (w_staff / float(max(1, h_staff))) < 3.0:
                 i += 1
-                continue
-
-            staves.append({
-                "y_top": yt,
-                "y_bot": yb,
-                "x_left": xl,
-                "x_right": xr,
-                "s": local_s,
-                "lines": sub
-            })
-            i += 5
 
         staves.sort(key=lambda s: s["y_top"])
         median_page_s = float(np.median([s["s"] for s in staves])) if staves else 10.0
         return staves, median_page_s
 
+    @staticmethod
+    def find_segments(binary_row: np.ndarray, max_gap: int) -> List[Tuple[int, int]]:
+        idx = np.where(binary_row)[0]
+        if len(idx) == 0:
+            return []
+        segments = []
+        start = idx[0]
+        prev = idx[0]
+        for x in idx[1:]:
+            if x - prev > max_gap:
+                segments.append((start, prev))
+                start = x
+            prev = x
+        segments.append((start, prev))
+        return segments
+
     def detect(self, img_bgr: np.ndarray, imgsz: Optional[int] = None) -> List[Dict[str, Any]]:
         """
-        Runs hybrid layout detection combining physical 5-line staff geometry
-        with deep neural OLA classification.
+        Runs hybrid layout detection combining deep neural OLA classification
+        with geometric physical staff analysis.
         Guarantees 100% recall across any music book scale or layout.
         """
         self._ensure_loaded()
         img_h, img_w = img_bgr.shape[:2]
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
 
-        # 1. Physical 5-line extraction (ground truth geometric anchor)
-        phys_staves, staff_s = self.extract_physical_5line_staves(gray)
+        # 1. Estimate staff spacing S
+        staff_s = 8.5
+        try:
+            s_est = estimate_staff_spacing(gray)
+            if s_est and 5.0 <= s_est <= 35.0:
+                staff_s = float(s_est)
+        except Exception:
+            pass
 
         # 2. Neural inference with YOLO OLA v2.0
         is_cuda = (self.device == "cuda" or "cuda" in str(self.device).lower())
@@ -626,7 +658,7 @@ class LayoutDetector:
             max_cap = 1920 if is_cuda else 1280
             imgsz = min(max_cap, max(1024, target_sz))
 
-        effective_conf = min(self.conf_threshold, 0.10)
+        effective_conf = min(self.conf_threshold, 0.20)
         precision_kwargs = self._get_precision_kwargs(is_cuda)
         results = self.model.predict(
             source=img_bgr,
@@ -647,131 +679,120 @@ class LayoutDetector:
                 # Only macro notation blocks: staves, grand_staff, systems (ignore measure slices)
                 if cls_name not in ("staves", "grand_staff", "systems"):
                     continue
-                yolo_boxes.append({
-                    "box": [int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])],
-                    "conf": conf,
-                    "class": cls_name
-                })
+                norm_cls = "grand_staff" if "grand" in cls_name else ("system" if "system" in cls_name else "staff")
+                b_xy = [int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])]
 
-        # 3. Group physical staves into systems or grand staves using dynamic scale S & connections
-        phys_blocks = []
-        skip_idx = set()
-        for idx in range(len(phys_staves)):
-            if idx in skip_idx:
+                # Validate candidate with physical filter
+                crop = img_bgr[b_xy[1]:b_xy[3], b_xy[0]:b_xy[2]]
+                if is_valid_music_staff(crop, norm_cls, conf):
+                    yolo_boxes.append({
+                        "box": b_xy,
+                        "conf": conf,
+                        "class": norm_cls,
+                        "staves_count": 2 if norm_cls == "grand_staff" else (3 if norm_cls == "system" else 1),
+                        "s": staff_s
+                    })
+
+        # 3. Deduplicate and suppress containers
+        multi_staff = [b for b in yolo_boxes if b['class'] in ('grand_staff', 'system')]
+        multi_staff.sort(key=lambda x: (x['class'] == 'grand_staff', x['conf']), reverse=True)
+        kept_multi = []
+        for b in multi_staff:
+            if not any(self.box_iou(b['box'], km['box']) > 0.60 for km in kept_multi):
+                kept_multi.append(b)
+
+        single_staves = [b for b in yolo_boxes if b['class'] == 'staff']
+        single_staves.sort(key=lambda x: x['conf'], reverse=True)
+        kept_single = []
+        for s in single_staves:
+            if not any(self.is_contained(s['box'], km['box'], thresh=0.60) for km in kept_multi):
+                if not any(self.box_iou(s['box'], ks['box']) > 0.50 for ks in kept_single):
+                    kept_single.append(s)
+
+        # 4. Merge adjacent single staves into grand_staff if appropriate
+        kept_single.sort(key=lambda x: x['box'][1])
+        merged_singles = []
+        skip = set()
+        for idx in range(len(kept_single)):
+            if idx in skip:
                 continue
-            cur = [phys_staves[idx]]
-            next_idx = idx + 1
-            while next_idx < len(phys_staves):
-                prev_s = cur[-1]
-                cand_s = phys_staves[next_idx]
-                s_curr = cand_s.get("s", staff_s)
+            cur = kept_single[idx]
+            if idx + 1 < len(kept_single):
+                nxt = kept_single[idx + 1]
+                v_gap = nxt['box'][1] - cur['box'][3]
+                inter_x = max(0, min(cur['box'][2], nxt['box'][2]) - max(cur['box'][0], nxt['box'][0]))
+                union_x = max(cur['box'][2], nxt['box'][2]) - min(cur['box'][0], nxt['box'][0])
+                h_iou = inter_x / float(max(1, union_x))
 
-                inter = max(0, min(prev_s["x_right"], cand_s["x_right"]) - max(prev_s["x_left"], cand_s["x_left"]))
-                union = max(prev_s["x_right"], cand_s["x_right"]) - min(prev_s["x_left"], cand_s["x_left"])
-                h_iou = inter / float(max(1, union))
-                v_gap = cand_s["y_top"] - prev_s["y_bot"]
+                s1 = {"x_left": cur['box'][0], "x_right": cur['box'][2], "y_top": cur['box'][1], "y_bot": cur['box'][3]}
+                s2 = {"x_left": nxt['box'][0], "x_right": nxt['box'][2], "y_top": nxt['box'][1], "y_bot": nxt['box'][3]}
+                has_conn = self.has_continuous_vertical_connector(gray, s1, s2, staff_s)
+                has_bars = self.detect_connecting_barlines(gray, s1, s2, staff_s)
 
-                has_connector = self.has_continuous_vertical_connector(gray, prev_s, cand_s, s_curr)
-                has_barlines = self.detect_connecting_barlines(gray, prev_s, cand_s, s_curr)
+                if (has_conn or has_bars) and 0 <= v_gap <= int(staff_s * 12.0) and h_iou >= 0.40:
+                    merged_box = [min(cur['box'][0], nxt['box'][0]), cur['box'][1], max(cur['box'][2], nxt['box'][2]), nxt['box'][3]]
+                    merged_singles.append({
+                        "box": merged_box,
+                        "conf": max(cur['conf'], nxt['conf']),
+                        "class": "grand_staff",
+                        "staves_count": 2,
+                        "s": staff_s
+                    })
+                    skip.add(idx + 1)
+                    continue
+                elif 0 <= v_gap <= int(staff_s * 6.0) and h_iou >= 0.70:
+                    merged_box = [min(cur['box'][0], nxt['box'][0]), cur['box'][1], max(cur['box'][2], nxt['box'][2]), nxt['box'][3]]
+                    merged_singles.append({
+                        "box": merged_box,
+                        "conf": max(cur['conf'], nxt['conf']),
+                        "class": "grand_staff",
+                        "staves_count": 2,
+                        "s": staff_s
+                    })
+                    skip.add(idx + 1)
+                    continue
+            merged_singles.append(cur)
 
-                # Check if YOLO detected a grand_staff or system enclosing both staves
-                has_yolo_group = any(
-                    yb["conf"] >= 0.30 and
-                    yb["class"] in ("grand_staff", "grandstaff", "system", "systems") and
-                    yb["box"][1] <= prev_s["y_top"] + int(s_curr) and
-                    yb["box"][3] >= cand_s["y_bot"] - int(s_curr) and
-                    self.horizontal_overlap_or_gap(yb["box"], [prev_s["x_left"], prev_s["y_top"], prev_s["x_right"], prev_s["y_bot"]]) > 0 and
-                    self.horizontal_overlap_or_gap(yb["box"], [cand_s["x_left"], cand_s["y_top"], cand_s["x_right"], cand_s["y_bot"]]) > 0
-                    for yb in yolo_boxes
-                )
-
-                can_merge = False
-                if len(cur) == 1:
-                    if has_connector or has_barlines or has_yolo_group:
-                        if 0 <= v_gap <= int(s_curr * 12.0) and (h_iou >= 0.40 or has_connector):
-                            can_merge = True
-                    else:
-                        if 0 <= v_gap <= int(s_curr * 5.0) and h_iou >= 0.70:
-                            can_merge = True
-                elif len(cur) >= 2:
-                    # Joining 3rd+ staff strictly requires continuous left system connector, barlines, or YOLO system box
-                    if (has_connector or has_barlines or has_yolo_group) and 0 <= v_gap <= int(s_curr * 12.0) and h_iou >= 0.40:
-                        can_merge = True
-
-                if can_merge:
-                    cur.append(cand_s)
-                    skip_idx.add(next_idx)
-                    next_idx += 1
-                else:
+        # 5. Physical staff rescue pass (for any authentic staff completely missed by YOLO)
+        phys_staves, _ = self.extract_physical_5line_staves(gray)
+        for ps in phys_staves:
+            p_box = [ps["x_left"], ps["y_top"], ps["x_right"], ps["y_bot"]]
+            covered = False
+            for kb in (kept_multi + merged_singles):
+                if self.box_iou(p_box, kb['box']) > 0.30 or self.is_contained(p_box, kb['box'], thresh=0.50):
+                    covered = True
                     break
+            if not covered:
+                crop = img_bgr[p_box[1]:p_box[3], p_box[0]:p_box[2]]
+                if is_valid_music_staff(crop, "staff", 0.90):
+                    merged_singles.append({
+                        "box": p_box,
+                        "conf": 0.90,
+                        "class": "staff",
+                        "staves_count": 1,
+                        "s": ps["s"]
+                    })
 
-            num_staves = len(cur)
-            cls_name = "staff" if num_staves == 1 else ("grand_staff" if num_staves == 2 else "system")
-            bx1 = min(s["x_left"] for s in cur)
-            bx2 = max(s["x_right"] for s in cur)
-            by1 = cur[0]["y_top"]
-            by2 = cur[-1]["y_bot"]
+        all_blocks = kept_multi + merged_singles
+        all_blocks.sort(key=lambda x: x['box'][1])
 
-            s_block = cur[0].get("s", staff_s)
-            exp_box = self.expand_envelope_to_ledger_lines(gray, [bx1, by1, bx2, by2], s_block)
-
-            phys_blocks.append({
-                "class": cls_name,
-                "confidence": 0.95,
+        # 6. Expand vertical envelope to ledger lines
+        expanded_blocks = []
+        for b in all_blocks:
+            exp_box = self.expand_envelope_to_ledger_lines(gray, b['box'], staff_s)
+            expanded_blocks.append({
+                "class": b['class'],
+                "confidence": b['conf'],
                 "box": exp_box,
-                "staves_count": num_staves,
-                "s": s_block
+                "staves_count": b.get("staves_count", 1),
+                "s": staff_s
             })
 
-        # 4. Integrate YOLO predictions with physical blocks
-        final_blocks = list(phys_blocks)
-        for yb in yolo_boxes:
-            b_xy = yb["box"]
-            conf = yb["conf"]
-            cls_name = yb["class"]
-
-            overlap = False
-            for pb in final_blocks:
-                v_ratio = self.vertical_overlap_ratio(b_xy, pb["box"])
-                h_rel = self.horizontal_overlap_or_gap(b_xy, pb["box"])
-                v_mid = (b_xy[1] + b_xy[3]) / 2.0
-                if (v_ratio > 0.20 or (pb["box"][1] <= v_mid <= pb["box"][3])) and h_rel > 0:
-                    overlap = True
-                    if cls_name in ("grand_staff", "grandstaff") and pb["class"] == "staff" and pb["staves_count"] >= 2:
-                        pb["class"] = "grand_staff"
-                    elif cls_name in ("system", "systems") and pb["staves_count"] >= 3:
-                        pb["class"] = "system"
-                    break
-
-            if not overlap:
-                total_v_intersect = sum(
-                    max(0, min(b_xy[3], pb["box"][3]) - max(b_xy[1], pb["box"][1]))
-                    for pb in final_blocks
-                    if self.horizontal_overlap_or_gap(b_xy, pb["box"]) > 0
-                )
-                if (total_v_intersect / float(max(1, b_xy[3] - b_xy[1]))) > 0.25:
-                    overlap = True
-
-            # If not overlapping any physical block, validate as potential fallback
-            if not overlap and conf >= 0.35 and is_valid_music_staff(img_bgr[b_xy[1]:b_xy[3], b_xy[0]:b_xy[2]], cls_name, conf):
-                bh = b_xy[3] - b_xy[1]
-                cls_clean = "staff" if bh < int(staff_s * 6.0) else ("grand_staff" if bh < int(staff_s * 16.0) else "system")
-                exp_b = self.expand_envelope_to_ledger_lines(gray, b_xy, staff_s)
-                final_blocks.append({
-                    "class": cls_clean,
-                    "confidence": conf,
-                    "box": exp_b,
-                    "staves_count": 1,
-                    "s": staff_s
-                })
-
-        # Heal horizontally split segments (e.g. short exercises split at double barlines)
-        final_blocks = self.heal_collinear_segments(final_blocks, v_overlap_thresh=0.55, img_w=img_w)
-
-        # Sort candidates top-to-bottom by raw y1
+        # 7. Collinear healing
+        final_blocks = self.heal_collinear_segments(expanded_blocks, v_overlap_thresh=0.55, img_w=img_w)
         final_blocks.sort(key=lambda item: item["box"][1])
 
-        # 5. Apply scale-adaptive bounded padding in units of S
+        # 8. Apply scale-adaptive bounded padding in units of S
         filtered = []
         num_cands = len(final_blocks)
 
@@ -808,6 +829,7 @@ class LayoutDetector:
         # Sort top-to-bottom
         filtered.sort(key=lambda item: item["padded_box"][1])
         return filtered
+
 
     def render_debug_image(self, img_bgr: np.ndarray, detections: List[Dict[str, Any]]) -> np.ndarray:
         """

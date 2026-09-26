@@ -15,6 +15,10 @@ import os
 import sys
 from pathlib import Path
 
+# Suppress noisy C++ logging from PyTorch / GLOG / ONNX
+os.environ["GLOG_minloglevel"] = "2"
+os.environ["TORCH_CPP_LOG_LEVEL"] = "ERROR"
+
 # Ensure project root is in sys.path
 ROOT_DIR = Path(__file__).parent.resolve()
 if str(ROOT_DIR) not in sys.path:
