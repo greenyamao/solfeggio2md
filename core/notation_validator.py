@@ -264,7 +264,16 @@ class NotationValidator:
             anomalies.append(f"DURATION_IMBALANCE: {', '.join(duration_anomalies[:3])}")
             score -= min(0.35, 0.10 * len(duration_anomalies))
 
-        # 5. Token & Note density vs Image geometry (Runaway vs Dropped staff)
+        # 5. Empty or dropped score check
+        if total_notes == 0:
+            if total_rests == 0:
+                anomalies.append("ZERO_NOTES_DETECTED: No musical notes transcribed")
+                score -= 0.85
+            else:
+                anomalies.append(f"RESTS_ONLY: Score contains only {total_rests} rests and 0 notes")
+                score -= 0.40
+
+        # Token & Note density vs Image geometry (Runaway vs Dropped staff)
         density = 0.0
         if crop_width and crop_width > 0:
             density = (float(total_notes) / float(crop_width)) * 100.0
@@ -277,7 +286,7 @@ class NotationValidator:
                 anomalies.append(f"HIGH_NOTE_DENSITY: {density:.1f} notes/100px (probable loop)")
                 score -= 0.30
 
-            # Dropped or empty staff check
+            # Dropped staff check across wide crops
             if crop_width >= 600 and total_notes == 0:
                 anomalies.append(f"DROPPED_STAFF: 0 notes detected across wide crop ({crop_width}px)")
                 score -= 0.45

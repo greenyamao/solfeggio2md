@@ -125,8 +125,10 @@ class StaffGraphicsView(QGraphicsView):
             self.clear_view()
             return False
         size = renderer.defaultSize()
-        w = max(2400, size.width() * 2)
-        h = max(200, int(round(w * size.height() / max(1, size.width()))))
+        # High-DPI 2x vector rasterization preserving native SVG aspect ratio
+        dpi_scale = 2.0
+        w = max(1, int(round(size.width() * dpi_scale)))
+        h = max(1, int(round(size.height() * dpi_scale)))
         img = QImage(w, h, QImage.Format.Format_ARGB32_Premultiplied)
         img.fill(Qt.GlobalColor.white)
         p = QPainter(img)
@@ -135,18 +137,41 @@ class StaffGraphicsView(QGraphicsView):
         pix = QPixmap.fromImage(img)
         self.set_pixmap(pix)
         if auto_fit:
-            self.fit_to_view()
+            self.fit_to_view(is_score=True, raw_stave_h=size.height())
         return True
 
-    def fit_to_view(self) -> None:
-        """Scales the view so the entire image fits comfortably inside the viewport."""
+    def fit_to_view(self, is_score: bool = False, raw_stave_h: Optional[int] = None) -> None:
+        """
+        Scales the view so the image fits comfortably inside the viewport.
+        When is_score is True, prevents short snippets from blowing up into oversized notes.
+        """
         if self._pixmap_item is None:
             return
         self.resetTransform()
         rect = self._pixmap_item.boundingRect()
-        if rect.width() > 0 and rect.height() > 0:
-            self.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
-            self._zoom_factor = 1.0
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+
+        vp = self.viewport().size()
+        scale_w = vp.width() / rect.width() if rect.width() > 0 else 1.0
+        scale_h = vp.height() / rect.height() if rect.height() > 0 else 1.0
+        fit_scale = min(scale_w, scale_h)
+
+        if is_score:
+            # Standard musical notation staff line height in viewport should be ~100-140px per staff.
+            # Avoid scaling short 2-measure snippets to huge cartoon sizes.
+            num_staves = 1
+            if raw_stave_h is not None:
+                if raw_stave_h > 350:
+                    num_staves = 3
+                elif raw_stave_h > 190:
+                    num_staves = 2
+            max_viewport_h = min(vp.height() * 0.90, 130.0 * num_staves)
+            max_scale_by_h = max_viewport_h / rect.height()
+            fit_scale = min(fit_scale, max_scale_by_h)
+
+        self.scale(fit_scale, fit_scale)
+        self._zoom_factor = fit_scale
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         """Smooth zooming anchored under mouse cursor."""

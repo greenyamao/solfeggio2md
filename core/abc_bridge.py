@@ -129,6 +129,9 @@ class ABCBridge:
                 break
 
             if is_header:
+                if (line in headers and any(h in line for h in ("*8va", "*X8va", "*15m", "*stria", "*tremolo"))) or len(headers) >= 12:
+                    # Degenerative pre-music loop detected (e.g. runaway *8va cycle)
+                    break
                 headers.append(line)
                 continue
 

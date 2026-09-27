@@ -126,15 +126,8 @@ class OMREngine:
 
         for crop, cls_name in zip(crops_bgr, classes):
             h, w = crop.shape[:2]
-            if w >= 800:
-                scale = min(1.0, target_w / float(max(1, w)))
-            else:
-                # For narrower snippets or single staves, preserve natural staff line spacing:
-                is_grand = "grand" in str(cls_name).lower() or h > 150
-                target_staff_h = 80.0 if is_grand else 40.0
-                scale = min(1.0, target_staff_h / float(max(1, h))) if h > 50 else 1.0
-                if w * scale > target_w:
-                    scale = target_w / float(max(1, w))
+            # Preserve full native optical resolution; only downscale if crop exceeds model bounds
+            scale = min(1.0, target_w / float(max(1, w)), target_h / float(max(1, h)))
             new_h = max(1, int(round(h * scale)))
             new_w = min(target_w, max(1, int(round(w * scale))))
             item_dims.append((new_h, new_w))
