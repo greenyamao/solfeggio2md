@@ -653,6 +653,28 @@ def run_visual_report_pipeline(
     html_content = build_html_report(snippets, title=f"OMR Visual Diagnostic Report (Pages {min(pages)}..{max(pages)})")
     output_html_path.write_text(html_content, encoding="utf-8")
 
+    # Also persist lightweight JSON report for instant GUI inspection
+    try:
+        json_path = output_html_path.with_suffix(".json")
+        light_snippets = []
+        for s in snippets:
+            s_dict = dict(s)
+            s_dict.pop("crop_base64", None)
+            light_snippets.append(s_dict)
+        json_path.write_text(
+            json.dumps({
+                "report_path": str(output_html_path),
+                "total_snippets": len(snippets),
+                "pass_count": sum(1 for s in snippets if s["is_valid"] and not s["anomalies"]),
+                "anomalies_count": sum(1 for s in snippets if not s["is_valid"] or s["anomalies"]),
+                "elapsed_sec": round(elapsed, 2),
+                "snippets": light_snippets
+            }, indent=2),
+            encoding="utf-8"
+        )
+    except Exception:
+        pass
+
     total_snippets = len(snippets)
     anomalies_count = sum(1 for s in snippets if not s["is_valid"] or s["anomalies"])
     pass_count = total_snippets - anomalies_count

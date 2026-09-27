@@ -30,6 +30,7 @@ from gui_qt.ipc.worker_process import MLPipelineProcessClient
 from gui_qt.views.inspector_view import InspectorView
 from gui_qt.views.pipeline_view import PipelineView
 from gui_qt.views.settings_view import SettingsView
+from gui_qt.views.tests_view import TestsView
 
 
 class MainWindow(FluentWindow):
@@ -70,7 +71,15 @@ class MainWindow(FluentWindow):
             "Inspector",
         )
 
-        # 3. Settings View (Bottom Position)
+        # 3. OMR Quality & Neural Invariant Tests View
+        self.tests_view = TestsView(self)
+        self.addSubInterface(
+            self.tests_view,
+            FluentIcon.CHECKBOX,
+            "OMR Tests",
+        )
+
+        # 4. Settings View (Bottom Position)
         self.settings_view = SettingsView(self.worker_client, self)
         self.addSubInterface(
             self.settings_view,
