@@ -858,71 +858,86 @@ class LayoutDetector:
                         "s": ps["s"]
                     })
 
-        # 5. Merge adjacent single staves into grand_staff ONLY with authentic connectors
-        kept_single.sort(key=lambda x: x['box'][1])
-        merged_singles = []
+        # 5. Unify multi-staff systems and grand staves across all candidate blocks
+        candidates = kept_multi + kept_single
+        candidates.sort(key=lambda x: x['box'][1])
+        merged_blocks = []
         skip = set()
-        for idx in range(len(kept_single)):
+        for idx in range(len(candidates)):
             if idx in skip:
                 continue
-            cur = kept_single[idx]
+            cur = dict(candidates[idx])
             accum_box = list(cur['box'])
-            accum_staves = 1
             accum_conf = cur['conf']
 
             lookahead = idx + 1
-            while lookahead < len(kept_single):
-                nxt = kept_single[lookahead]
-                v_gap = nxt['box'][1] - accum_box[3]
-                inter_x = max(0, min(accum_box[2], nxt['box'][2]) - max(accum_box[0], nxt['box'][0]))
-                union_x = max(accum_box[2], nxt['box'][2]) - min(accum_box[0], nxt['box'][0])
+            while lookahead < len(candidates):
+                nxt = candidates[lookahead]
+                nxt_box = nxt['box']
+                inter_x = max(0, min(accum_box[2], nxt_box[2]) - max(accum_box[0], nxt_box[0]))
+                union_x = max(accum_box[2], nxt_box[2]) - min(accum_box[0], nxt_box[0])
                 h_iou = inter_x / float(max(1, union_x))
 
-                s_top = {"x_left": accum_box[0], "x_right": accum_box[2], "y_top": accum_box[1], "y_bot": accum_box[3]}
-                s_bot = {"x_left": nxt['box'][0], "x_right": nxt['box'][2], "y_top": nxt['box'][1], "y_bot": nxt['box'][3]}
-                has_conn, bx = self.has_continuous_vertical_connector(gray, s_top, s_bot, staff_s, return_x=True)
-                has_bars = self.detect_connecting_barlines(gray, s_top, s_bot, staff_s)
+                if h_iou < 0.35:
+                    lookahead += 1
+                    continue
 
-                if (has_conn or has_bars) and 0 <= v_gap <= int(staff_s * 14.0) and h_iou >= 0.40:
-                    accum_box[0] = min(accum_box[0], nxt['box'][0], bx)
-                    accum_box[1] = min(accum_box[1], nxt['box'][1])
-                    accum_box[2] = max(accum_box[2], nxt['box'][2])
-                    accum_box[3] = max(accum_box[3], nxt['box'][3])
-                    accum_staves += 1
+                v_overlap = max(0, min(accum_box[3], nxt_box[3]) - max(accum_box[1], nxt_box[1]))
+                v_gap = nxt_box[1] - accum_box[3]
+
+                should_merge = False
+                bx = accum_box[0]
+
+                # 1. Overlapping blocks that share staves (e.g. YOLO duplicate detections)
+                if v_overlap > 0:
+                    should_merge = True
+                # 2. Adjacent blocks with authentic vertical connector line, bracket, or barlines
+                elif 0 <= v_gap <= int(staff_s * 14.0):
+                    s_top = {"x_left": accum_box[0], "x_right": accum_box[2], "y_top": accum_box[1], "y_bot": accum_box[3]}
+                    s_bot = {"x_left": nxt_box[0], "x_right": nxt_box[2], "y_top": nxt_box[1], "y_bot": nxt_box[3]}
+                    has_conn, bx = self.has_continuous_vertical_connector(gray, s_top, s_bot, staff_s, return_x=True)
+                    has_bars = self.detect_connecting_barlines(gray, s_top, s_bot, staff_s)
+                    if has_conn or has_bars:
+                        should_merge = True
+
+                if should_merge:
+                    accum_box[0] = min(accum_box[0], nxt_box[0], bx)
+                    accum_box[1] = min(accum_box[1], nxt_box[1])
+                    accum_box[2] = max(accum_box[2], nxt_box[2])
+                    accum_box[3] = max(accum_box[3], nxt_box[3])
                     accum_conf = max(accum_conf, nxt['conf'])
                     skip.add(lookahead)
                     lookahead += 1
                 else:
                     break
 
-            if accum_staves > 1:
-                norm_cls = "grand_staff" if accum_staves == 2 else "system"
-                merged_singles.append({
-                    "box": accum_box,
-                    "conf": accum_conf,
-                    "class": norm_cls,
-                    "staves_count": accum_staves,
-                    "s": staff_s
-                })
-            else:
-                merged_singles.append(cur)
+            # Count physical staves contained within accum_box
+            contained_staves = 0
+            for ps in phys_staves:
+                ps_mid_y = (ps['y_top'] + ps['y_bot']) / 2.0
+                ps_mid_x = (ps['x_left'] + ps['x_right']) / 2.0
+                if accum_box[1] - staff_s <= ps_mid_y <= accum_box[3] + staff_s:
+                    if accum_box[0] - staff_s * 2.0 <= ps_mid_x <= accum_box[2] + staff_s * 2.0:
+                        contained_staves += 1
 
-        all_blocks = kept_multi + merged_singles
-        all_blocks.sort(key=lambda x: (x['class'] == 'grand_staff', x['conf']), reverse=True)
-        resolved_blocks = []
-        for b in all_blocks:
-            conflict = False
-            for rb in resolved_blocks:
-                v_ratio = self.vertical_overlap_ratio(b['box'], rb['box'])
-                inter_x = max(0, min(b['box'][2], rb['box'][2]) - max(b['box'][0], rb['box'][0]))
-                min_w = min(b['box'][2] - b['box'][0], rb['box'][2] - rb['box'][0])
-                h_ratio = inter_x / float(max(1, min_w))
-                if v_ratio >= 0.40 and h_ratio >= 0.40:
-                    conflict = True
-                    break
-            if not conflict:
-                resolved_blocks.append(b)
-        all_blocks = resolved_blocks
+            if contained_staves == 1:
+                norm_cls = "staff"
+            elif contained_staves == 2:
+                norm_cls = "grand_staff"
+            elif contained_staves >= 3:
+                norm_cls = "system"
+            else:
+                norm_cls = cur['class']
+
+            merged_blocks.append({
+                "box": accum_box,
+                "conf": accum_conf,
+                "class": norm_cls,
+                "staves_count": max(1, contained_staves),
+                "s": staff_s
+            })
+
+        all_blocks = merged_blocks
         all_blocks.sort(key=lambda x: x['box'][1])
 
         # 6. Expand vertical envelope to ledger lines
@@ -973,6 +988,7 @@ class LayoutDetector:
                 "padded_box": [px1, py1, px2, py2],
                 "width": px2 - px1,
                 "height": py2 - py1,
+                "staves_count": d.get("staves_count", 1),
             })
 
         # Sort top-to-bottom

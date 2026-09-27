@@ -105,8 +105,8 @@ def inspect_page(
         cls_counts[c] = cls_counts.get(c, 0) + 1
         h = d["padded_box"][3] - d["padded_box"][1]
         heights.append(h)
-        # Check for monster aggregation
-        if h > int(staff_s * 25.0) or d.get("staves_count", 1) >= 4:
+        # Check for monster aggregation (over 6-8 staves or >48*S)
+        if h > int(staff_s * 48.0) or d.get("staves_count", 1) >= 8:
             anomalies.append(f"block#{idx+1}:monster_system(h={h}px,staves={d.get('staves_count',1)})")
 
     # Check for adjacent split staves
