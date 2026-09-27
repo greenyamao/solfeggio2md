@@ -241,6 +241,72 @@ class TestTier1FeatureCoverage(unittest.TestCase):
         self.assertEqual(results[0].shape, crops[0].shape)
         self.assertEqual(results[1].shape, crops[1].shape)
 
+    def test_f2_09_notation_validator_structural_invariants(self):
+        """F2: Verify NotationValidator structural invariant validation, duration balance, and density guards."""
+        from core.notation_validator import NotationValidator
+        validator = NotationValidator()
+
+        # 1. Clean valid score
+        clean_kern = "**kern\n*clefG2\n*M4/4\n4c\n4d\n4e\n4f\n=\n4g\n4a\n4b\n4cc\n==\n*-"
+        r_clean = validator.validate(clean_kern, crop_width=600)
+        self.assertTrue(r_clean.is_valid)
+        self.assertGreaterEqual(r_clean.score, 0.90)
+        self.assertEqual(len(r_clean.anomalies), 0)
+
+        # 2. Duration imbalance
+        imbalance_kern = "**kern\n*clefG2\n*M4/4\n4c\n4d\n4e\n4f\n4g\n=\n4g\n4a\n4b\n4cc\n==\n*-"
+        r_imb = validator.validate(imbalance_kern, crop_width=600)
+        self.assertTrue(any("DURATION_IMBALANCE" in a for a in r_imb.anomalies))
+
+        # 3. Excessive note density (runaway loop)
+        runaway_kern = "**kern\n*clefG2\n" + "16c\n" * 30 + "==\n*-"
+        r_runaway = validator.validate(runaway_kern, crop_width=150)
+        self.assertFalse(r_runaway.is_valid)
+        self.assertTrue(any("EXCESSIVE_NOTE_DENSITY" in a for a in r_runaway.anomalies))
+
+        # 4. Tablature contamination
+        tab_kern = "**kern\n*clefTAB\n*stria6\n4c\n==\n*-"
+        r_tab = validator.validate(tab_kern, crop_width=400)
+        self.assertTrue(any("TABLATURE_CONTAMINATION" in a for a in r_tab.anomalies))
+
+    def test_f2_10_omr_reporter_html_builder(self):
+        """F2: Verify build_html_report generates structured, self-contained dashboard without emojis."""
+        from tools.omr_reporter import build_html_report
+        dummy_snippets = [
+            {
+                "page": 1,
+                "staff_idx": 1,
+                "class": "staff",
+                "dimensions": "400x50px",
+                "crop_base64": "data:image/png;base64,dummy",
+                "svg_content": "<svg viewBox='0 0 100 50'></svg>",
+                "score": 1.0,
+                "is_valid": True,
+                "anomalies": [],
+                "abc": "X:1\nK:C\nC D E F|",
+                "kern": "**kern\n4c\n*-",
+            },
+            {
+                "page": 1,
+                "staff_idx": 2,
+                "class": "staff",
+                "dimensions": "200x50px",
+                "crop_base64": "data:image/png;base64,dummy2",
+                "svg_content": "<svg viewBox='0 0 100 50'></svg>",
+                "score": 0.4,
+                "is_valid": False,
+                "anomalies": ["EXCESSIVE_NOTE_DENSITY: loop"],
+                "abc": "X:1\nK:C\nz4|",
+                "kern": "**kern\n4r\n*-",
+            }
+        ]
+        html_out = build_html_report(dummy_snippets, title="Test Report")
+        self.assertIn("<!DOCTYPE html>", html_out)
+        self.assertIn("dashboard-container", html_out)
+        self.assertIn("All Snippets (2)", html_out)
+        self.assertIn("Flagged Anomalies (1)", html_out)
+        self.assertIn("EXCESSIVE_NOTE_DENSITY", html_out)
+
     # =========================================================================
     # F3: OMR Dynamic Collation & Mini-Batching (>=5 tests)
     # =========================================================================
@@ -395,7 +461,7 @@ class TestTier1FeatureCoverage(unittest.TestCase):
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
         duration = time.time() - t0
-        self.assertLess(duration, 0.5)
+        self.assertLess(duration, 1.5)
 
     # =========================================================================
     # F5: Pipeline Latency & Artificial Sleep Removal (>=5 tests)

@@ -7,6 +7,8 @@ Usage:
   python -m tools.debug_toolkit page --pages 25,56,60,155
   python -m tools.debug_toolkit scan [--range 1-100]
   python -m tools.debug_toolkit pair --page 155 --pair 1,2
+  python -m tools.debug_toolkit report --page 155 [--open]
+  python -m tools.debug_toolkit report --pages 25,51,155
 """
 
 import warnings
@@ -272,6 +274,14 @@ def main():
     p_crop.add_argument("--render", action="store_true", help="Save before/after comparison to scratch/")
     p_crop.add_argument("--book", type=str, help="Optional PDF path")
 
+    # Report command (OMR Visual Side-by-Side Diagnostic HTML Dashboard)
+    p_report = subparsers.add_parser("report", help="Generate interactive OMR visual side-by-side HTML diagnostic report")
+    p_report.add_argument("--page", type=int, help="Single book page number (1-based)")
+    p_report.add_argument("--pages", type=str, help="Comma-separated page numbers (e.g. 25,51,155)")
+    p_report.add_argument("--range", type=str, help="Page range (e.g. 1-5)")
+    p_report.add_argument("--book", type=str, help="Optional PDF path")
+    p_report.add_argument("--open", action="store_true", help="Open generated HTML report in default web browser")
+
     args = parser.parse_args()
 
     pdf_path = Path(args.book) if args.book else get_default_pdf()
@@ -364,6 +374,39 @@ def main():
             action += " + Real-CUGAN 2x SR"
         print(f"P{args.page:04d} #{args.staff} {b['cls']} [{crop.shape[1]}x{crop.shape[0]}px]: "
               f"tilt={tilt:+.1f}° bend={bend:.1f}px -> {action} in {dt_ms:.1f}ms{render_msg}")
+
+    elif args.command == "report":
+        from tools.omr_reporter import run_visual_report_pipeline
+
+        pages: List[int] = []
+        if getattr(args, "page", None):
+            pages = [args.page]
+        elif getattr(args, "pages", None):
+            pages = [int(p.strip()) for p in args.pages.split(",") if p.strip()]
+        elif getattr(args, "range", None):
+            parts = [int(x.strip()) for x in args.range.split("-")]
+            start_p, end_p = parts[0], parts[1] if len(parts) > 1 else parts[0]
+            pages = list(range(start_p, min(end_p, resolver.total_pages) + 1))
+        else:
+            pages = [1]
+
+        SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
+        report_file = SCRATCH_DIR / "omr_visual_report.html"
+
+        res = run_visual_report_pipeline(
+            resolver=resolver,
+            detector=detector,
+            pages=pages,
+            output_html_path=report_file,
+            device=device
+        )
+        print(f"OMR-REPORT P{min(pages):04d}..P{max(pages):04d} in {res['elapsed_sec']}s: "
+              f"{res['total_snippets']} staves, {res['pass_count']} PASS, "
+              f"{res['anomalies_count']} ANOMALIES -> {res['report_path']}")
+
+        if getattr(args, "open", False):
+            import webbrowser
+            webbrowser.open(report_file.as_uri())
 
 
 if __name__ == "__main__":
