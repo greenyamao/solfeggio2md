@@ -250,13 +250,9 @@ class InspectorView(QWidget):
             }
         """)
 
-        # Tab 0: Vector SVG Score (white sheet background)
-        self.svg_scroll = QScrollArea(self.tabs_mode3)
-        self.svg_scroll.setWidgetResizable(True)
-        self.svg_scroll.setStyleSheet("background-color: #ffffff; border: none; border-radius: 6px;")
-        self.svg_widget = QSvgWidget(self.svg_scroll)
-        self.svg_scroll.setWidget(self.svg_widget)
-        self.tabs_mode3.addTab(self.svg_scroll, "Verovio Vector Score")
+        # Tab 0: Vector Score Canvas (Aspect-ratio preserved, interactive zoom & pan)
+        self.canvas_score = StaffGraphicsView(self.tabs_mode3)
+        self.tabs_mode3.addTab(self.canvas_score, "Verovio Vector Score")
 
         # Tab 1: Text Editor for ABC / Kern
         self.text_editor = QPlainTextEdit(self.tabs_mode3)
@@ -307,6 +303,7 @@ class InspectorView(QWidget):
             self.toolbar_card,
             self.canvas_left,
             self.canvas_right,
+            self.canvas_score,
             self.text_editor,
             self.splitter,
             self.btn_prev,
@@ -673,10 +670,9 @@ class InspectorView(QWidget):
                         svg_str = self.bridge.render_svg(raw_kern, scale=80)
                     if svg_str:
                         clean_svg = self.bridge.flatten_svg(svg_str)
-                        self.svg_widget.load(clean_svg.encode("utf-8"))
-                        self.svg_widget.adjustSize()
+                        self.canvas_score.load_svg_content(clean_svg)
                     else:
-                        self.svg_widget.load(b"<svg></svg>")
+                        self.canvas_score.clear_view()
 
                     # Populate code editor
                     code_disp = f"=== ABC NOTATION ===\n{abc_text}\n\n=== HUMDRUM KERN ===\n{raw_kern}"
@@ -687,7 +683,7 @@ class InspectorView(QWidget):
                     self.lbl_val_status.setStyleSheet("color: #94a3b8; font-weight: 600; font-size: 13px;")
                     self.lbl_val_details.setText("Staff crop extracted. Run OMR pipeline to decode notes.")
                     self.card_val.setStyleSheet("")
-                    self.svg_widget.load(b"<svg></svg>")
+                    self.canvas_score.clear_view()
                     self.text_editor.setPlainText("Awaiting Transcoda OMR recognition.")
                     self.lbl_right_title.setText(f"PAGE {p_num}: AWAITING RECOGNITION")
             else:
@@ -701,7 +697,7 @@ class InspectorView(QWidget):
                 self.lbl_val_status.setStyleSheet("color: #94a3b8;")
                 self.lbl_val_details.setText("Standard text/prose page.")
                 self.card_val.setStyleSheet("")
-                self.svg_widget.load(b"<svg></svg>")
+                self.canvas_score.clear_view()
                 self.text_editor.setPlainText(f"No musical staves detected on page {p_num}.")
                 self.lbl_right_title.setText(f"PAGE {p_num}: NO NOTES")
 

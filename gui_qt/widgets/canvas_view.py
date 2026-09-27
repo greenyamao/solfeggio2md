@@ -111,6 +111,33 @@ class StaffGraphicsView(QGraphicsView):
         """Alias for load_file."""
         return self.load_file(filepath, auto_fit=auto_fit)
 
+    def load_svg_content(self, svg_str: str, auto_fit: bool = True) -> bool:
+        """
+        Renders vector SVG to a high-DPI aspect-ratio preserved bitmap,
+        preventing any distortion while enabling interactive zoom and pan.
+        """
+        if not svg_str or "<svg" not in svg_str:
+            self.clear_view()
+            return False
+        from PySide6.QtSvg import QSvgRenderer
+        renderer = QSvgRenderer(svg_str.encode("utf-8"))
+        if not renderer.isValid():
+            self.clear_view()
+            return False
+        size = renderer.defaultSize()
+        w = max(2400, size.width() * 2)
+        h = max(200, int(round(w * size.height() / max(1, size.width()))))
+        img = QImage(w, h, QImage.Format.Format_ARGB32_Premultiplied)
+        img.fill(Qt.GlobalColor.white)
+        p = QPainter(img)
+        renderer.render(p)
+        p.end()
+        pix = QPixmap.fromImage(img)
+        self.set_pixmap(pix)
+        if auto_fit:
+            self.fit_to_view()
+        return True
+
     def fit_to_view(self) -> None:
         """Scales the view so the entire image fits comfortably inside the viewport."""
         if self._pixmap_item is None:
