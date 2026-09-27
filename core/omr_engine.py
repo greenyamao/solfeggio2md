@@ -422,24 +422,26 @@ class OMREngine:
 
         sigs = [_measure_sig_set(m) for m in measures]
 
-        # A. Wrap-around to start: if measure i (i >= 3) matches measure 0
-        if len(sigs) >= 4 and len(sigs[0]) > 0:
-            for i in range(3, len(sigs)):
-                if _jaccard(sigs[i], sigs[0]) >= 0.60:
+        # A. Wrap-around to start: if measure i (i >= 2) matches measure 0
+        if len(sigs) >= 3 and len(sigs[0]) > 0:
+            for i in range(2, len(sigs)):
+                if _jaccard(sigs[i], sigs[0]) >= 0.55:
                     cutoff = min(cutoff, i)
                     break
 
-        # B. Multi-measure cycle detection for k in [2, 3, 4]
-        for k in (2, 3, 4):
+        # B. Multi-measure cycle detection for k in [1, 2, 3, 4]
+        for k in (1, 2, 3, 4):
             limit = min(cutoff, len(sigs))
-            for end_idx in range(2 * k, limit + 1):
-                pat1 = sigs[end_idx - k : end_idx]
-                pat2 = sigs[end_idx - 2 * k : end_idx - k]
-                sims = [_jaccard(s1, s2) for s1, s2 in zip(pat1, pat2)]
-                avg_sim = sum(sims) / float(len(sims)) if sims else 0
-                if avg_sim >= 0.55 and all(len(s) > 0 for s in pat1):
-                    cutoff = min(cutoff, end_idx - k)
-                    break
+            min_cycles = 3 if k == 1 else 2
+            if limit >= min_cycles * k:
+                for end_idx in range(min_cycles * k, limit + 1):
+                    pat1 = sigs[end_idx - k : end_idx]
+                    pat2 = sigs[end_idx - 2 * k : end_idx - k]
+                    sims = [_jaccard(s1, s2) for s1, s2 in zip(pat1, pat2)]
+                    avg_sim = sum(sims) / float(len(sims)) if sims else 0
+                    if avg_sim >= 0.55 and all(len(s) > 0 for s in pat1):
+                        cutoff = min(cutoff, end_idx - k)
+                        break
 
         valid_measures = measures[:cutoff]
         res_lines = list(headers)

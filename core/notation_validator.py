@@ -180,7 +180,10 @@ class NotationValidator:
         details["total_rests"] = total_rests
         details["measures_count"] = measure_count
 
-        # 4. Rhythmic balance & measure duration calculation
+        # 4. Multi-spine rhythmic balance & cross-voice synchronization
+        max_spines = max((len(l.split("\t")) for l in lines if not l.startswith("!") and not l.startswith("*")), default=1)
+        details["max_spines"] = max_spines
+
         expected_beats = None
         if time_sig and "/" in time_sig:
             try:
@@ -191,16 +194,48 @@ class NotationValidator:
                 pass
 
         measure_durations: List[float] = []
+        voice_desync_anomalies: List[str] = []
+
         for m_idx, m_lines in enumerate(measures):
-            m_dur = 0.0
+            spines_in_m = max((len(l.split("\t")) for l in m_lines if not l.startswith("!") and not l.startswith("*")), default=1)
+            voice_durs = [0.0] * spines_in_m
             for l in m_lines:
-                tok = l.split("\t")[0]
-                d = self._parse_duration(tok)
-                if d is not None:
-                    m_dur += d
-            measure_durations.append(round(m_dur, 3))
+                tokens = l.split("\t")
+                for s_i in range(min(spines_in_m, len(tokens))):
+                    tok = tokens[s_i]
+                    d = self._parse_duration(tok)
+                    if d is not None:
+                        voice_durs[s_i] += d
+
+            primary_dur = round(voice_durs[0], 3)
+            measure_durations.append(primary_dur)
+
+            # Check cross-voice synchronization in polyphonic measures
+            if spines_in_m > 1:
+                active_durs = [round(vd, 3) for vd in voice_durs if vd > 0]
+                if len(active_durs) > 1 and max(active_durs) - min(active_durs) > 0.35:
+                    voice_desync_anomalies.append(f"M{m_idx+1}: " + ", ".join(f"V{i+1}={round(d, 2)}b" for i, d in enumerate(voice_durs)))
 
         details["measure_durations"] = measure_durations
+
+        if voice_desync_anomalies:
+            anomalies.append(f"VOICE_DESYNCHRONIZATION: {', '.join(voice_desync_anomalies[:3])}")
+            score -= min(0.35, 0.10 * len(voice_desync_anomalies))
+
+        # Check duplicate identical spines
+        if max_spines >= 2:
+            spine0_tokens = []
+            spine1_tokens = []
+            for l in lines:
+                if l.startswith("!") or l.startswith("*") or l.startswith("="):
+                    continue
+                toks = l.split("\t")
+                if len(toks) >= 2:
+                    spine0_tokens.append(toks[0])
+                    spine1_tokens.append(toks[1])
+            if spine0_tokens and spine0_tokens == spine1_tokens:
+                anomalies.append("DUPLICATE_VOICE: V1 and V2 contain identical notes")
+                score -= 0.25
 
         # Check measure duration balance
         duration_anomalies = []
@@ -211,12 +246,9 @@ class NotationValidator:
                 diff = abs(dur - expected_beats)
                 if diff > 0.30:
                     if is_boundary and dur < expected_beats:
-                        # Legitimate pick-up (anacrusis) or cutoff snippet
                         continue
                     duration_anomalies.append(f"M{idx+1}: {dur}b (expected {expected_beats}b)")
         elif len(measure_durations) >= 3:
-            # Infer consensus duration if no explicit time signature
-            # (e.g. if 3 measures are 4.0, but one is 9.0)
             from collections import Counter
             counts = Counter(round(d, 1) for d in measure_durations if d > 0)
             if counts:

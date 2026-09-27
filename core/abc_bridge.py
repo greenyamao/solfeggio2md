@@ -153,7 +153,10 @@ class ABCBridge:
                     tokens = [t if t not in ("*^", "*v") else "." for t in tokens]
 
             # Ensure data lines, barlines, interpretations match active spine count
-            if len(tokens) < active_spines:
+            if any(t.startswith("=") for t in tokens):
+                bar_tok = next(t for t in tokens if t.startswith("="))
+                tokens = [bar_tok] * active_spines
+            elif len(tokens) < active_spines:
                 pad_val = "*-" if tokens[0].startswith("*-") else "."
                 tokens = tokens + [pad_val] * (active_spines - len(tokens))
             elif len(tokens) > active_spines:
