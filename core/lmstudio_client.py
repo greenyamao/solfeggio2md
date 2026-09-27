@@ -244,6 +244,9 @@ class LMStudioClient:
                 ],
                 "temperature": float(temperature),
                 "max_tokens": int(max_tokens),
+                "frequency_penalty": 0.15,
+                "presence_penalty": 0.05,
+                "repeat_penalty": 1.15,
                 "stream": True,
                 "reasoning": "off",
                 "reasoning_effort": "minimal",
@@ -260,9 +263,10 @@ class LMStudioClient:
                     method="POST",
                 )
                 accumulated: List[str] = []
+                stop_stream = False
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                     buf = ""
-                    while True:
+                    while not stop_stream:
                         chunk_b = resp.read(128)
                         if not chunk_b:
                             break
@@ -275,6 +279,7 @@ class LMStudioClient:
                             if line.startswith("data: "):
                                 d_str = line[6:].strip()
                                 if d_str == "[DONE]":
+                                    stop_stream = True
                                     break
                                 try:
                                     chunk_json = json.loads(d_str)
@@ -299,6 +304,12 @@ class LMStudioClient:
                                                 accumulated.append(delta)
                                                 streamed_any = True
                                                 on_chunk(delta)
+                                                # Early cutoff if model enters repetitive cycle during streaming
+                                                if len(accumulated) >= 15:
+                                                    tail = "".join(accumulated)[-1200:]
+                                                    if self.detect_streaming_loop(tail):
+                                                        stop_stream = True
+                                                        break
                                 except Exception:
                                     pass
                 if accumulated:
@@ -320,6 +331,9 @@ class LMStudioClient:
                     "reasoning": "off",
                     "temperature": float(temperature),
                     "max_output_tokens": int(max_tokens),
+                    "frequency_penalty": 0.15,
+                    "presence_penalty": 0.05,
+                    "repeat_penalty": 1.15,
                     "stream": False,
                     "store": False,
                 }
@@ -343,6 +357,9 @@ class LMStudioClient:
                     ],
                     "temperature": float(temperature),
                     "max_tokens": int(max_tokens),
+                    "frequency_penalty": 0.15,
+                    "presence_penalty": 0.05,
+                    "repeat_penalty": 1.15,
                     "stream": False,
                     "reasoning": "off",
                     "reasoning_effort": "minimal",
@@ -416,8 +433,8 @@ class LMStudioClient:
         )
         return detailed["text"]
 
-    @staticmethod
-    def _strip_markdown_fences(text: str) -> str:
+    @classmethod
+    def _strip_markdown_fences(cls, text: str) -> str:
         cleaned = text.strip()
         # Strip thinking tags if any leaked through
         cleaned = re.sub(r"<think>[\s\S]*?</think>", "", cleaned, flags=re.DOTALL).strip()
@@ -430,4 +447,109 @@ class LMStudioClient:
             cleaned = cleaned[3:].strip()
         if cleaned.endswith("```"):
             cleaned = cleaned[:-3].strip()
+        cleaned = cls.truncate_text_loops(cleaned)
         return cleaned
+
+    @staticmethod
+    def detect_streaming_loop(tail_text: str) -> bool:
+        """
+        Fast check during SSE token streaming to detect if model entered a repetitive loop.
+        Returns True to abort stream early and avoid GPU hang and token waste.
+        """
+        if not tail_text or len(tail_text) < 24:
+            return False
+
+        # 1. Suffix phrase/substring repetition at tail of stream (m in [8..120])
+        s = tail_text.strip()
+        max_m = min(120, len(s) // 3)
+        for m in range(8, max_m + 1):
+            pat = s[-m:]
+            if s.endswith(pat * 3):
+                return True
+
+        # 2. Non-empty line repetition at tail of stream
+        lines = [l.strip() for l in tail_text.splitlines() if l.strip()]
+        if len(lines) >= 3:
+            for p in (1, 2, 3, 4, 5):
+                if len(lines) >= p * 3:
+                    cycle = lines[-p:]
+                    if lines[-p * 2 : -p] == cycle and lines[-p * 3 : -p * 2] == cycle:
+                        return True
+
+        return False
+
+    @staticmethod
+    def truncate_text_loops(text: str, max_line_repeats: int = 2) -> str:
+        """
+        Detects and truncates repetitive cycle runaway in recognized text:
+        1. In-line phrase repetitions (>= 12 chars repeated >= 3 times).
+        2. Consecutive identical lines (including empty line resilience).
+        3. Multi-line block cycles (e.g. 2-8 line blocks repeating >= 3 times).
+        """
+        if not text:
+            return text
+
+        # Pass 1: In-line phrase repetitions within lines
+        inline_pat = r"((?:[^\n]{12,120}?))\1{2,}"
+
+        def _inline_repl(m: re.Match) -> str:
+            unit = m.group(1)
+            full = m.group(0)
+            reps = len(full) // len(unit)
+            return unit * min(reps, max_line_repeats)
+
+        text = re.sub(inline_pat, _inline_repl, text)
+
+        # Pass 2: Line-level consecutive repeats with blank-line resilience
+        raw_lines = text.splitlines()
+        res: List[str] = []
+        prev_non_empty = None
+        rep_count = 0
+        pending_empty: List[str] = []
+
+        for line in raw_lines:
+            stripped = line.strip()
+            if not stripped:
+                pending_empty.append(line)
+                continue
+            if stripped == prev_non_empty:
+                rep_count += 1
+                if rep_count <= max_line_repeats:
+                    res.extend(pending_empty)
+                    res.append(line)
+            else:
+                prev_non_empty = stripped
+                rep_count = 1
+                res.extend(pending_empty)
+                res.append(line)
+            pending_empty = []
+        res.extend(pending_empty)
+
+        # Pass 3: Multi-line block cycles (k-line blocks for k in 2..8 repeating >= 3 times)
+        out: List[str] = []
+        i = 0
+        n = len(res)
+        while i < n:
+            found_cycle = False
+            for k in range(2, 9):
+                if i + k * 3 <= n:
+                    block = res[i : i + k]
+                    if not any(l.strip() for l in block):
+                        continue
+                    reps = 1
+                    curr_idx = i + k
+                    while curr_idx + k <= n and res[curr_idx : curr_idx + k] == block:
+                        reps += 1
+                        curr_idx += k
+                    if reps >= 3:
+                        for _ in range(min(reps, max_line_repeats)):
+                            out.extend(block)
+                        i = curr_idx
+                        found_cycle = True
+                        break
+            if not found_cycle:
+                out.append(res[i])
+                i += 1
+
+        return "\n".join(out)
+

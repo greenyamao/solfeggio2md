@@ -895,6 +895,43 @@ class TestTier1FeatureCoverage(unittest.TestCase):
         self.assertTrue(chk["phases"]["vlm"]["completed"])
         self.assertEqual(chk["phases"]["vlm"]["pages_done"], 1)
 
+    def test_f9_06_vlm_loop_detection_and_truncation(self):
+        """F9: Verify real-time streaming loop detection and robust post-processing truncation for 9B VLM."""
+        # 1. Real-time streaming loop detection
+        self.assertTrue(LMStudioClient.detect_streaming_loop("intro\nRepeated line\nRepeated line\nRepeated line\n"))
+        self.assertTrue(LMStudioClient.detect_streaming_loop("A line\nB line\nA line\nB line\nA line\nB line\n"))
+        self.assertTrue(LMStudioClient.detect_streaming_loop("Prefix " + "Melodic sequence in C major! " * 3))
+        self.assertFalse(LMStudioClient.detect_streaming_loop("## Chapter 1\nSome description of notes.\n<!-- MUSIC_STUB_ID:P01_S01 -->\nConclusion text."))
+
+        # 2. Line-level loop truncation
+        raw_single_repeat = "Header\n" + "<!-- MUSIC_STUB_ID:P001_S01 -->\n" * 12 + "Footer"
+        truncated_single = LMStudioClient.truncate_text_loops(raw_single_repeat, max_line_repeats=2)
+        stub_count = truncated_single.count("<!-- MUSIC_STUB_ID:P001_S01 -->")
+        self.assertEqual(stub_count, 2)
+        self.assertIn("Footer", truncated_single)
+
+        # 3. Alternating blank lines loop truncation
+        raw_blank_repeat = "Header\n" + "Repeated paragraph content.\n\n" * 8 + "Footer"
+        truncated_blanks = LMStudioClient.truncate_text_loops(raw_blank_repeat, max_line_repeats=2)
+        para_count = truncated_blanks.count("Repeated paragraph content.")
+        self.assertEqual(para_count, 2)
+        self.assertIn("Footer", truncated_blanks)
+
+        # 4. Multi-line block cycle truncation
+        raw_block = "Intro\n" + "Line A\nLine B\nLine C\n" * 5 + "Outro"
+        truncated_block = LMStudioClient.truncate_text_loops(raw_block, max_line_repeats=2)
+        block_count = truncated_block.count("Line A\nLine B\nLine C")
+        self.assertEqual(block_count, 2)
+        self.assertIn("Outro", truncated_block)
+
+        # 5. Pipeline _sanitize_vlm_text integration
+        valid_stubs = {"P001_S01"}
+        raw_vlm = "Text\n" + "<!-- MUSIC_STUB_ID:P001_S01 -->\n" * 6 + "<!-- MUSIC_STUB_ID:P999_S99 -->\n"
+        sanitized = PipelineBatchRunner._sanitize_vlm_text(raw_vlm, valid_stubs=valid_stubs)
+        self.assertEqual(sanitized.count("P001_S01"), 2)
+        self.assertNotIn("P999_S99", sanitized)
+
 
 if __name__ == "__main__":
     unittest.main()
+

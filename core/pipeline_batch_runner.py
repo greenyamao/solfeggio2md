@@ -2130,6 +2130,7 @@ class PipelineBatchRunner:
         1. Fixes HTML entity escapes for stub tags: &lt;!-- MUSIC_STUB_ID:... --&gt; -> <!-- MUSIC_STUB_ID:... -->
         2. Fixes stray backticks around stub tags: `<!-- MUSIC_STUB_ID:... -->` -> <!-- MUSIC_STUB_ID:... -->
         3. Strips hallucinated stub tags that do not belong to the valid stubs of the page.
+        4. Truncates degenerative runaway loops and repetitions.
         """
         if not text:
             return text
@@ -2151,6 +2152,9 @@ class PipelineBatchRunner:
                     return f"<!-- MUSIC_STUB_ID:{stub_id} -->"
                 return ""
             text = re.sub(r"<!--\s*MUSIC_STUB_ID:\s*([^\s>]+?)\s*-->", _filter_stub, text)
+
+        # Anti-loop guard: truncate any runaway cycle or runaway line repetition
+        text = LMStudioClient.truncate_text_loops(text)
 
         return text
 
