@@ -510,8 +510,15 @@ class TestsView(QWidget):
 
         # Load Staff Crop
         crop_path = self.scratch_dir / "omr_report_assets" / f"crop_p{page:04d}_s{staff_idx:02d}.png"
+        if not crop_path.is_file():
+            candidates = list(self.root_dir.glob(f"output/**/1_crops/*p{page:04d}*{staff_idx:02d}*.png"))
+            if candidates:
+                crop_path = candidates[0]
+
         if crop_path.is_file():
-            self.canvas_crop.load_image_file(crop_path)
+            self.canvas_crop.load_file(str(crop_path))
+        else:
+            self.canvas_crop.clear_view()
 
         # Load Verovio Vector SVG
         svg_content = s.get("svg_content", "").strip()

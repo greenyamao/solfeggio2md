@@ -96,9 +96,9 @@ class StaffGraphicsView(QGraphicsView):
         self._zoom_factor = 1.0
         self.resetTransform()
 
-    def load_file(self, filepath: str, auto_fit: bool = True) -> bool:
+    def load_file(self, filepath: str | Path, auto_fit: bool = True) -> bool:
         """Loads an image directly from disk using Qt's native C++ image reader."""
-        pix = QPixmap(filepath)
+        pix = QPixmap(str(filepath))
         if pix.isNull():
             self.clear_view()
             return False
@@ -106,6 +106,10 @@ class StaffGraphicsView(QGraphicsView):
         if auto_fit:
             self.fit_to_view()
         return True
+
+    def load_image_file(self, filepath: str | Path, auto_fit: bool = True) -> bool:
+        """Alias for load_file."""
+        return self.load_file(filepath, auto_fit=auto_fit)
 
     def fit_to_view(self) -> None:
         """Scales the view so the entire image fits comfortably inside the viewport."""
