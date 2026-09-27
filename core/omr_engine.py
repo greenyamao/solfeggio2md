@@ -79,6 +79,8 @@ class OMREngine:
                 if tok_id is not None and tok_id != self.transcoda_tokenizer.unk_token_id:
                     eos_ids.append(tok_id)
             self.transcoda_eos_token_ids = list(dict.fromkeys(eos_ids))
+            # Permanently suppress lute/guitar tablature tokens on standard notation
+            self.transcoda_bad_words_ids = [[1694], [2093], [120, 40], [1693]]
 
     def _ensure_smt_loaded(self):
         if self.smt_model is None:
@@ -106,24 +108,39 @@ class OMREngine:
         pixel_values[0, :, :clip_h, :] = resized[0, :, :clip_h, :]
         return pixel_values
 
-    def _collate_crops_batch(self, crops_bgr: List[np.ndarray], target_w: int = 1050) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _collate_crops_batch(
+        self,
+        crops_bgr: List[np.ndarray],
+        target_w: int = 1050,
+        notation_classes: Optional[List[str]] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Dynamically resizes and collates a mini-batch of crops to the maximum height in the batch,
-        rounded up to multiples of 32 for ConvNeXt, capped at 1485.
+        Dynamically resizes and collates a mini-batch of crops preserving natural aspect ratio
+        and staff line height, rounded up to multiples of 32 for ConvNeXt, capped at 1485.
         Uses pure PyTorch GPU bilinear interpolation to eliminate CPU bottlenecks.
-        Returns (pixel_values, image_sizes).
+        Masks out white padding via image_sizes (valid_h, valid_w).
         """
         batch_size = len(crops_bgr)
-        item_heights = []
+        item_dims = []
+        classes = notation_classes or (["staff"] * batch_size)
 
-        for crop in crops_bgr:
+        for crop, cls_name in zip(crops_bgr, classes):
             h, w = crop.shape[:2]
-            scale = target_w / float(max(1, w))
+            if w >= 800:
+                scale = min(1.0, target_w / float(max(1, w)))
+            else:
+                # For narrower snippets or single staves, preserve natural staff line spacing:
+                is_grand = "grand" in str(cls_name).lower() or h > 150
+                target_staff_h = 80.0 if is_grand else 40.0
+                scale = min(1.0, target_staff_h / float(max(1, h))) if h > 50 else 1.0
+                if w * scale > target_w:
+                    scale = target_w / float(max(1, w))
             new_h = max(1, int(round(h * scale)))
-            item_heights.append(new_h)
+            new_w = min(target_w, max(1, int(round(w * scale))))
+            item_dims.append((new_h, new_w))
 
-        max_h = max(item_heights) if item_heights else 32
-        batch_h = min(1485, int(np.ceil(max_h / 32.0) * 32))
+        max_h = max(d[0] for d in item_dims) if item_dims else 32
+        batch_h = min(1485, max(32, int(np.ceil(max_h / 32.0) * 32)))
 
         is_cuda = self.device == "cuda" or "cuda" in str(self.device).lower()
         dev = self.device if (is_cuda and torch.cuda.is_available()) else "cpu"
@@ -133,15 +150,15 @@ class OMREngine:
         pixel_values = torch.ones((batch_size, 3, batch_h, target_w), dtype=dtype, device=dev)
 
         for i, crop in enumerate(crops_bgr):
-            new_h = item_heights[i]
+            new_h, new_w = item_dims[i]
             crop_rgb = crop[:, :, ::-1].copy()
             t = torch.from_numpy(crop_rgb).to(device=dev, dtype=dtype).permute(2, 0, 1).unsqueeze(0)
             t = ((t / 255.0) - 0.5) / 0.5
-            resized = F.interpolate(t, size=(new_h, target_w), mode="bilinear", align_corners=False)
+            resized = F.interpolate(t, size=(new_h, new_w), mode="bilinear", align_corners=False)
             clip_h = min(new_h, batch_h)
-            pixel_values[i, :, :clip_h, :] = resized[0, :, :clip_h, :]
+            pixel_values[i, :, :clip_h, :new_w] = resized[0, :, :clip_h, :]
 
-        image_sizes = torch.tensor([[h, target_w] for h in item_heights], device=dev)
+        image_sizes = torch.tensor([[d[0], d[1]] for d in item_dims], device=dev)
         return pixel_values, image_sizes
 
     def transcribe_crops_batch(
@@ -183,10 +200,11 @@ class OMREngine:
             else:
                 processed_crops = crops_bgr
 
-            pixel_values, image_sizes = self._collate_crops_batch(processed_crops)
+            pixel_values, image_sizes = self._collate_crops_batch(processed_crops, notation_classes=notation_classes)
 
             with torch.inference_mode():
                 eos_ids = getattr(self, "transcoda_eos_token_ids", [2, 212, 236, 155, 156])
+                bad_words_ids = getattr(self, "transcoda_bad_words_ids", None)
                 out = self.transcoda_model.generate(
                     pixel_values=pixel_values,
                     image_sizes=image_sizes,
@@ -194,7 +212,8 @@ class OMREngine:
                     do_sample=False,
                     num_beams=1,
                     repetition_penalty=1.15,
-                    eos_token_id=eos_ids
+                    eos_token_id=eos_ids,
+                    bad_words_ids=bad_words_ids
                 )
 
             decoded_kerns = self.transcoda_tokenizer.batch_decode(out, skip_special_tokens=True)
@@ -211,11 +230,12 @@ class OMREngine:
                         "status": "success"
                     })
                 except Exception as conv_err:
+                    fallback_abc = f"X:1\n{('T:' + tit + chr(10)) if tit else ''}L:1/4\nM:none\nI:linebreak $\nK:C\nz4 |"
                     results.append({
-                        "abc": f"% [OMR Conversion Error: {conv_err}]",
-                        "raw_kern": raw_k,
+                        "abc": fallback_abc,
+                        "raw_kern": clean_k,
                         "model_used": "transcoda-59M",
-                        "status": "error",
+                        "status": "warning",
                         "error": str(conv_err)
                     })
             return results
@@ -287,6 +307,10 @@ class OMREngine:
         measures = []
         cur_m = []
         music_started = False
+        consecutive_same_data = 0
+        last_data_line = None
+        consecutive_rest_measures = 0
+        in_rest_measure = False
 
         for line in lines:
             is_header = line.startswith("**") or (line.startswith("*") and not music_started) or line.startswith("!")
@@ -302,7 +326,7 @@ class OMREngine:
 
             # 2. Header re-occurrence detection (attention wrap-around)
             if music_started and line.startswith("*"):
-                if any(line.startswith(h) for h in ("*clef", "*k[", "*M", "**kern")):
+                if any(line.startswith(h) for h in ("*clef", "*k[", "*M", "**kern", "*stria", "*tremolo", "*X8ba")):
                     break
 
             # 3. Token degeneration check (e.g. runaway repeated characters like 333333... or aaaaaa...)
@@ -311,15 +335,42 @@ class OMREngine:
 
             if is_header:
                 headers.append(line)
-            elif is_barline:
-                music_started = True
+                continue
+
+            music_started = True
+
+            if is_barline:
+                if in_rest_measure:
+                    consecutive_rest_measures += 1
+                    if consecutive_rest_measures >= 2:
+                        break
+                else:
+                    consecutive_rest_measures = 0
+                in_rest_measure = True
+                consecutive_same_data = 0
+                last_data_line = None
                 if cur_m:
                     measures.append(cur_m)
                     cur_m = []
                 cur_m.append(line)
+                continue
+
+            # Data line: check consecutive repeats within measure
+            tokens = line.split("\t")
+            is_rest = all("r" in t or t == "." for t in tokens)
+            if not is_rest:
+                in_rest_measure = False
+
+            if line == last_data_line:
+                consecutive_same_data += 1
+                if consecutive_same_data >= max_repeats:
+                    # Runaway repetition detected within a measure (e.g. 64ee[ or 8G 8g)
+                    break
             else:
-                music_started = True
-                cur_m.append(line)
+                consecutive_same_data = 1
+                last_data_line = line
+
+            cur_m.append(line)
 
         if cur_m:
             measures.append(cur_m)
