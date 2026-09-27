@@ -292,6 +292,22 @@ class LayoutDetector:
                 if zero_run > max_gap:
                     break
 
+        # Check for left bracket/brace extending beyond ext_x1
+        left_search_w = int(max(15, (y2 - y1) * 0.35))
+        lx1 = max(0, ext_x1 - left_search_w)
+        if ext_x1 > lx1:
+            margin_gray = gray[sy1:sy2, lx1:ext_x1]
+            if margin_gray.size > 0:
+                m_bg = float(np.percentile(margin_gray, 85))
+                m_dark = (margin_gray < m_bg - 28).astype(np.uint8)
+                m_num, _, m_stats, _ = cv2.connectedComponentsWithStats(m_dark, connectivity=8)
+                h_target = (sy2 - sy1) * 0.35
+                for mi in range(1, m_num):
+                    comp_h = m_stats[mi, cv2.CC_STAT_HEIGHT]
+                    comp_x = m_stats[mi, cv2.CC_STAT_LEFT]
+                    if comp_h >= h_target:
+                        ext_x1 = min(ext_x1, lx1 + comp_x - 2)
+
         return [ext_x1, y1, ext_x2, y2]
 
     @classmethod
@@ -362,45 +378,90 @@ class LayoutDetector:
         return merged
 
     @classmethod
-    def has_continuous_vertical_connector(cls, gray: np.ndarray, s1: Dict[str, Any], s2: Dict[str, Any], staff_s: float) -> bool:
+    def has_continuous_vertical_connector(
+        cls,
+        gray: np.ndarray,
+        s1: Dict[str, Any],
+        s2: Dict[str, Any],
+        staff_s: float,
+        return_x: bool = False
+    ) -> Any:
         """
         Determines if two adjacent staves are physically joined on the left
         by a continuous vertical bracket, curly brace, or primary system barline.
-        Scale-invariant and immune to isolated exercise numbers, clefs, or margin text.
+        Scale-invariant, robust against curved braces, and immune to isolated margin labels.
+        If return_x=True, returns (has_conn, bracket_left_x). Otherwise returns has_conn.
         """
         v_gap = s2["y_top"] - s1["y_bot"]
-        if v_gap <= 0:
-            return True
-
         min_x = min(s1["x_left"], s2["x_left"])
-        max_x = max(s1["x_left"], s2["x_left"])
-        x_start = max(0, int(min_x - staff_s * 2.5))
-        x_end = min(gray.shape[1], int(max_x + staff_s * 1.5))
-        if x_end <= x_start:
-            return False
+        if v_gap < 0:
+            return (True, min_x) if return_x else True
 
-        y_start = max(0, s1["y_bot"] - int(staff_s * 0.5))
-        y_end = min(gray.shape[0], s2["y_top"] + int(staff_s * 0.5))
+        s = max(5.0, staff_s)
+
+        # Brackets/braces are located to the left of the staff lines.
+        # Search window: from (min_x - 6.5 * s) to (min_x + 2.0 * s)
+        x_start = max(0, int(min_x - s * 6.5))
+        x_end = min(gray.shape[1], int(min_x + s * 2.0))
+        if x_end <= x_start:
+            return (False, min_x) if return_x else False
+
+        # Vertical range: across the inter-staff gap + overlap into both staves
+        y_start = max(0, int(s1["y_bot"] - s * 1.5))
+        y_end = min(gray.shape[0], int(s2["y_top"] + s * 1.5))
 
         strip = gray[y_start:y_end, x_start:x_end]
         if strip.size == 0:
-            return False
+            return (False, min_x) if return_x else False
 
-        bg = float(np.percentile(strip, 88))
-        bin_dark = (strip < bg - 35).astype(np.uint8)
+        # Multi-threshold binarization (percentile + Otsu)
+        bg = float(np.percentile(strip, 85))
+        bin_dark = (strip < bg - 28).astype(np.uint8)
+        blur = cv2.GaussianBlur(strip, (3, 3), 0)
+        _, otsu = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        bin_comb = cv2.bitwise_or(bin_dark, (otsu > 0).astype(np.uint8))
 
-        k_h = max(5, int(staff_s * 1.0))
-        vert_k = cv2.getStructuringElement(cv2.MORPH_RECT, (1, k_h))
-        vert_lines = cv2.morphologyEx(bin_dark, cv2.MORPH_OPEN, vert_k)
+        inner_y1 = s1["y_bot"] - y_start
+        inner_y2 = s2["y_top"] - y_start
+        gap_height = inner_y2 - inner_y1
+        if gap_height <= 0:
+            return (True, min_x) if return_x else True
 
-        inner_y_start = s1["y_bot"] - y_start
-        inner_y_end = s2["y_top"] - y_start
-        if inner_y_end <= inner_y_start:
-            return True
+        # Check 1: 8-connected component bridging the inter-staff gap
+        num_labels, _, stats, _ = cv2.connectedComponentsWithStats(bin_comb, connectivity=8)
+        tol = int(s * 0.5)
+        for i in range(1, num_labels):
+            comp_x = stats[i, cv2.CC_STAT_LEFT]
+            comp_y = stats[i, cv2.CC_STAT_TOP]
+            comp_w = stats[i, cv2.CC_STAT_WIDTH]
+            comp_h = stats[i, cv2.CC_STAT_HEIGHT]
+            comp_bot = comp_y + comp_h
 
-        inner_lines = vert_lines[inner_y_start:inner_y_end, :]
-        row_coverage = float(np.mean(np.sum(inner_lines > 0, axis=1) > 0))
-        return row_coverage >= 0.65
+            if comp_y <= inner_y1 + tol and comp_bot >= inner_y2 - tol:
+                aspect = comp_h / float(max(1, comp_w))
+                if comp_h >= gap_height * 0.80 and (aspect >= 1.2 or comp_w <= int(s * 3.5)):
+                    actual_x = x_start + comp_x
+                    return (True, actual_x) if return_x else True
+
+        # Check 2: Row coverage across the gap in a vertical corridor
+        dilated = cv2.dilate(bin_comb, cv2.getStructuringElement(cv2.MORPH_RECT, (1, 3)))
+        inner_roi = dilated[inner_y1:inner_y2, :]
+
+        win_w = max(5, int(s * 1.8))
+        max_cov = 0.0
+        best_win_x = 0
+        for x in range(0, inner_roi.shape[1] - win_w + 1):
+            window = inner_roi[:, x:x + win_w]
+            cov = float(np.mean(np.sum(window > 0, axis=1) > 0))
+            if cov > max_cov:
+                max_cov = cov
+                best_win_x = x
+
+        if max_cov >= 0.75:
+            actual_x = x_start + best_win_x
+            return (True, actual_x) if return_x else True
+
+        return (False, min_x) if return_x else False
 
     @classmethod
     def detect_connecting_barlines(cls, gray: np.ndarray, s1: Dict[str, Any], s2: Dict[str, Any], staff_s: float) -> bool:
@@ -805,30 +866,46 @@ class LayoutDetector:
             if idx in skip:
                 continue
             cur = kept_single[idx]
-            if idx + 1 < len(kept_single):
-                nxt = kept_single[idx + 1]
-                v_gap = nxt['box'][1] - cur['box'][3]
-                inter_x = max(0, min(cur['box'][2], nxt['box'][2]) - max(cur['box'][0], nxt['box'][0]))
-                union_x = max(cur['box'][2], nxt['box'][2]) - min(cur['box'][0], nxt['box'][0])
+            accum_box = list(cur['box'])
+            accum_staves = 1
+            accum_conf = cur['conf']
+
+            lookahead = idx + 1
+            while lookahead < len(kept_single):
+                nxt = kept_single[lookahead]
+                v_gap = nxt['box'][1] - accum_box[3]
+                inter_x = max(0, min(accum_box[2], nxt['box'][2]) - max(accum_box[0], nxt['box'][0]))
+                union_x = max(accum_box[2], nxt['box'][2]) - min(accum_box[0], nxt['box'][0])
                 h_iou = inter_x / float(max(1, union_x))
 
-                s1 = {"x_left": cur['box'][0], "x_right": cur['box'][2], "y_top": cur['box'][1], "y_bot": cur['box'][3]}
-                s2 = {"x_left": nxt['box'][0], "x_right": nxt['box'][2], "y_top": nxt['box'][1], "y_bot": nxt['box'][3]}
-                has_conn = self.has_continuous_vertical_connector(gray, s1, s2, staff_s)
-                has_bars = self.detect_connecting_barlines(gray, s1, s2, staff_s)
+                s_top = {"x_left": accum_box[0], "x_right": accum_box[2], "y_top": accum_box[1], "y_bot": accum_box[3]}
+                s_bot = {"x_left": nxt['box'][0], "x_right": nxt['box'][2], "y_top": nxt['box'][1], "y_bot": nxt['box'][3]}
+                has_conn, bx = self.has_continuous_vertical_connector(gray, s_top, s_bot, staff_s, return_x=True)
+                has_bars = self.detect_connecting_barlines(gray, s_top, s_bot, staff_s)
 
-                if (has_conn or has_bars) and 0 <= v_gap <= int(staff_s * 12.0) and h_iou >= 0.40:
-                    merged_box = [min(cur['box'][0], nxt['box'][0]), cur['box'][1], max(cur['box'][2], nxt['box'][2]), nxt['box'][3]]
-                    merged_singles.append({
-                        "box": merged_box,
-                        "conf": max(cur['conf'], nxt['conf']),
-                        "class": "grand_staff",
-                        "staves_count": 2,
-                        "s": staff_s
-                    })
-                    skip.add(idx + 1)
-                    continue
-            merged_singles.append(cur)
+                if (has_conn or has_bars) and 0 <= v_gap <= int(staff_s * 14.0) and h_iou >= 0.40:
+                    accum_box[0] = min(accum_box[0], nxt['box'][0], bx)
+                    accum_box[1] = min(accum_box[1], nxt['box'][1])
+                    accum_box[2] = max(accum_box[2], nxt['box'][2])
+                    accum_box[3] = max(accum_box[3], nxt['box'][3])
+                    accum_staves += 1
+                    accum_conf = max(accum_conf, nxt['conf'])
+                    skip.add(lookahead)
+                    lookahead += 1
+                else:
+                    break
+
+            if accum_staves > 1:
+                norm_cls = "grand_staff" if accum_staves == 2 else "system"
+                merged_singles.append({
+                    "box": accum_box,
+                    "conf": accum_conf,
+                    "class": norm_cls,
+                    "staves_count": accum_staves,
+                    "s": staff_s
+                })
+            else:
+                merged_singles.append(cur)
 
         all_blocks = kept_multi + merged_singles
         all_blocks.sort(key=lambda x: (x['class'] == 'grand_staff', x['conf']), reverse=True)
