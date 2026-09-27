@@ -1,4 +1,5 @@
 import gc
+import itertools
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
 import cv2
@@ -311,12 +312,71 @@ class LayoutDetector:
         return [ext_x1, y1, ext_x2, y2]
 
     @classmethod
+    def split_column_gutters(
+        cls,
+        detections: List[Dict[str, Any]],
+        gray: np.ndarray,
+        staff_s: float
+    ) -> List[Dict[str, Any]]:
+        """
+        Splits wide macro detections that erroneously span across multiple columns
+        separated by an empty vertical gutter (e.g. 2-column exercise pages).
+        """
+        res = []
+        for b in detections:
+            box = b["box"]
+            w = box[2] - box[0]
+            if w < int(staff_s * 28.0):
+                res.append(b)
+                continue
+            roi = gray[box[1]:box[3], box[0]:box[2]]
+            if roi.size == 0:
+                res.append(b)
+                continue
+            bg = float(np.percentile(roi, 90))
+            bin_roi = (roi < bg - 35).astype(np.uint8)
+            col_sums = np.sum(bin_roi, axis=0)
+
+            mid_start = int(w * 0.25)
+            mid_end = int(w * 0.75)
+            mid_sums = col_sums[mid_start:mid_end]
+            gutter_min_w = int(staff_s * 3.0)
+
+            max_run = 0
+            best_start = -1
+            cur_start = -1
+            for idx, s in enumerate(mid_sums):
+                if s <= 2:
+                    if cur_start == -1:
+                        cur_start = idx
+                    run_len = idx - cur_start + 1
+                    if run_len > max_run:
+                        max_run = run_len
+                        best_start = cur_start
+                else:
+                    cur_start = -1
+
+            if max_run >= gutter_min_w:
+                left_gutter = box[0] + mid_start + best_start
+                right_gutter = left_gutter + max_run
+                b1 = dict(b)
+                b1["box"] = [box[0], box[1], left_gutter, box[3]]
+                b2 = dict(b)
+                b2["box"] = [right_gutter, box[1], box[2], box[3]]
+                res.extend([b1, b2])
+            else:
+                res.append(b)
+        return res
+
+    @classmethod
     def heal_collinear_segments(
         cls,
         detections_list: List[Dict[str, Any]],
         v_overlap_thresh: float = 0.55,
         max_gap_px: Optional[int] = None,
-        img_w: int = 1000
+        img_w: int = 1000,
+        gray: Optional[np.ndarray] = None,
+        staff_s: Optional[float] = None
     ) -> List[Dict[str, Any]]:
         """
         Merges horizontally broken or overlapping segments of the same staff/grand_staff line.
@@ -360,6 +420,22 @@ class LayoutDetector:
                     and abs(h1 - h2) <= max(10, int(0.30 * max(h1, h2)))
                     and abs(cy1 - cy2) <= max(8, int(0.20 * max(h1, h2)))
                     and -max_gap_px <= h_rel):
+                    # Guard: do not merge across an empty vertical column gutter
+                    if gray is not None and h_rel < 0:
+                        gx1 = min(cur_box[2], other_box[2])
+                        gx2 = max(cur_box[0], other_box[0])
+                        s_ref = staff_s or 8.5
+                        if (gx2 - gx1) >= int(s_ref * 2.5):
+                            gy1 = max(0, min(cur_box[1], other_box[1]))
+                            gy2 = min(gray.shape[0], max(cur_box[3], other_box[3]))
+                            gutter_roi = gray[gy1:gy2, gx1:gx2]
+                            if gutter_roi.size > 0:
+                                bg = float(np.percentile(gutter_roi, 90))
+                                bin_g = (gutter_roi < bg - 35).astype(np.uint8)
+                                sums = np.sum(bin_g, axis=0)
+                                zero_runs = max((len(list(g)) for k, g in itertools.groupby(sums <= 2) if k), default=0)
+                                if zero_runs >= int(s_ref * 2.5):
+                                    continue
                     cur_box = cls.merge_boxes(cur_box, other_box)
                     cur_conf = max(cur_conf, sorted_dets[j]["confidence"])
                     cur_staves = max(cur_staves, sorted_dets[j].get("staves_count", 1))
@@ -558,8 +634,10 @@ class LayoutDetector:
                 empty_count = 0
                 new_bot_rel = y
 
-        final_ymin = y_search_min + max(0, new_top_rel)
-        final_ymax = y_search_min + min(corridor.shape[0], new_bot_rel)
+        orig_ymin = y_search_min + max(0, new_top_rel)
+        orig_ymax = y_search_min + min(corridor.shape[0], new_bot_rel)
+        final_ymin = orig_ymin
+        final_ymax = orig_ymax
 
         num_labels, _, stats, _ = cv2.connectedComponentsWithStats(bin_corridor, connectivity=8)
         for i in range(1, num_labels):
@@ -567,10 +645,10 @@ class LayoutDetector:
             comp_h = stats[i, cv2.CC_STAT_HEIGHT]
             comp_bot = comp_y + comp_h
 
-            if comp_y < final_ymin and comp_bot >= final_ymin:
+            if comp_y < orig_ymin and comp_bot >= orig_ymin:
                 if comp_h <= int(8.0 * staff_s):
                     final_ymin = min(final_ymin, comp_y)
-            if comp_bot > final_ymax and comp_y <= final_ymax:
+            if comp_bot > orig_ymax and comp_y <= orig_ymax:
                 if comp_h <= int(8.0 * staff_s):
                     final_ymax = max(final_ymax, comp_bot)
 
@@ -745,7 +823,7 @@ class LayoutDetector:
         if imgsz is None:
             max_dim = max(img_h, img_w)
             target_sz = int(np.ceil(max_dim / 32.0) * 32)
-            max_cap = 1920 if is_cuda else 1280
+            max_cap = 1280
             imgsz = min(max_cap, max(1024, target_sz))
 
         effective_conf = min(self.conf_threshold, 0.20)
@@ -790,9 +868,12 @@ class LayoutDetector:
                         "s": staff_s
                     })
 
+        # Split wide boxes spanning across multiple columns separated by a vertical gutter
+        yolo_boxes = self.split_column_gutters(yolo_boxes, gray, staff_s)
+
         # 3. Deduplicate and suppress containers
         multi_staff = [b for b in yolo_boxes if b['class'] in ('grand_staff', 'system')]
-        multi_staff.sort(key=lambda x: (x['class'] == 'grand_staff', x['conf']), reverse=True)
+        multi_staff.sort(key=lambda x: x['conf'], reverse=True)
         kept_multi = []
         for b in multi_staff:
             conflict = False
@@ -920,12 +1001,13 @@ class LayoutDetector:
                     if accum_box[0] - staff_s * 2.0 <= ps_mid_x <= accum_box[2] + staff_s * 2.0:
                         contained_staves += 1
 
-            if contained_staves == 1:
-                norm_cls = "staff"
-            elif contained_staves == 2:
-                norm_cls = "grand_staff"
-            elif contained_staves >= 3:
+            accum_h = accum_box[3] - accum_box[1]
+            if contained_staves >= 3 or accum_h >= int(26.0 * staff_s):
                 norm_cls = "system"
+            elif contained_staves == 2 or accum_h >= int(11.0 * staff_s):
+                norm_cls = "grand_staff"
+            elif contained_staves == 1:
+                norm_cls = "staff"
             else:
                 norm_cls = cur['class']
 
@@ -953,7 +1035,82 @@ class LayoutDetector:
             })
 
         # 7. Collinear healing
-        final_blocks = self.heal_collinear_segments(expanded_blocks, v_overlap_thresh=0.55, img_w=img_w)
+        final_blocks = self.heal_collinear_segments(expanded_blocks, v_overlap_thresh=0.55, img_w=img_w, gray=gray, staff_s=staff_s)
+        final_blocks.sort(key=lambda item: item["box"][1])
+
+        # 7.5. Resolve vertical overlaps on the same column
+        non_overlapping = []
+        skip_indices = set()
+        for i in range(len(final_blocks)):
+            if i in skip_indices:
+                continue
+            cur = dict(final_blocks[i])
+            c_box = list(cur["box"])
+            c_conf = cur["confidence"]
+            c_cls = cur["class"]
+            c_staves = cur.get("staves_count", 1)
+
+            for j in range(i + 1, len(final_blocks)):
+                if j in skip_indices:
+                    continue
+                nxt = final_blocks[j]
+                n_box = nxt["box"]
+
+                inter_x = max(0, min(c_box[2], n_box[2]) - max(c_box[0], n_box[0]))
+                union_x = max(c_box[2], n_box[2]) - min(c_box[0], n_box[0])
+                h_iou = inter_x / float(max(1, union_x))
+                v_ratio = self.vertical_overlap_ratio(c_box, n_box)
+                h_rel = self.horizontal_overlap_or_gap(c_box, n_box)
+
+                should_unify = False
+                v_overlap = max(0, min(c_box[3], n_box[3]) - max(c_box[1], n_box[1]))
+                if h_iou >= 0.35 and v_overlap > 8:
+                    should_unify = True
+                elif v_ratio >= 0.70 and h_rel >= 0:
+                    should_unify = True
+
+                # Guard against merging across vertical column gutters
+                if should_unify and h_rel < 0:
+                    gx1 = min(c_box[2], n_box[2])
+                    gx2 = max(c_box[0], n_box[0])
+                    s_ref = staff_s or 8.5
+                    if (gx2 - gx1) >= int(s_ref * 2.5):
+                        gy1 = max(0, min(c_box[1], n_box[1]))
+                        gy2 = min(gray.shape[0], max(c_box[3], n_box[3]))
+                        gutter_roi = gray[gy1:gy2, gx1:gx2]
+                        if gutter_roi.size > 0:
+                            bg = float(np.percentile(gutter_roi, 90))
+                            bin_g = (gutter_roi < bg - 35).astype(np.uint8)
+                            sums = np.sum(bin_g, axis=0)
+                            zero_runs = max((len(list(g)) for k, g in itertools.groupby(sums <= 2) if k), default=0)
+                            if zero_runs >= int(s_ref * 2.5):
+                                should_unify = False
+
+                if should_unify:
+                    c_box = [min(c_box[0], n_box[0]), min(c_box[1], n_box[1]), max(c_box[2], n_box[2]), max(c_box[3], n_box[3])]
+                    c_conf = max(c_conf, nxt["confidence"])
+                    c_staves = c_staves + nxt.get("staves_count", 1)
+                    c_cls = "system" if (c_cls == "system" or nxt["class"] == "system" or c_staves >= 3 or (c_box[3] - c_box[1]) >= int(26.0 * staff_s)) else "grand_staff"
+                    skip_indices.add(j)
+
+            cur["box"] = c_box
+            cur["confidence"] = c_conf
+            cur["class"] = c_cls
+            cur["staves_count"] = c_staves
+            non_overlapping.append(cur)
+
+        # 7.6. Filter duplicate interior fragments fully contained in larger blocks
+        uncontained = []
+        for i, b in enumerate(non_overlapping):
+            is_dup = False
+            for j, other in enumerate(non_overlapping):
+                if i != j and self.is_contained(b["box"], other["box"], thresh=0.60):
+                    is_dup = True
+                    break
+            if not is_dup:
+                uncontained.append(b)
+
+        final_blocks = uncontained
         final_blocks.sort(key=lambda item: item["box"][1])
 
         # 8. Apply scale-adaptive bounded padding in units of S
@@ -971,15 +1128,21 @@ class LayoutDetector:
             px1 = max(0, x1 - pad_x)
             px2 = min(img_w, x2 + pad_x)
 
-            prev_y2 = filtered[-1]["padded_box"][3] if filtered else None
+            # Only constrain vertical padding against preceding/succeeding blocks that horizontally overlap
             py1 = max(0, y1 - pad_y)
-            if prev_y2 is not None and prev_y2 < y1:
-                py1 = max(py1, prev_y2 + 4)
+            for prev_d in filtered:
+                prev_b = prev_d["padded_box"]
+                h_overlap = max(0, min(px2, prev_b[2]) - max(px1, prev_b[0]))
+                if h_overlap > 0 and prev_b[3] < y1:
+                    py1 = max(py1, prev_b[3] + 4)
 
-            next_y1 = final_blocks[idx_cand + 1]["box"][1] if idx_cand + 1 < num_cands else None
             py2 = min(img_h, y2 + pad_y)
-            if next_y1 is not None and next_y1 > y2:
-                py2 = min(py2, next_y1 - 4)
+            for next_d in final_blocks[idx_cand + 1:]:
+                next_b = next_d["box"]
+                h_overlap = max(0, min(px2, next_b[2]) - max(px1, next_b[0]))
+                if h_overlap > 0 and next_b[1] > y2:
+                    py2 = min(py2, next_b[1] - 4)
+                    break
 
             filtered.append({
                 "class": cls_name,
