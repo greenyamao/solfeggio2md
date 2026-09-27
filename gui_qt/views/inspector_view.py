@@ -82,6 +82,9 @@ class InspectorView(QWidget):
     def showEvent(self, event) -> None:
         super().showEvent(event)
         self.refresh_books(preserve_current=True)
+        if hasattr(self, "mode_segmented") and self.mode_segmented.currentItem():
+            if "2. Deskew" in self.mode_segmented.currentItem().text():
+                self._check_deskew_notice()
         self.setFocus()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
@@ -522,7 +525,26 @@ class InspectorView(QWidget):
     def _on_page_changed(self, val: int) -> None:
         self._set_page(val)
 
+    def _check_deskew_notice(self) -> None:
+        book_title = self.combo_books.currentText()
+        if not book_title:
+            return
+        crops_dir = self.output_root / book_title / "1_crops"
+        has_disk_deskew = any(crops_dir.glob("*_deskew.png")) if crops_dir.is_dir() else False
+        if not has_disk_deskew:
+            InfoBar.info(
+                title="Deskew Preview Notice",
+                content="Deskew files are not saved to disk by default to minimize SSD wear. To persist them, enable 'Keep Intermediate Files' in Settings. Live preview is computed in RAM.",
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=6000,
+                parent=self,
+            )
+
     def _on_mode_changed(self, key: str) -> None:
+        if key == "mode2":
+            self._check_deskew_notice()
         self._load_current_view()
 
     def _on_crop_changed(self, idx: int) -> None:
@@ -608,15 +630,31 @@ class InspectorView(QWidget):
 
             if active_crop is not None and active_crop.is_file():
                 self.lbl_left_title.setText(f"PAGE {p_num} (STAFF {selected_crop_idx + 1}/{len(crops)}): RAW CROP")
-                self.lbl_right_title.setText(f"PAGE {p_num} (STAFF {selected_crop_idx + 1}/{len(crops)}): 2D-DFT DESKEW")
-
                 self.canvas_left.load_file(str(active_crop))
-
                 deskew_path = active_crop.parent / f"{active_crop.stem}_deskew.png"
                 if deskew_path.is_file():
+                    self.lbl_right_title.setText(f"PAGE {p_num} (STAFF {selected_crop_idx + 1}/{len(crops)}): 2D-DFT DESKEW")
                     self.canvas_right.load_file(str(deskew_path))
                 else:
-                    self.canvas_right.load_file(str(active_crop))
+                    self.lbl_right_title.setText(
+                        f"PAGE {p_num} (STAFF {selected_crop_idx + 1}/{len(crops)}): 2D-DFT DESKEW (LIVE RAM — ENABLE 'KEEP INTERMEDIATES' IN SETTINGS TO PERSIST)"
+                    )
+                    # Live in-memory 2D-DFT deskew generation without SSD write wear
+                    try:
+                        import cv2
+                        from core.page_preprocessor import normalize_staff_crop
+                        raw_bgr = cv2.imread(str(active_crop))
+                        if raw_bgr is not None:
+                            cls_name = "grand_staff" if "grand_staff" in active_crop.stem else ("system" if "system" in active_crop.stem else "staff")
+                            dewarped_bgr, _, _ = normalize_staff_crop(raw_bgr, notation_class=cls_name, enhance_sr=False)
+                            h, w, ch = dewarped_bgr.shape
+                            rgb = cv2.cvtColor(dewarped_bgr, cv2.COLOR_BGR2RGB)
+                            qimg = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888).copy()
+                            self.canvas_right.set_qimage(qimg)
+                        else:
+                            self.canvas_right.load_file(str(active_crop))
+                    except Exception:
+                        self.canvas_right.load_file(str(active_crop))
             else:
                 # No crops on this page: show page scan
                 src_page = debug_file if debug_file.is_file() else mask_file
