@@ -931,7 +931,55 @@ class TestTier1FeatureCoverage(unittest.TestCase):
         self.assertEqual(sanitized.count("P001_S01"), 2)
         self.assertNotIn("P999_S99", sanitized)
 
+    def test_f8_06_intermediate_files_pruning_and_ssd_optimization(self):
+        """F8: Verify intermediate files auto-pruning and SSD optimization saves disk space while preserving final Markdown & ABC."""
+        cfg_file = self.test_root / "config.json"
+        cfg = dict(DEFAULT_CONFIG)
+        cfg["keep_intermediate_files"] = False
+        cfg["save_debug_images"] = False
+        cfg_file.write_text(json.dumps(cfg), encoding="utf-8")
+        runner = PipelineBatchRunner(config_path=cfg_file)
+
+        book_dir = runner._get_book_dir("test_book_prune")
+        crops_dir = book_dir / "1_crops"
+        masked_dir = book_dir / "2_masked_pages"
+        raw_md_dir = book_dir / "3_raw_md"
+        final_dir = book_dir / "4_final_pages"
+        for d in (crops_dir, masked_dir, raw_md_dir, final_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        # Create dummy transient intermediate files
+        (masked_dir / "page_0001_masked.png").write_bytes(b"dummy_masked_bytes" * 100)
+        (masked_dir / "page_0001_debug.png").write_bytes(b"dummy_debug_bytes" * 100)
+        (raw_md_dir / "page_0001_raw.md").write_text("# Page 1 Raw\n<!-- MUSIC_STUB_ID:stub1 -->", encoding="utf-8")
+        (crops_dir / "stub1_deskew.png").write_bytes(b"dummy_deskew_bytes" * 50)
+
+        # Create final valuable files
+        (crops_dir / "stub1.png").write_bytes(b"dummy_raw_crop_bytes")
+        (crops_dir / "stub1.abc").write_text("X:1\nK:C\nC D E F|]", encoding="utf-8")
+        (final_dir / "page_0001.md").write_text("# Page 1\n```abc\nX:1\nK:C\nC D E F|]\n```", encoding="utf-8")
+        complete_md = book_dir / f"{book_dir.name}_complete.md"
+        complete_md.write_text("# Complete Book\n\n# Page 1\n```abc\nX:1\nK:C\nC D E F|]\n```", encoding="utf-8")
+
+        # 1. Prune intermediates
+        res = runner.prune_intermediate_files(book_dir)
+        self.assertGreater(res["freed_bytes"], 0)
+        self.assertEqual(res["removed_count"], 4)
+
+        # 2. Verify transient folders/files removed
+        self.assertFalse((masked_dir / "page_0001_masked.png").is_file())
+        self.assertFalse((masked_dir / "page_0001_debug.png").is_file())
+        self.assertFalse((raw_md_dir / "page_0001_raw.md").is_file())
+        self.assertFalse((crops_dir / "stub1_deskew.png").is_file())
+
+        # 3. Verify final valuable artifacts 100% intact
+        self.assertTrue((crops_dir / "stub1.png").is_file())
+        self.assertTrue((crops_dir / "stub1.abc").is_file())
+        self.assertTrue((final_dir / "page_0001.md").is_file())
+        self.assertTrue(complete_md.is_file())
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

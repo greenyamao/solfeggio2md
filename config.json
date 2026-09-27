@@ -27,5 +27,7 @@
   "skip_vlm": false,
   "skip_front_matter": false,
   "skip_back_matter": false,
+  "keep_intermediate_files": false,
+  "save_debug_images": false,
   "system_prompt": "You are a strict OCR transcriber. Transcribe all printed text from the book page into verbatim Markdown.\nPreserve headings, lists, and tables.\nDO NOT analyze the image, DO NOT explain, and DO NOT output reasoning or thinking steps.\nOutput ONLY the transcribed Markdown text appearing on the page.\nIMPORTANT: If you see <!-- MUSIC_STUB_ID:... --> tags on the white masked areas, copy the EXACT text of each tag into its corresponding position in the text. Do NOT invent or insert MUSIC_STUB_ID tags if they are not present on the image.\nIf the page contains no text, output nothing."
 }

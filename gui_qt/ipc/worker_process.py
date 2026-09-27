@@ -147,6 +147,18 @@ def _ml_worker_main(command_queue: mp.Queue, status_queue: mp.Queue, shm_name: s
                         )
                     except Exception:
                         pass
+
+                elif cmd == "clean_intermediate_cache":
+                    prune_crops = bool(msg.get("prune_crops", False))
+                    res = runner.clean_all_intermediate_cache(prune_crops=prune_crops)
+                    freed = res.get("freed_mb", 0.0)
+                    cnt = res.get("removed_count", 0)
+                    status_queue.put({"type": "log", "data": {
+                        "time": time.strftime("%H:%M:%S"),
+                        "tag": "CLEANUP",
+                        "msg": f"Purged {freed:.1f} MB of intermediate files ({cnt} items)",
+                        "level": "INFO",
+                    }})
         except queue.Empty:
             pass
         except Exception:

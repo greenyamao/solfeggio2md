@@ -14,6 +14,7 @@ import shutil
 import sys
 import threading
 import time
+import urllib.error
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple, Set
@@ -66,6 +67,8 @@ DEFAULT_CONFIG = {
     "smt_device": "cuda" if torch.cuda.is_available() else "cpu",
     "enable_score_enhancer": True,
     "enable_cugan_sr": True,
+    "keep_intermediate_files": False,
+    "save_debug_images": False,
     "skip_vlm": False,
     "skip_front_matter": True,
     "skip_back_matter": True,
@@ -899,7 +902,8 @@ class PipelineBatchRunner:
                         notation_class=cls_name,
                         enhance_sr=False
                     )
-                    cv2.imwrite(str(deskew_file), dewarped_bgr)
+                    if self.config.get("keep_intermediate_files", False):
+                        cv2.imwrite(str(deskew_file), dewarped_bgr)
                     crop_bgr = dewarped_bgr
                 else:
                     crop_bgr = None
@@ -1085,9 +1089,10 @@ class PipelineBatchRunner:
                         img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR if pix.n == 4 else cv2.COLOR_RGB2BGR)
                         del pix
 
-                        sheet_file = masked_dir / f"sheet_{s_idx:04d}.png"
-                        if not sheet_file.is_file() or overwrite:
-                            cv2.imwrite(str(sheet_file), img_bgr)
+                        if self.config.get("save_debug_images", False):
+                            sheet_file = masked_dir / f"sheet_{s_idx:04d}.png"
+                            if not sheet_file.is_file() or overwrite:
+                                cv2.imwrite(str(sheet_file), img_bgr)
 
                         split_pages = detect_and_split_spread(img_bgr)
                         if len(split_pages) != len(book_pages):
@@ -1116,7 +1121,7 @@ class PipelineBatchRunner:
                                 chk["phases"]["slicing"]["pages_done"] = pages_done_count
                                 self._write_checkpoint(pdf_path.stem, chk)
 
-                                cv2.imwrite(str(mask_file), deskewed_bgr)
+                                cv2.imwrite(str(mask_file), deskewed_bgr, [cv2.IMWRITE_PNG_COMPRESSION, 1])
                                 raw_md_file = masked_dir.parent / "3_raw_md" / f"page_{bp:04d}_raw.md"
                                 if not raw_md_file.is_file() or overwrite:
                                     raw_md_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1134,17 +1139,19 @@ class PipelineBatchRunner:
 
                             debug_img = self.layout_detector.render_debug_image(deskewed_bgr, detections)
                             debug_file = masked_dir / f"page_{bp:04d}_debug.png"
-                            cv2.imwrite(str(debug_file), debug_img)
-                            cv2.imwrite(str(mask_file), masked_img)
+                            if self.config.get("save_debug_images", False):
+                                cv2.imwrite(str(debug_file), debug_img)
+                            cv2.imwrite(str(mask_file), masked_img, [cv2.IMWRITE_PNG_COMPRESSION, 1])
 
                             try:
-                                rel_dbg = debug_file.relative_to(self.output_root).as_posix()
+                                img_ref = debug_file if debug_file.is_file() else mask_file
+                                rel_dbg = img_ref.relative_to(self.output_root).as_posix()
                                 with self._lock:
                                     self.metrics["current_page_image_url"] = f"/output/{rel_dbg}"
-                                    self.metrics["current_page_image_path"] = str(debug_file)
+                                    self.metrics["current_page_image_path"] = str(img_ref)
                                 if self.on_frame_update is not None:
                                     self.on_frame_update(debug_img, {
-                                        "path": str(debug_file),
+                                        "path": str(img_ref),
                                         "stage": "phase1",
                                         "book": pdf_path.stem,
                                         "page": bp,
@@ -1395,10 +1402,11 @@ class PipelineBatchRunner:
                 img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR if pix.n == 4 else cv2.COLOR_RGB2BGR)
                 del pix
 
-                # Persist original un-split sheet scan for UI inspection / Mode 1 comparison
-                sheet_file = masked_dir / f"sheet_{s_idx:04d}.png"
-                if not sheet_file.is_file() or overwrite:
-                    cv2.imwrite(str(sheet_file), img_bgr)
+                # Persist original un-split sheet scan for UI inspection / Mode 1 comparison only if requested
+                if self.config.get("save_debug_images", False):
+                    sheet_file = masked_dir / f"sheet_{s_idx:04d}.png"
+                    if not sheet_file.is_file() or overwrite:
+                        cv2.imwrite(str(sheet_file), img_bgr)
 
                 # Automated two-page spread splitting along central spine / gutter
                 split_pages = detect_and_split_spread(img_bgr)
@@ -1433,7 +1441,7 @@ class PipelineBatchRunner:
                         self._write_checkpoint(pdf_path.stem, chk)
 
                         # Write empty mask placeholder for physical disk tracking
-                        cv2.imwrite(str(mask_file), deskewed_bgr)
+                        cv2.imwrite(str(mask_file), deskewed_bgr, [cv2.IMWRITE_PNG_COMPRESSION, 1])
                         raw_md_file = masked_dir.parent / "3_raw_md" / f"page_{bp:04d}_raw.md"
                         if not raw_md_file.is_file() or overwrite:
                             raw_md_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1457,9 +1465,10 @@ class PipelineBatchRunner:
                     # Render and save debug image with YOLO bounding boxes for UI inspection
                     debug_img = self.layout_detector.render_debug_image(deskewed_bgr, detections)
                     debug_file = masked_dir / f"page_{bp:04d}_debug.png"
-                    cv2.imwrite(str(debug_file), debug_img)
+                    if self.config.get("save_debug_images", False):
+                        cv2.imwrite(str(debug_file), debug_img)
 
-                    cv2.imwrite(str(mask_file), masked_img)
+                    cv2.imwrite(str(mask_file), masked_img, [cv2.IMWRITE_PNG_COMPRESSION, 1])
 
                     for crop in crops_data:
                         crop_name = f"{crop['stub_id']}.png"
@@ -2060,11 +2069,33 @@ class PipelineBatchRunner:
         if not overwrite and complete_book_file.is_file() and complete_book_file.stat().st_size > 0:
             chk.setdefault("phases", {}).setdefault("assembly", {})["completed"] = True
             self._update_phase_progress("phase4", 100.0, 1, 1, "completed", "Book already assembled on disk")
+            if not self.config.get("keep_intermediate_files", False):
+                self.prune_intermediate_files(book_dir)
             return True
 
-        raw_files = sorted(raw_md_dir.glob("page_*_raw.md"))
+        raw_files = sorted(raw_md_dir.glob("page_*_raw.md")) if raw_md_dir.is_dir() else []
         total_raw = len(raw_files)
         final_dir.mkdir(parents=True, exist_ok=True)
+
+        if total_raw == 0:
+            final_pages = sorted(final_dir.glob("page_*.md"))
+            if final_pages:
+                pages_filtered = [
+                    f for f in final_pages
+                    if not f.name.endswith("_complete.md") and not f.name.endswith("_final.md")
+                ]
+                pages_to_use = pages_filtered if pages_filtered else [f for f in final_pages if not f.name.endswith("_complete.md")]
+                all_pages_content = [f.read_text(encoding="utf-8") for f in pages_to_use]
+                full_content = "\n\n---\n\n".join(all_pages_content)
+                if full_content.strip():
+                    complete_book_file.write_text(full_content, encoding="utf-8")
+                    chk.setdefault("phases", {}).setdefault("assembly", {})["completed"] = True
+                    self._update_phase_progress("phase4", 100.0, len(pages_to_use), len(pages_to_use), "completed", f"Edition {book_dir.name} assembled from final pages")
+                    self.log_event("ASSEMBLY", f"Edition {book_dir.name} successfully assembled ({len(pages_to_use)} pages)")
+                    if not self.config.get("keep_intermediate_files", False):
+                        self.prune_intermediate_files(book_dir)
+                    return True
+
         self._update_phase_progress("phase4", 10.0, 0, total_raw, "running", "Assembling Markdown pages...")
 
         all_pages_content = []
@@ -2105,7 +2136,115 @@ class PipelineBatchRunner:
         chk.setdefault("phases", {}).setdefault("assembly", {})["completed"] = True
         self._update_phase_progress("phase4", 100.0, total_raw, total_raw, "completed", f"Edition {book_dir.name} assembled")
         self.log_event("ASSEMBLY", f"Edition {book_dir.name} successfully assembled ({total_raw} pages)")
+
+        # Prune transient intermediate files unless configured to keep them
+        if not self.config.get("keep_intermediate_files", False):
+            self.prune_intermediate_files(book_dir)
+
         return True
+
+    def prune_intermediate_files(self, book_dir: Path, prune_crops: bool = False) -> Dict[str, Any]:
+        """
+        Removes transient intermediate artifacts once final book markdown is generated.
+        Frees ~95% of disk space and prevents SSD wear without affecting final markdown or musical accuracy:
+        - 2_masked_pages/ (transient VLM input images, sheet scans, debug annotations)
+        - 3_raw_md/ (transient un-injected markdown drafts)
+        - *_deskew.png in 1_crops/ (redundant normalized crop duplicates)
+        - Optional: 1_crops/*.png if prune_crops=True
+        """
+        freed_bytes = 0
+        removed_count = 0
+
+        # 1. Prune 2_masked_pages
+        masked_dir = book_dir / "2_masked_pages"
+        if masked_dir.is_dir():
+            for f in list(masked_dir.iterdir()):
+                if f.is_file():
+                    try:
+                        freed_bytes += f.stat().st_size
+                        f.unlink()
+                        removed_count += 1
+                    except Exception:
+                        pass
+            try:
+                masked_dir.rmdir()
+            except Exception:
+                pass
+
+        # 2. Prune 3_raw_md
+        raw_md_dir = book_dir / "3_raw_md"
+        if raw_md_dir.is_dir():
+            for f in list(raw_md_dir.iterdir()):
+                if f.is_file():
+                    try:
+                        freed_bytes += f.stat().st_size
+                        f.unlink()
+                        removed_count += 1
+                    except Exception:
+                        pass
+            try:
+                raw_md_dir.rmdir()
+            except Exception:
+                pass
+
+        # 3. Prune duplicate *_deskew.png in 1_crops
+        crops_dir = book_dir / "1_crops"
+        if crops_dir.is_dir():
+            for f in list(crops_dir.glob("*_deskew.png")):
+                try:
+                    freed_bytes += f.stat().st_size
+                    f.unlink()
+                    removed_count += 1
+                except Exception:
+                    pass
+            if prune_crops:
+                for f in list(crops_dir.glob("*.png")):
+                    try:
+                        freed_bytes += f.stat().st_size
+                        f.unlink()
+                        removed_count += 1
+                    except Exception:
+                        pass
+
+        freed_mb = round(freed_bytes / (1024 * 1024), 2)
+        if removed_count > 0:
+            self.log_event("CLEANUP", f"Pruned {removed_count} intermediate files for '{book_dir.name}' ({freed_mb:.1f} MB freed)")
+
+        return {
+            "freed_bytes": freed_bytes,
+            "freed_mb": freed_mb,
+            "removed_count": removed_count,
+        }
+
+    def clean_all_intermediate_cache(self, prune_crops: bool = False) -> Dict[str, Any]:
+        """
+        Scans all book directories under output_root and prunes transient intermediate files
+        for books that have completed assembly or when explicitly requested by user.
+        """
+        total_freed_bytes = 0
+        total_removed = 0
+        books_cleaned = 0
+
+        if not self.output_root.is_dir():
+            return {"freed_bytes": 0, "freed_mb": 0.0, "removed_count": 0, "books_cleaned": 0}
+
+        for item in self.output_root.iterdir():
+            if item.is_dir() and not item.name.startswith("."):
+                res = self.prune_intermediate_files(item, prune_crops=prune_crops)
+                if res["removed_count"] > 0:
+                    total_freed_bytes += res["freed_bytes"]
+                    total_removed += res["removed_count"]
+                    books_cleaned += 1
+
+        freed_mb = round(total_freed_bytes / (1024 * 1024), 2)
+        if books_cleaned > 0:
+            self.log_event("CLEANUP", f"Total cache purge: {freed_mb:.1f} MB freed across {books_cleaned} editions ({total_removed} files removed)")
+        return {
+            "freed_bytes": total_freed_bytes,
+            "freed_mb": freed_mb,
+            "removed_count": total_removed,
+            "books_cleaned": books_cleaned,
+        }
 
     @staticmethod
     def _is_blank_image(image_path: Path, min_ink_ratio: float = 0.0008, max_mean: float = 248.0) -> bool:

@@ -246,7 +246,6 @@ class LMStudioClient:
                 "max_tokens": int(max_tokens),
                 "frequency_penalty": 0.15,
                 "presence_penalty": 0.05,
-                "repeat_penalty": 1.15,
                 "stream": True,
                 "reasoning": "off",
                 "reasoning_effort": "minimal",
@@ -333,8 +332,7 @@ class LMStudioClient:
                     "max_output_tokens": int(max_tokens),
                     "frequency_penalty": 0.15,
                     "presence_penalty": 0.05,
-                    "repeat_penalty": 1.15,
-                    "stream": False,
+                        "stream": False,
                     "store": False,
                 }
                 result = self._post("/api/v1/chat", payload)
@@ -359,7 +357,6 @@ class LMStudioClient:
                     "max_tokens": int(max_tokens),
                     "frequency_penalty": 0.15,
                     "presence_penalty": 0.05,
-                    "repeat_penalty": 1.15,
                     "stream": False,
                     "reasoning": "off",
                     "reasoning_effort": "minimal",

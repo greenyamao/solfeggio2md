@@ -237,6 +237,18 @@ class SettingsView(QWidget):
         self.sw_skip_front.setChecked(bool(self.config.get("skip_front_matter", True)))
         form.addRow("Section Filter:", self.sw_skip_front)
 
+        self.sw_keep_intermediates = SwitchButton("Keep Intermediate Files (Masks & Drafts)", card)
+        self.sw_keep_intermediates.setChecked(bool(self.config.get("keep_intermediate_files", False)))
+        form.addRow("Disk Storage Mode:", self.sw_keep_intermediates)
+
+        self.sw_save_debug = SwitchButton("Save YOLO Debug Images to Disk", card)
+        self.sw_save_debug.setChecked(bool(self.config.get("save_debug_images", False)))
+        form.addRow("Debug Image Writes:", self.sw_save_debug)
+
+        self.btn_clean_cache = PushButton(FluentIcon.DELETE, "Clean Intermediate Cache Now", card)
+        self.btn_clean_cache.clicked.connect(self._on_clean_cache_clicked)
+        form.addRow("Free SSD Space:", self.btn_clean_cache)
+
         layout.addLayout(form)
         return card
 
@@ -311,6 +323,18 @@ class SettingsView(QWidget):
     def _on_cancel_download_clicked(self) -> None:
         self.worker_client.send_command("cancel_download")
 
+    def _on_clean_cache_clicked(self) -> None:
+        self.worker_client.send_command("clean_intermediate_cache")
+        InfoBar.info(
+            title="Cache Purge Initiated",
+            content="Intermediate mask pages and debug images are being removed to free SSD space.",
+            orient=Qt.Orientation.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP_RIGHT,
+            duration=3500,
+            parent=self,
+        )
+
     def _save_settings(self) -> None:
         backend_val = "embedded" if self.combo_backend.currentIndex() == 0 else "lm_studio"
         updates = {
@@ -325,6 +349,8 @@ class SettingsView(QWidget):
             "smt_max_tokens": self.spin_smt_tokens.value(),
             "skip_vlm": self.sw_skip_vlm.isChecked(),
             "skip_front_matter": self.sw_skip_front.isChecked(),
+            "keep_intermediate_files": self.sw_keep_intermediates.isChecked(),
+            "save_debug_images": self.sw_save_debug.isChecked(),
         }
 
         self.config.update(updates)
