@@ -180,12 +180,37 @@ class OMREngine:
         if titles is None:
             titles = [None] * count
 
+        # Height-aware partitioning: avoid mixing single staves (h < 90) with multi-staff systems (h >= 90)
+        # in the same mini-batch to eliminate massive blank padding degradation.
+        if count > 1 and any(c.shape[0] < 90 for c in crops_bgr) and any(c.shape[0] >= 90 for c in crops_bgr):
+            idx_small = [i for i, c in enumerate(crops_bgr) if c.shape[0] < 90]
+            idx_tall = [i for i, c in enumerate(crops_bgr) if c.shape[0] >= 90]
+
+            res_small = self.transcribe_crops_batch(
+                [crops_bgr[i] for i in idx_small],
+                [notation_classes[i] for i in idx_small],
+                [titles[i] for i in idx_small],
+                max_tokens=max_tokens
+            )
+            res_tall = self.transcribe_crops_batch(
+                [crops_bgr[i] for i in idx_tall],
+                [notation_classes[i] for i in idx_tall],
+                [titles[i] for i in idx_tall],
+                max_tokens=max_tokens
+            )
+            combined = [None] * count
+            for idx, r in zip(idx_small, res_small):
+                combined[idx] = r
+            for idx, r in zip(idx_tall, res_tall):
+                combined[idx] = r
+            return combined
+
         try:
             self._ensure_transcoda_loaded()
 
             # Record original widths for music density token bounding without artificial early cutoffs
             widest_crop_px = max(c.shape[1] for c in crops_bgr) if crops_bgr else 1000
-            effective_max_tokens = min(int(max_tokens), max(256, int(widest_crop_px * 0.75)))
+            effective_max_tokens = min(int(max_tokens), max(160, int(widest_crop_px * 0.35)))
 
             # Neural stroke restoration & GPU background division (avoiding double-SR if already 2x)
             if self.enable_score_enhancer and self.enhancer is not None:
@@ -375,30 +400,44 @@ class OMREngine:
         if cur_m:
             measures.append(cur_m)
 
-        # 3. Intelligent cycle and wrap-around detection
+        # 3. Intelligent cycle and wrap-around detection (exact and fuzzy Jaccard similarity)
         cutoff = len(measures)
 
-        # Extract non-barline content tokens for each measure for robust comparison
-        m_tuples = []
-        for m in measures:
-            content = [x for x in m if not x.startswith("=") and not x.startswith("!") and not x.startswith("*")]
-            m_tuples.append(tuple(content))
+        # Extract pitch signature sets for robust invariant comparison
+        def _measure_sig_set(m):
+            notes = set()
+            for line in m:
+                if line.startswith("=") or line.startswith("*") or line.startswith("!"):
+                    continue
+                for t in line.split("\t"):
+                    letters = "".join(sorted(re.findall(r"[a-gA-Gr]", t.lower())))
+                    if letters:
+                        notes.add(letters)
+            return frozenset(notes)
 
-        # A. Wrap-around to start: if measure i matches measure 0 (and piece has >= 3 measures)
-        if len(m_tuples) >= 3 and len(m_tuples[0]) > 0:
-            for i in range(2, len(m_tuples)):
-                if m_tuples[i] == m_tuples[0]:
-                    if (i + 1 < len(m_tuples) and m_tuples[i + 1] == m_tuples[1]) or i >= 4:
-                        cutoff = min(cutoff, i)
-                        break
+        def _jaccard(s1, s2):
+            if not s1 or not s2:
+                return 0.0
+            return len(s1 & s2) / float(len(s1 | s2))
 
-        # B. K-measure cycle detection for k in [1, 2, 3, 4]
-        for k in (1, 2, 3, 4):
-            limit = min(cutoff, len(m_tuples))
+        sigs = [_measure_sig_set(m) for m in measures]
+
+        # A. Wrap-around to start: if measure i (i >= 3) matches measure 0
+        if len(sigs) >= 4 and len(sigs[0]) > 0:
+            for i in range(3, len(sigs)):
+                if _jaccard(sigs[i], sigs[0]) >= 0.60:
+                    cutoff = min(cutoff, i)
+                    break
+
+        # B. Multi-measure cycle detection for k in [2, 3, 4]
+        for k in (2, 3, 4):
+            limit = min(cutoff, len(sigs))
             for end_idx in range(2 * k, limit + 1):
-                pattern1 = m_tuples[end_idx - k : end_idx]
-                pattern2 = m_tuples[end_idx - 2 * k : end_idx - k]
-                if pattern1 and all(len(p) > 0 for p in pattern1) and pattern1 == pattern2:
+                pat1 = sigs[end_idx - k : end_idx]
+                pat2 = sigs[end_idx - 2 * k : end_idx - k]
+                sims = [_jaccard(s1, s2) for s1, s2 in zip(pat1, pat2)]
+                avg_sim = sum(sims) / float(len(sims)) if sims else 0
+                if avg_sim >= 0.55 and all(len(s) > 0 for s in pat1):
                     cutoff = min(cutoff, end_idx - k)
                     break
 
