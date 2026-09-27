@@ -503,7 +503,7 @@ class LayoutDetector:
         gray: np.ndarray,
         box: List[int],
         staff_s: float,
-        max_search_s: float = 3.5,
+        max_search_s: float = 8.5,
         whitespace_s: float = 0.75
     ) -> List[int]:
         """
@@ -568,10 +568,10 @@ class LayoutDetector:
             comp_bot = comp_y + comp_h
 
             if comp_y < final_ymin and comp_bot >= final_ymin:
-                if comp_h <= int(5.5 * staff_s):
+                if comp_h <= int(8.0 * staff_s):
                     final_ymin = min(final_ymin, comp_y)
             if comp_bot > final_ymax and comp_y <= final_ymax:
-                if comp_h <= int(5.5 * staff_s):
+                if comp_h <= int(8.0 * staff_s):
                     final_ymax = max(final_ymax, comp_bot)
 
         return [int(x1), int(max(0, final_ymin)), int(x2), int(min(h_img, final_ymax))]
