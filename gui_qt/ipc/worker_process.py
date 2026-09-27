@@ -173,7 +173,7 @@ def _ml_worker_main(command_queue: mp.Queue, status_queue: mp.Queue, shm_name: s
                 dl_state = runner.model_manager.get_download_state()
                 status_queue.put_nowait({
                     "type": "status",
-                    "metrics": dict(runner.metrics),
+                    "metrics": summary.get("metrics") or runner.get_metrics(),
                     "queue_summary": summary,
                     "download_state": dl_state,
                 })

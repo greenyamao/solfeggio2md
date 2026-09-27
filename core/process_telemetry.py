@@ -68,6 +68,47 @@ class ProcessTelemetry:
             cls._instance = ProcessTelemetry()
         return cls._instance
 
+    def _find_all_project_processes(self) -> list:
+        """Discovers all processes belonging to our pipeline, GUI, unroller/OMR, and VLM services."""
+        procs = [self.proc]
+        seen_pids = {self.pid}
+        try:
+            for ch in self.proc.children(recursive=True):
+                if ch.pid not in seen_pids:
+                    seen_pids.add(ch.pid)
+                    procs.append(ch)
+            parent = self.proc.parent()
+            if parent and parent.pid not in seen_pids:
+                p_name = (parent.name() or "").lower()
+                if "python" in p_name or "antigravity" in p_name:
+                    seen_pids.add(parent.pid)
+                    procs.append(parent)
+                    for sib in parent.children(recursive=True):
+                        if sib.pid not in seen_pids:
+                            seen_pids.add(sib.pid)
+                            procs.append(sib)
+        except Exception:
+            pass
+
+        # Also find any llama-server, lmstudio, or sibling python processes running our project
+        for p in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                pid = p.info["pid"]
+                if pid in seen_pids:
+                    continue
+                pname = (p.info["name"] or "").lower()
+                if "llama-server" in pname or "lmstudio" in pname:
+                    seen_pids.add(pid)
+                    procs.append(p)
+                elif "python" in pname:
+                    cmd = " ".join(p.info["cmdline"] or [])
+                    if "pdf_to_md_music" in cmd:
+                        seen_pids.add(pid)
+                        procs.append(p)
+            except Exception:
+                pass
+        return procs
+
     def get_metrics(self) -> Dict[str, Any]:
         """
         Gathers isolated resource consumption metrics for this process.
@@ -76,14 +117,10 @@ class ProcessTelemetry:
         if (now - self._last_time) < self._cache_ttl and self._last_metrics:
             return dict(self._last_metrics)
 
-        # 1. Process CPU (%)
-        try:
-            all_procs = [self.proc]
-            try:
-                all_procs.extend(self.proc.children(recursive=True))
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
+        all_procs = self._find_all_project_processes()
 
+        # 1. Process CPU (%) across all project services
+        try:
             total_cpu_pct = 0.0
             for p in all_procs:
                 try:
@@ -96,7 +133,7 @@ class ProcessTelemetry:
         except Exception:
             proc_cpu_percent = 0.0
 
-        # 2. Process RAM RSS (MB)
+        # 2. Process RAM RSS (MB) across all project services
         try:
             total_rss = 0
             for p in all_procs:

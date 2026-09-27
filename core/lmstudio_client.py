@@ -228,6 +228,8 @@ class LMStudioClient:
 
         ocr_prompt = "Transcribe this page verbatim into clean Markdown. Output ONLY the recognized text appearing on the page. Do NOT explain, do NOT analyze, do NOT output thinking or reasoning."
 
+        t_first_token: Optional[float] = None
+
         # If on_chunk callback provided, attempt real-time SSE streaming first via OpenAI endpoint
         if on_chunk is not None:
             stream_payload = {
@@ -300,6 +302,8 @@ class LMStudioClient:
                                                 else:
                                                     delta = ""
                                             if delta:
+                                                if t_first_token is None:
+                                                    t_first_token = time.time()
                                                 accumulated.append(delta)
                                                 streamed_any = True
                                                 on_chunk(delta)
@@ -388,8 +392,12 @@ class LMStudioClient:
         num_tokens = int(stats.get("num_output_tokens") or 0)
         if num_tokens <= 0 and cleaned_text:
             num_tokens = int(len(cleaned_text) / 3.5)
-        if tok_per_sec <= 0.0 and duration > 0 and num_tokens > 0:
-            tok_per_sec = round(num_tokens / duration, 1)
+        if tok_per_sec <= 0.0 and num_tokens > 0:
+            if t_first_token is not None:
+                gen_duration = max(0.01, t_end - t_first_token)
+                tok_per_sec = round(num_tokens / gen_duration, 1)
+            elif duration > 0:
+                tok_per_sec = round(num_tokens / duration, 1)
 
         stats["tokens_per_second"] = round(tok_per_sec, 1)
         stats["duration_seconds"] = round(duration, 2)

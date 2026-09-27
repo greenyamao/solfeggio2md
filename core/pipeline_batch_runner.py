@@ -436,19 +436,34 @@ class PipelineBatchRunner:
             m["process_telemetry"] = telemetry
             m["cpu_percent"] = telemetry.get("cpu_percent", 0.0)
             m["ram_rss_mb"] = telemetry.get("ram_rss_mb", 0.0)
+            dev_vram = telemetry.get("gpu_vram_used_mb", 0.0)
+            total_vram = telemetry.get("total_vram_mb", 8151.0)
+            m["gpu_vram_used_mb"] = dev_vram
+            m["total_vram_mb"] = total_vram
+
             torch_vram = telemetry.get("vram_allocated_mb", 0.0)
             if torch_vram > 0.0:
                 m["vram_allocated_mb"] = torch_vram
             elif hasattr(self, "embedded_runner") and getattr(self.embedded_runner, "vram_used_mb", 0.0) > 0.0:
                 m["vram_allocated_mb"] = self.embedded_runner.vram_used_mb
             elif (hasattr(self, "embedded_runner") and self.embedded_runner.is_running) or (self.is_running and "VLM" in self.metrics.get("current_phase_name", "")):
-                m["vram_allocated_mb"] = telemetry.get("gpu_vram_used_mb", 0.0)
+                m["vram_allocated_mb"] = dev_vram
             else:
                 m["vram_allocated_mb"] = 0.0
-            m["vram_reserved_mb"] = telemetry.get("vram_reserved_mb", 0.0)
+            m["vram_reserved_mb"] = telemetry.get("vram_reserved_mb", total_vram)
             m["gpu_compute_percent"] = telemetry.get("gpu_compute_percent", 0.0)
             m["device_name"] = telemetry.get("device_name", "CPU")
             m["runtime_mode"] = telemetry.get("runtime_mode", "CPU Mode")
+            m["system_context"] = telemetry.get("system_context", {})
+
+            with self._lock:
+                self.metrics["cpu_percent"] = m["cpu_percent"]
+                self.metrics["ram_rss_mb"] = m["ram_rss_mb"]
+                self.metrics["vram_allocated_mb"] = m["vram_allocated_mb"]
+                self.metrics["gpu_vram_used_mb"] = dev_vram
+                self.metrics["total_vram_mb"] = total_vram
+                self.metrics["gpu_compute_percent"] = m["gpu_compute_percent"]
+                self.metrics["system_context"] = m["system_context"]
         except Exception:
             pass
 
