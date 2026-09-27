@@ -16,14 +16,17 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QKeyEvent, QWheelEvent
+from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
+    QScrollArea,
     QSplitter,
     QStackedWidget,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -57,8 +60,24 @@ class InspectorView(QWidget):
         self._current_page: int = 1
         self._max_page: int = 1
         self._current_crops: List[Path] = []
+        self._bridge = None
+        self._validator = None
 
         self._init_ui()
+
+    @property
+    def bridge(self):
+        if self._bridge is None:
+            from core.abc_bridge import ABCBridge
+            self._bridge = ABCBridge()
+        return self._bridge
+
+    @property
+    def validator(self):
+        if self._validator is None:
+            from core.notation_validator import NotationValidator
+            self._validator = NotationValidator()
+        return self._validator
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -182,10 +201,86 @@ class InspectorView(QWidget):
         self.canvas_right = StaffGraphicsView(self.right_stack)
         self.right_stack.addWidget(self.canvas_right)
 
-        # Page 1: Text Editor for Modes 3 & 4
-        self.text_editor = QPlainTextEdit(self.right_stack)
+        # Page 1: Mode 3: Integrated Quality Status Banner + Verovio SVG & Code Tabs
+        self.mode3_container = QWidget(self.right_stack)
+        m3_layout = QVBoxLayout(self.mode3_container)
+        m3_layout.setContentsMargins(0, 0, 0, 0)
+        m3_layout.setSpacing(6)
+
+        # Quality / Invariant Diagnostic Banner
+        self.card_val = CardWidget(self.mode3_container)
+        card_val_layout = QVBoxLayout(self.card_val)
+        card_val_layout.setContentsMargins(12, 8, 12, 8)
+        card_val_layout.setSpacing(2)
+
+        self.lbl_val_status = SubtitleLabel("Score: 100% (PASS)", self.card_val)
+        self.lbl_val_status.setStyleSheet("color: #4ade80; font-weight: 700; font-size: 13px;")
+        card_val_layout.addWidget(self.lbl_val_status)
+
+        self.lbl_val_details = CaptionLabel("No structural anomalies detected", self.card_val)
+        self.lbl_val_details.setWordWrap(True)
+        card_val_layout.addWidget(self.lbl_val_details)
+
+        m3_layout.addWidget(self.card_val)
+
+        # Tabs: Vector Score vs Code
+        self.tabs_mode3 = QTabWidget(self.mode3_container)
+        self.tabs_mode3.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #1e293b;
+                border-radius: 6px;
+                background-color: #0b0f17;
+            }
+            QTabBar::tab {
+                background: #161b22;
+                color: #8b9bb4;
+                padding: 6px 14px;
+                border: 1px solid #21262d;
+                border-bottom: none;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                margin-right: 2px;
+                font-size: 11px;
+                font-weight: 600;
+            }
+            QTabBar::tab:selected {
+                background: #1f2937;
+                color: #ffffff;
+                border-color: #388bfd;
+            }
+        """)
+
+        # Tab 0: Vector SVG Score (white sheet background)
+        self.svg_scroll = QScrollArea(self.tabs_mode3)
+        self.svg_scroll.setWidgetResizable(True)
+        self.svg_scroll.setStyleSheet("background-color: #ffffff; border: none; border-radius: 6px;")
+        self.svg_widget = QSvgWidget(self.svg_scroll)
+        self.svg_scroll.setWidget(self.svg_widget)
+        self.tabs_mode3.addTab(self.svg_scroll, "Verovio Vector Score")
+
+        # Tab 1: Text Editor for ABC / Kern
+        self.text_editor = QPlainTextEdit(self.tabs_mode3)
         self.text_editor.setReadOnly(True)
         self.text_editor.setStyleSheet("""
+            QPlainTextEdit {
+                background-color: #0b0f17;
+                color: #e2e8f0;
+                font-family: 'Cascadia Code', 'Consolas', monospace;
+                font-size: 12px;
+                border: none;
+                padding: 10px;
+                line-height: 1.4;
+            }
+        """)
+        self.tabs_mode3.addTab(self.text_editor, "Raw ABC / Humdrum Kern")
+
+        m3_layout.addWidget(self.tabs_mode3, stretch=1)
+        self.right_stack.addWidget(self.mode3_container)
+
+        # Page 2: Text Editor for Mode 4 (Markdown)
+        self.text_editor_md = QPlainTextEdit(self.right_stack)
+        self.text_editor_md.setReadOnly(True)
+        self.text_editor_md.setStyleSheet("""
             QPlainTextEdit {
                 background-color: #0b0f17;
                 color: #e2e8f0;
@@ -197,7 +292,7 @@ class InspectorView(QWidget):
                 line-height: 1.4;
             }
         """)
-        self.right_stack.addWidget(self.text_editor)
+        self.right_stack.addWidget(self.text_editor_md)
 
         r_layout.addWidget(self.right_stack, stretch=1)
 
@@ -549,6 +644,52 @@ class InspectorView(QWidget):
                 deskew_path = active_crop.parent / f"{active_crop.stem}_deskew.png"
                 disp_crop = deskew_path if deskew_path.is_file() else active_crop
                 self.canvas_left.load_file(str(disp_crop))
+
+                # Check .kern and .abc for active crop
+                kern_file = active_crop.with_suffix(".kern")
+                abc_file = active_crop.with_suffix(".abc")
+                raw_kern = kern_file.read_text(encoding="utf-8").strip() if kern_file.is_file() else ""
+                abc_text = abc_file.read_text(encoding="utf-8").strip() if abc_file.is_file() else ""
+
+                if raw_kern or abc_text:
+                    # Run automated validation under the hood
+                    rep = self.validator.validate(raw_kern=raw_kern, abc_text=abc_text)
+                    score_val = int(round(rep.score * 100))
+
+                    if rep.is_valid and not rep.anomalies:
+                        self.lbl_val_status.setText(f"Staff {selected_crop_idx + 1} — Score: {score_val}% (VERIFIED CLEAN)")
+                        self.lbl_val_status.setStyleSheet("color: #4ade80; font-weight: 700; font-size: 13px;")
+                        self.lbl_val_details.setText("No structural anomalies detected. Syntax and measure durations verified.")
+                        self.card_val.setStyleSheet("CardWidget { border-left: 4px solid #238636; }")
+                    else:
+                        self.lbl_val_status.setText(f"Staff {selected_crop_idx + 1} — Score: {score_val}% (ANOMALY DETECTED)")
+                        self.lbl_val_status.setStyleSheet("color: #f87171; font-weight: 700; font-size: 13px;")
+                        self.lbl_val_details.setText(" • " + "\n • ".join(rep.anomalies) if rep.anomalies else "Parsing issue")
+                        self.card_val.setStyleSheet("CardWidget { border-left: 4px solid #da3633; }")
+
+                    # Render vector SVG using Verovio
+                    svg_str = ""
+                    if raw_kern:
+                        svg_str = self.bridge.render_svg(raw_kern, scale=80)
+                    if svg_str:
+                        clean_svg = self.bridge.flatten_svg(svg_str)
+                        self.svg_widget.load(clean_svg.encode("utf-8"))
+                        self.svg_widget.adjustSize()
+                    else:
+                        self.svg_widget.load(b"<svg></svg>")
+
+                    # Populate code editor
+                    code_disp = f"=== ABC NOTATION ===\n{abc_text}\n\n=== HUMDRUM KERN ===\n{raw_kern}"
+                    self.text_editor.setPlainText(code_disp)
+                    self.lbl_right_title.setText(f"PAGE {p_num} (STAFF {selected_crop_idx + 1}): VEROVIO VECTOR SCORE & ABC")
+                else:
+                    self.lbl_val_status.setText(f"Staff {selected_crop_idx + 1} — Awaiting OMR recognition")
+                    self.lbl_val_status.setStyleSheet("color: #94a3b8; font-weight: 600; font-size: 13px;")
+                    self.lbl_val_details.setText("Staff crop extracted. Run OMR pipeline to decode notes.")
+                    self.card_val.setStyleSheet("")
+                    self.svg_widget.load(b"<svg></svg>")
+                    self.text_editor.setPlainText("Awaiting Transcoda OMR recognition.")
+                    self.lbl_right_title.setText(f"PAGE {p_num}: AWAITING RECOGNITION")
             else:
                 src_page = debug_file if debug_file.is_file() else mask_file
                 if src_page and src_page.is_file():
@@ -556,34 +697,19 @@ class InspectorView(QWidget):
                 else:
                     self.canvas_left.clear_view()
                 self.lbl_left_title.setText(f"PAGE {p_num}: NO STAVES DETECTED")
-
-            # Collect ABC codes
-            abc_texts = []
-            if crops:
-                for i, c in enumerate(crops):
-                    abc_f = c.with_suffix(".abc")
-                    if abc_f.is_file() and abc_f.stat().st_size > 0:
-                        code = abc_f.read_text(encoding="utf-8").strip()
-                        abc_texts.append(f"% --- Staff {i + 1} ({c.name}) ---\n{code}")
-
-            if abc_texts:
-                self.text_editor.setPlainText("\n\n".join(abc_texts))
-                self.lbl_right_title.setText(f"PAGE {p_num}: DECODED NOTES (ABC)")
-            elif crops:
-                self.text_editor.setPlainText(
-                    f"Page {p_num} contains {len(crops)} musical staves.\n"
-                    "They are queued for Transcoda-59M OMR recognition."
-                )
-                self.lbl_right_title.setText(f"PAGE {p_num}: AWAITING OMR RECOGNITION")
-            else:
-                self.text_editor.setPlainText(f"No musical staves detected on page {p_num} (text page).")
+                self.lbl_val_status.setText("No musical staves on this page")
+                self.lbl_val_status.setStyleSheet("color: #94a3b8;")
+                self.lbl_val_details.setText("Standard text/prose page.")
+                self.card_val.setStyleSheet("")
+                self.svg_widget.load(b"<svg></svg>")
+                self.text_editor.setPlainText(f"No musical staves detected on page {p_num}.")
                 self.lbl_right_title.setText(f"PAGE {p_num}: NO NOTES")
 
         # -------------------------------------------------------------
         # Mode 4: Markdown
         # -------------------------------------------------------------
         elif "4. Markdown" in cur_text:
-            self.right_stack.setCurrentIndex(1)
+            self.right_stack.setCurrentIndex(2)
             self.btn_copy.setVisible(True)
             self.lbl_left_title.setText(f"PAGE {p_num}: PAGE SCAN")
 
@@ -594,20 +720,21 @@ class InspectorView(QWidget):
                 self.canvas_left.clear_view()
 
             if final_md_file.is_file():
-                self.text_editor.setPlainText(final_md_file.read_text(encoding="utf-8"))
+                self.text_editor_md.setPlainText(final_md_file.read_text(encoding="utf-8"))
                 self.lbl_right_title.setText(f"PAGE {p_num}: ASSEMBLED MARKDOWN DOCUMENT")
             elif raw_md_file.is_file():
-                self.text_editor.setPlainText(raw_md_file.read_text(encoding="utf-8"))
+                self.text_editor_md.setPlainText(raw_md_file.read_text(encoding="utf-8"))
                 self.lbl_right_title.setText(f"PAGE {p_num}: RAW VLM DRAFT (WITHOUT NOTES)")
             else:
-                self.text_editor.setPlainText(
+                self.text_editor_md.setPlainText(
                     f"Markdown document for page {p_num} has not been generated yet.\n"
                     "Page is awaiting VLM OCR (Qwen 3.5) or final assembly."
                 )
                 self.lbl_right_title.setText(f"PAGE {p_num}: AWAITING PROCESSING")
 
     def _copy_code(self) -> None:
-        txt = self.text_editor.toPlainText()
+        cur_text = self.mode_segmented.currentItem().text() if self.mode_segmented.currentItem() else ""
+        txt = self.text_editor_md.toPlainText() if "4. Markdown" in cur_text else self.text_editor.toPlainText()
         if txt:
             QApplication.clipboard().setText(txt)
             InfoBar.success(
