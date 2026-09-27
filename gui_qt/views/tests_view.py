@@ -530,7 +530,9 @@ class TestsView(QWidget):
                 pass
 
         if svg_content:
-            self.svg_widget.load(svg_content.encode("utf-8"))
+            from core.abc_bridge import ABCBridge
+            clean_svg = ABCBridge.flatten_svg(svg_content)
+            self.svg_widget.load(clean_svg.encode("utf-8"))
             self.svg_widget.adjustSize()
         else:
             self.svg_widget.load(b"<svg></svg>")

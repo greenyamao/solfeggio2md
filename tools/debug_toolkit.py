@@ -28,7 +28,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-import fitz  # PyMuPDF
+import pymupdf as fitz
 from core.layout_detector import LayoutDetector
 from core.page_preprocessor import deskew_page, detect_and_split_spread, normalize_staff_crop
 
