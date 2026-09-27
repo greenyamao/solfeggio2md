@@ -406,6 +406,7 @@ class TestTier1FeatureCoverage(unittest.TestCase):
         for r in results:
             self.assertIn("abc", r)
             self.assertIn("status", r)
+            self.assertNotEqual(r["status"], "error", f"Batch transcription failed with error: {r.get('error')}")
 
     # =========================================================================
     # F4: Sequential GPU Memory Barrier Hardening (>=5 tests)

@@ -112,6 +112,7 @@ class OMREngine:
         self,
         crops_bgr: List[np.ndarray],
         target_w: int = 1050,
+        target_h: int = 1485,
         notation_classes: Optional[List[str]] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -268,6 +269,9 @@ class OMREngine:
                 }
                 for _ in crops_bgr
             ]
+        finally:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     def transcribe_crop(
         self,
