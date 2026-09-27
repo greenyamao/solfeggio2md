@@ -5,8 +5,11 @@ coupled with Willem Vree's xml2abc for pristine multi-voice ABC generation.
 """
 
 from pathlib import Path
+import contextlib
+import io
 import logging
 import re
+import sys
 from typing import Optional, Tuple, Any
 import music21
 import verovio
@@ -69,13 +72,175 @@ class ABCBridge:
                 s = max(1, next_count)
         return True
 
+    @staticmethod
+    def sanitize_runaway_kern(raw_kern: str, max_repeats: int = 2) -> str:
+        """
+        Detects and truncates degenerative runaway loops and attention wrap-arounds in Humdrum **kern:
+        1. Truncates immediately at any terminal barline (==, =||, =:|, =:|!, *-).
+        2. Detects header re-occurrence: if *clef, *k[, *M, or **kern occurs after musical
+           content has started, it is an unmistakable attention wrap-around restart.
+        3. Multi-measure cycle & wrap-around detection:
+           - Wrap-around to start: if measure i matches measure 0 after progress (i >= 2).
+           - K-measure cycle detection for k in [1, 2, 3, 4]: detects [A, B, A, B] or [A, B, C, A, B, C].
+           - Line-level consecutive repeats exceeding max_repeats.
+        4. Guarantees balanced termination without syntax corruption.
+        """
+        if not raw_kern:
+            return raw_kern
+
+        text = (
+            raw_kern.replace("<s>", " ")
+            .replace("</s>", "")
+            .replace("<t>", "\t")
+            .replace("<b>", "\n")
+        )
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            return raw_kern
+
+        headers = []
+        measures = []
+        cur_m = []
+        music_started = False
+        consecutive_same_data = 0
+        last_data_line = None
+        consecutive_rest_measures = 0
+        in_rest_measure = False
+
+        for line in lines:
+            is_header = line.startswith("**") or (line.startswith("*") and not music_started) or line.startswith("!")
+            is_barline = line.startswith("=")
+
+            # 1. Truncate at terminal barlines (e.g. '==', '=||', '=:|', '*-')
+            if not is_header and any(t in line for t in ("==", "=||", "=:|", "*-")):
+                if cur_m:
+                    measures.append(cur_m)
+                    cur_m = []
+                measures.append([line])
+                break
+
+            # 2. Header re-occurrence detection (attention wrap-around)
+            if music_started and line.startswith("*"):
+                if any(line.startswith(h) for h in ("*clef", "*k[", "*M", "**kern", "*stria", "*tremolo", "*X8ba")):
+                    break
+
+            # 3. Token degeneration check (e.g. runaway repeated characters like 333333... or aaaaaa...)
+            if not is_header and any(re.search(r'([0-9a-zA-Z])\1{5,}', tok) for tok in line.split("\t")):
+                break
+
+            if is_header:
+                headers.append(line)
+                continue
+
+            music_started = True
+
+            if is_barline:
+                if in_rest_measure:
+                    consecutive_rest_measures += 1
+                    if consecutive_rest_measures >= 2:
+                        break
+                else:
+                    consecutive_rest_measures = 0
+                in_rest_measure = True
+                consecutive_same_data = 0
+                last_data_line = None
+                if cur_m:
+                    measures.append(cur_m)
+                    cur_m = []
+                cur_m.append(line)
+                continue
+
+            # Data line: check consecutive repeats within measure
+            tokens = line.split("\t")
+            is_rest = all("r" in t or t == "." for t in tokens)
+            if not is_rest:
+                in_rest_measure = False
+
+            if line == last_data_line:
+                consecutive_same_data += 1
+                if consecutive_same_data >= max_repeats:
+                    # Runaway repetition detected within a measure (e.g. 64ee[ or 8G 8g)
+                    break
+            else:
+                consecutive_same_data = 1
+                last_data_line = line
+
+            cur_m.append(line)
+
+        if cur_m:
+            measures.append(cur_m)
+
+        # 3. Intelligent cycle and wrap-around detection (exact and fuzzy Jaccard similarity)
+        cutoff = len(measures)
+
+        # Extract pitch signature sets for robust invariant comparison
+        def _measure_sig_set(m):
+            notes = set()
+            for line in m:
+                if line.startswith("=") or line.startswith("*") or line.startswith("!"):
+                    continue
+                for t in line.split("\t"):
+                    letters = "".join(sorted(re.findall(r"[a-gA-Gr]", t.lower())))
+                    if letters:
+                        notes.add(letters)
+            return frozenset(notes)
+
+        def _jaccard(s1, s2):
+            if not s1 or not s2:
+                return 0.0
+            return len(s1 & s2) / float(len(s1 | s2))
+
+        sigs = [_measure_sig_set(m) for m in measures]
+
+        # A. Wrap-around to start: if measure i (i >= 2) matches measure 0
+        if len(sigs) >= 3 and len(sigs[0]) > 0:
+            for i in range(2, len(sigs)):
+                if _jaccard(sigs[i], sigs[0]) >= 0.55:
+                    cutoff = min(cutoff, i)
+                    break
+
+        # B. Multi-measure cycle detection for k in [1, 2, 3, 4]
+        for k in (1, 2, 3, 4):
+            limit = min(cutoff, len(sigs))
+            min_cycles = 3 if k == 1 else 2
+            if limit >= min_cycles * k:
+                for end_idx in range(min_cycles * k, limit + 1):
+                    pat1 = sigs[end_idx - k : end_idx]
+                    pat2 = sigs[end_idx - 2 * k : end_idx - k]
+                    sims = [_jaccard(s1, s2) for s1, s2 in zip(pat1, pat2)]
+                    avg_sim = sum(sims) / float(len(sims)) if sims else 0
+                    if avg_sim >= 0.55 and all(len(s) > 0 for s in pat1):
+                        cutoff = min(cutoff, end_idx - k)
+                        break
+
+        valid_measures = measures[:cutoff]
+        res_lines = list(headers)
+        for m in valid_measures:
+            res_lines.extend(m)
+
+        # Count active spines for balanced terminator
+        num_spines = 1
+        if headers:
+            num_spines = max(1, len(headers[0].split("\t")))
+        elif valid_measures and valid_measures[0]:
+            num_spines = max(1, len(valid_measures[0][0].split("\t")))
+
+        # Ensure valid Humdrum termination
+        if not res_lines or not res_lines[-1].startswith("*-"):
+            if not res_lines or not res_lines[-1].startswith("="):
+                res_lines.append("\t".join(["="] * num_spines))
+            res_lines.append("\t".join(["*-"] * num_spines))
+
+        return "\n".join(res_lines)
+
     def normalize_humdrum(self, raw_kern: str) -> str:
         """
         Ensures Humdrum text has valid spines, headers (**kern), and balanced column counts.
         Tracks active spine splits (*^) and merges (*v), padding missing fields to prevent Verovio C++ crashes.
         """
+        sanitized = self.sanitize_runaway_kern(raw_kern)
         text = (
-            raw_kern.strip()
+            sanitized.strip()
             .replace("<s>", " ")
             .replace("</s>", "")
             .replace("<t>", "\t")
@@ -253,8 +418,9 @@ class ABCBridge:
         """
         normalized_kern = self.normalize_humdrum(raw_kern)
         
-        # 1. Parse Humdrum with music21 and compile notation
-        score = music21.converter.parse(normalized_kern, format="humdrum")
+        # 1. Parse Humdrum with music21 and compile notation (suppress noisy internal stderr warnings)
+        with contextlib.redirect_stderr(io.StringIO()):
+            score = music21.converter.parse(normalized_kern, format="humdrum")
         try:
             score.makeNotation(inPlace=True)
         except Exception:

@@ -648,6 +648,17 @@ class InspectorView(QWidget):
                 raw_kern = kern_file.read_text(encoding="utf-8").strip() if kern_file.is_file() else ""
                 abc_text = abc_file.read_text(encoding="utf-8").strip() if abc_file.is_file() else ""
 
+                if raw_kern:
+                    clean_kern = self.bridge.sanitize_runaway_kern(raw_kern)
+                    if clean_kern != raw_kern:
+                        raw_kern = clean_kern
+                        try:
+                            kern_file.write_text(raw_kern, encoding="utf-8")
+                            abc_text = self.bridge.kern_to_abc(raw_kern)
+                            abc_file.write_text(abc_text, encoding="utf-8")
+                        except Exception:
+                            pass
+
                 if raw_kern or abc_text:
                     # Run automated validation under the hood
                     rep = self.validator.validate(raw_kern=raw_kern, abc_text=abc_text)
