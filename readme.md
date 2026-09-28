@@ -36,152 +36,80 @@ An enterprise-grade, high-performance pipeline for converting scanned music theo
 
 ---
 
-## 1. Installation Guide
+## 1. Quick Start & Installation
 
-### System Prerequisites
+### 🚀 1-Click Setup (Windows)
 
-- **Operating System**: Windows 11 / Windows 10 (64-bit) or Linux (Ubuntu 22.04+ LTS).
-- **Python**: 3.10, 3.11, or 3.12 (Python 3.12 64-bit strongly recommended).
-- **NVIDIA GPU**: RTX 3060 / 4060 / 4070 / 5070 Mobile or desktop equivalent with **8 GB+ VRAM** and modern NVIDIA drivers (>= 535.xx).
-- **C++ Runtime**: Visual C++ Redistributable 2015–2022 (Windows) or `build-essential` (Linux) for C++ `verovio` bindings.
+No manual configuration or command-line experience required:
+
+1. **Download the project**:
+   - Clone the repo: `git clone https://github.com/greenyamao/solfeggio2md.git`
+   - *Or click the green **Code ➔ Download ZIP** button on GitHub and extract the folder.*
+2. **Run Installer**:
+   - Double-click **`install.bat`**
+   - *The script automatically detects your GPU, creates an isolated Python virtual environment, installs PyTorch with CUDA acceleration, and configures all required dependencies.*
+3. **Launch the Workbench**:
+   - Double-click **`start.bat`**!
+
+> [!TIP]
+> **Zero-Friction Auto-Setup**: If you forget to run `install.bat`, simply double-clicking `start.bat` will detect the missing environment and offer to install everything automatically for you.
 
 ---
 
-### Step 1: Clone Repository
+### 🧠 Vision Model for Text OCR (2 Simple Options)
 
-```bash
-git clone https://github.com/your-username/pdf_to_md_music.git
-cd pdf_to_md_music
-```
+The pipeline is preconfigured with optimal defaults out-of-the-box (`config.json` does not need to be edited manually). To transcribe textbook text alongside music staves:
+
+- **Option A (Most Popular — via LM Studio)**:
+  1. Open [LM Studio](https://lmstudio.ai/).
+  2. Load any Vision model (e.g. `Qwen2.5-VL-7B-Instruct` or `Qwen3.5-9B`).
+  3. Click **Start Server** on port `1234`.
+  4. Solfeggio OCR Studio connects automatically!
+
+- **Option B (100% Standalone / Offline)**:
+  1. Open Solfeggio OCR Studio via `start.bat`.
+  2. Navigate to the **Settings** tab in the left sidebar.
+  3. Click **Download Model** — the app downloads the quantized model and vision projector directly from Hugging Face with live progress telemetry.
+
+> [!NOTE]
+> **Neural Weights are 100% Automatic**:
+> - **YOLO OLA v2.0** layout detector (38.7 MB) is downloaded automatically on first run.
+> - **Transcoda-59M** and **SMT-GrandStaff** OMR models are fetched and cached on first run via Hugging Face.
+> - You do not need to hunt down or manually place any model files!
 
 ---
 
-### Step 2: Virtual Environment Setup
+### 🐧 Manual Installation (Linux / Advanced CLI)
 
-Create and activate an isolated Python 3.12 virtual environment:
+For Linux workstations, headless servers, or developer environments:
 
-**Windows (PowerShell):**
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-**Windows (Command Prompt):**
-```cmd
-python -m venv .venv
-.\.venv\Scripts\activate.bat
-```
-
-**Linux / macOS:**
 ```bash
+# 1. Clone repository
+git clone https://github.com/greenyamao/solfeggio2md.git
+cd solfeggio2md
+
+# 2. Virtual environment
 python3 -m venv .venv
 source .venv/bin/activate
-```
 
----
-
-### Step 3: Install PyTorch with CUDA
-
-Install PyTorch with GPU CUDA support matching your driver version (CUDA 12.8 / 12.6 / 13.0):
-
-**CUDA 12.8 (Recommended for RTX 40/50 series):**
-```bash
+# 3. PyTorch with CUDA
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
-```
 
-**CUDA 12.6:**
-```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
-```
-
-*(Optional CPU Fallback - functional but significantly slower for 2D-DFT and OMR):*
-```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-```
-
----
-
-### Step 4: Install Dependencies
-
-Install all remaining pipeline dependencies via `requirements.txt`:
-
-```bash
+# 4. Pipeline dependencies
 pip install -r requirements.txt
-```
 
-> [!IMPORTANT]
-> **Dependency Integrity Rule**: The pipeline strictly utilizes `opencv-python-headless` (never standard `opencv-python`). Standard OpenCV bundles conflicting Qt/GUI shared libraries that trigger fatal DLL entry-point crashes when loaded alongside PySide6 on Windows 11.
-
----
-
-### Step 5: Model Weights Setup
-
-The pipeline requires three neural components:
-
-#### 1. YOLO OLA v2.0 (Page Layout & Staff Detection)
-- Pretrained weights: `ola-layout-analysis-2.0-2025-03-09.pt` (~40.5 MB).
-- **Automatic Setup**: The pipeline automatically downloads these weights from GitHub Releases into `weights/` on first execution. Manual download is not required.
-
-#### 2. Transcoda-59M & SMT-GrandStaff (OMR Engines)
-- `btrkeks/transcoda-59M-zeroshot-v1` (single staves, ~59M parameters).
-- `antoniorv6/smt-grandstaff` (piano grand staves; neural architecture is self-contained in `core/smt_model/`).
-- **Automatic Setup**: Weights are automatically fetched and cached in `~/.cache/huggingface/hub` on first invocation. No manual file placement is needed.
-
----
-
-### Step 6: Vision-Language Model (VLM) Configuration
-
-The text transcription phase requires a Vision-Language Model (e.g. Qwen2.5-VL / Qwen3.5-VL) to transcribe book text, headings, and exercise descriptions while respecting staff stub tags.
-
-#### Option A: Embedded `llama-server` (Recommended, Fully Integrated)
-The pipeline features a native embedded runner that launches and terminates `llama-server` autonomously, strictly respecting the GPU memory barrier.
-
-1. Download the quantized model and multimodal projector into `models/`:
-   - Model GGUF: `Qwen3.5-9B-Q4_K_M.gguf` (or `Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf`)
-   - MMProj GGUF: `mmproj-Qwen3.5-9B-BF16.gguf`
-2. Ensure your `config.json` reflects the file names:
-   ```json
-   {
-     "vlm_backend": "embedded",
-     "vlm_model_file": "Qwen3.5-9B-Q4_K_M.gguf",
-     "vlm_mmproj_file": "mmproj-Qwen3.5-9B-BF16.gguf",
-     "vlm_embedded_port": 1234
-   }
-   ```
-
-#### Option B: External LM Studio / OpenAI-Compatible Server
-1. Launch LM Studio or `vllm`.
-2. Load `Qwen2.5-VL-7B-Instruct` or `Qwen3.5-9B`.
-3. Start the local server on `http://127.0.0.1:1234/v1` with context length `>= 4096`.
-4. In `config.json`, set `"vlm_backend": "lmstudio"`.
-
----
-
-### Step 7: Launching the Application
-
-#### 1. Windows 11 Native Fluent GUI (Recommended)
-Double-click `start.bat` or run:
-```powershell
+# 5. Launch
 python run_native_app.py
 ```
 
-#### 2. Headless CLI Pipeline Batch Runner
-Place your input PDFs inside the `in/` directory:
-```bash
-python -m core.pipeline_batch_runner
-```
+---
 
-#### 3. Diagnostic & Inspection Toolkit
-Inspect individual pages or scan entire books for layout anomalies:
-```bash
-python -m tools.debug_toolkit page --book "in/Counterpoint.pdf" --page 25 --render
-```
+### 💻 Running via CLI / Diagnostic Tools
 
-#### 4. Run Regression Test Suite
-Verify your installation across all 117 end-to-end tests:
-```bash
-python tests/run_tests.py
-```
+- **Full batch conversion (headless)**: Place PDF books into `in/` and run `python -m core.pipeline_batch_runner`.
+- **Diagnostic Toolkit**: Run `python -m tools.debug_toolkit page --book "in/Book.pdf" --page 25 --render`.
+- **Interactive Visual OMR Report**: Run `python -m tools.debug_toolkit report --book "in/Book.pdf" --open`.
+- **Automated Regression Test Suite**: Run `python tests/run_tests.py` (verifies all 117 end-to-end tests).
 
 ---
 
