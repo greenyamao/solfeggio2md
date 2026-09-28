@@ -4,7 +4,7 @@
 [![PyTorch 2.x](https://img.shields.io/badge/PyTorch-2.x%20CUDA-ee4c2c.svg)](https://pytorch.org/)
 [![Verovio 6.x](https://img.shields.io/badge/Verovio-6.x%20C%2B%2B-brightgreen.svg)](https://www.verovio.org/)
 [![Tests](https://img.shields.io/badge/Tests-117%2F117%20Passed-success.svg)](file:///tests/run_tests.py)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 An enterprise-grade, high-performance pipeline for converting scanned music theory textbooks, solfeggio treatises, and polyphonic sheet music into hybrid GitHub-Flavored Markdown with embedded ABC notation and high-fidelity vector SVGs.
 
@@ -449,4 +449,4 @@ This project builds upon foundational research and open-source models across com
 
 ## License
 
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+This project is licensed under the Apache License 2.0 — see the [LICENSE](LICENSE) file for details.
