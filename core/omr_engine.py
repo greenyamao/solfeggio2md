@@ -84,7 +84,10 @@ class OMREngine:
 
     def _ensure_smt_loaded(self):
         if self.smt_model is None:
-            from SMT.smt_model import SMTModelForCausalLM
+            try:
+                from core.smt_model import SMTModelForCausalLM
+            except ImportError:
+                from SMT.smt_model import SMTModelForCausalLM
             self.smt_model = SMTModelForCausalLM.from_pretrained(self.smt_repo).to(self.device).eval()
 
     def _preprocess_transcoda(self, img_bgr: np.ndarray, target_w: int = 1050, target_h: int = 1485) -> torch.Tensor:
