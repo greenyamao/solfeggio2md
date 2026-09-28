@@ -97,3 +97,12 @@ $RECYCLE.BIN/
 # --- Environment & Tool Generated Artifacts ---
 .tempmediaStorage/
 .system_generated/
+
+# --- Agent Directives & Internal Task Metadata ---
+AGENTS.md
+.agents/
+ORIGINAL_REQUEST.md
+PROJECT.md
+TEST_INFRA.md
+TEST_READY.md
+context.md
