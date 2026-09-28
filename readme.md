@@ -17,11 +17,13 @@ Convert music theory textbooks and sheet music PDFs into Markdown with embedded 
 ### Text OCR Setup
 
 To transcribe non-music textbook text alongside the staves, run [LM Studio](https://lmstudio.ai/) in the background:
-1. Load any vision model (such as `Qwen2.5-VL-7B-Instruct` or `Qwen3.5-9B`).
+1. Load `Qwen3.5-9B` (recommended) or `Qwen2.5-VL-7B-Instruct`.
 2. Click "Start Server" on port 1234.
 3. Solfeggio OCR Studio connects to it automatically.
 
 Alternatively, open the app, go to the Settings tab, and click "Download Model" to download the model directly.
+
+**Important**: The prompts, text extraction, and stub-tag preservation were tuned and tested specifically on **Qwen3.5-9B** (and **Qwen2.5-VL-7B**). Smaller or weaker vision models (e.g. 2B or 3B) often lose the `<!-- MUSIC_STUB_ID -->` tags or miss text in dense book layouts. If you choose to run smaller models, expect degraded results.
 
 All other neural weights (YOLO layout detector 38 MB, Transcoda OMR, SMT) download automatically on first run.
 
