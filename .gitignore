@@ -1,31 +1,99 @@
-# Virtual environments
-venv/
+# ==============================================================================
+# Git Ignore Configuration for Solfeggio OCR Studio / PDF to Markdown Music
+# ==============================================================================
+
+# --- Python Virtual Environments ---
 .venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
 
-# Caches
+# --- Python Bytecode & Cache ---
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
 
-# Local data & temporary processing
-/SMT
-/output
-/.queue_temp
-/in
+# --- Testing & Coverage ---
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+
+# --- Local Input Books & Output Results ---
+/in/
+/output/
+/.queue_temp/
+queue_state.json
 test_bench/output/
+test_bench/temp/
+test_bench/debug/
 
-# Large model weights (download via scripts)
+# --- Scratchpad, Temporary & Diagnostic Logs ---
+/scratch/
+*.log
+*.out
+*.tmp
+*.temp
+
+# --- Large Model Checkpoints & Pretrained Weights ---
 weights/*.pt
 weights/*.pth
 weights/*.safetensors
 weights/*.bin
-
-
-# Queue state
-queue_state.json
-
-# Scratch and diagnostic logs
-/scratch/
-
-# Standalone models & binaries
+weights/*.onnx
+weights/*.engine
+weights/*.tflite
 /models/
 /bin/
+/SMT/
+*.gguf
+*.ggml
+
+# --- IDE & Editor Configurations ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.vs/
+*.sublime-project
+*.sublime-workspace
+
+# --- OS-Specific Artifacts ---
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# --- Environment & Tool Generated Artifacts ---
+.tempmediaStorage/
+.system_generated/
