@@ -89,6 +89,23 @@ class TestTier2Boundaries(unittest.TestCase):
         elapsed = time.time() - t0
         self.assertLess(elapsed, 0.5)
 
+    def test_f1_bnd_06_empty_or_zero_size_crop_resilience(self):
+        """F1 Boundary: Empty or zero-size crops must be safely rejected without OpenCV assertion errors."""
+        empty_1 = np.empty((0, 100, 3), dtype=np.uint8)
+        empty_2 = np.empty((100, 0, 3), dtype=np.uint8)
+        empty_3 = np.empty((0, 0, 3), dtype=np.uint8)
+        self.assertFalse(is_valid_music_staff(empty_1, "staff", 0.5))
+        self.assertFalse(is_valid_music_staff(empty_2, "staff", 0.5))
+        self.assertFalse(is_valid_music_staff(empty_3, "staff", 0.5))
+        self.assertFalse(is_valid_music_staff(None, "staff", 0.5))
+
+        # Test trace_staff_horizontal_extent bounds safety
+        gray = np.full((500, 500), 255, dtype=np.uint8)
+        traced = LayoutDetector.trace_staff_horizontal_extent(gray, [0, 10, 50, 60])
+        self.assertGreaterEqual(traced[0], 0)
+        self.assertLessEqual(traced[2], 500)
+        self.assertGreater(traced[2], traced[0])
+
     # =========================================================================
     # F2 Boundaries: OMR Transcoda-59M (>=5 tests)
     # =========================================================================

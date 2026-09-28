@@ -20,7 +20,14 @@ def is_valid_music_staff(crop_bgr: np.ndarray, cls_name: str, conf: float) -> bo
     - Multi-row data table grids (6 or more consecutive equidistant lines)
     - Blank whitespace hallucinations
     """
-    gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY) if len(crop_bgr.shape) == 3 else crop_bgr
+    if crop_bgr is None or not isinstance(crop_bgr, np.ndarray) or crop_bgr.size == 0:
+        return False
+    if len(crop_bgr.shape) < 2 or crop_bgr.shape[0] < 5 or crop_bgr.shape[1] < 10:
+        return False
+    try:
+        gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY) if len(crop_bgr.shape) == 3 else crop_bgr
+    except Exception:
+        return False
     h, w = gray.shape
 
     is_grand = "grand" in cls_name.lower()
@@ -307,9 +314,15 @@ class LayoutDetector:
                     comp_h = m_stats[mi, cv2.CC_STAT_HEIGHT]
                     comp_x = m_stats[mi, cv2.CC_STAT_LEFT]
                     if comp_h >= h_target:
-                        ext_x1 = min(ext_x1, lx1 + comp_x - 2)
+                        ext_x1 = max(0, min(ext_x1, lx1 + comp_x - 2))
 
-        return [ext_x1, y1, ext_x2, y2]
+        # Strict boundary clamping to prevent negative indices or out-of-bounds crops
+        final_x1 = max(0, min(img_w - 1, int(ext_x1)))
+        final_x2 = max(final_x1 + 1, min(img_w, int(ext_x2)))
+        final_y1 = max(0, min(img_h - 1, int(y1)))
+        final_y2 = max(final_y1 + 1, min(img_h, int(y2)))
+
+        return [final_x1, final_y1, final_x2, final_y2]
 
     @classmethod
     def split_column_gutters(
@@ -858,7 +871,10 @@ class LayoutDetector:
                 b_xy = self.trace_staff_horizontal_extent(gray, b_xy)
 
                 # Validate candidate with physical filter
-                crop = img_bgr[b_xy[1]:b_xy[3], b_xy[0]:b_xy[2]]
+                x1, y1, x2, y2 = b_xy
+                if (x2 - x1) < 10 or (y2 - y1) < 5:
+                    continue
+                crop = img_bgr[y1:y2, x1:x2]
                 if is_valid_music_staff(crop, norm_cls, conf):
                     yolo_boxes.append({
                         "box": b_xy,
@@ -929,7 +945,10 @@ class LayoutDetector:
                     break
             if not covered:
                 p_box = self.trace_staff_horizontal_extent(gray, p_box)
-                crop = img_bgr[p_box[1]:p_box[3], p_box[0]:p_box[2]]
+                x1, y1, x2, y2 = p_box
+                if (x2 - x1) < 10 or (y2 - y1) < 5:
+                    continue
+                crop = img_bgr[y1:y2, x1:x2]
                 if is_valid_music_staff(crop, "staff", 0.90):
                     kept_single.append({
                         "box": p_box,
