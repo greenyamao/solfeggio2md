@@ -119,18 +119,12 @@ The pipeline requires three neural components:
 
 #### 1. YOLO OLA v2.0 (Page Layout & Staff Detection)
 - Pretrained weights: `ola-layout-analysis-2.0-2025-03-09.pt` (~40.5 MB).
-- Place the file inside the project `weights/` directory:
-  ```text
-  pdf_to_md_music/
-  └── weights/
-      └── ola-layout-analysis-2.0-2025-03-09.pt
-  ```
-- *Source*: Trained on sheet music and layout benchmarks (Charles University / OmniOMR project). Downloadable from Hugging Face / OmniOMR releases.
+- **Automatic Setup**: The pipeline automatically downloads these weights from GitHub Releases into `weights/` on first execution. Manual download is not required.
 
 #### 2. Transcoda-59M & SMT-GrandStaff (OMR Engines)
 - `btrkeks/transcoda-59M-zeroshot-v1` (single staves, ~59M parameters).
-- `antoniorv6/smt-grandstaff` (piano grand staves).
-- **Automatic Setup**: These weights are automatically fetched and cached in `~/.cache/huggingface/hub` on first invocation. No manual file placement is needed.
+- `antoniorv6/smt-grandstaff` (piano grand staves; neural architecture is self-contained in `core/smt_model/`).
+- **Automatic Setup**: Weights are automatically fetched and cached in `~/.cache/huggingface/hub` on first invocation. No manual file placement is needed.
 
 ---
 
