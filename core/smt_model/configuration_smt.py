@@ -1,3 +1,9 @@
+"""
+Sheet Music Transformer (SMT) - Configuration
+Based on SMT by Antonio Ríos-Vila (https://github.com/antoniorv6/SMT)
+Licensed under the MIT License.
+"""
+
 from transformers import PretrainedConfig
 
 class SMTConfig(PretrainedConfig):

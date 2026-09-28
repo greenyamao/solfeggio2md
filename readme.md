@@ -32,6 +32,7 @@ An enterprise-grade, high-performance pipeline for converting scanned music theo
 4. [CLI & Diagnostic Toolkit](#4-cli--diagnostic-toolkit)
 5. [Configuration Reference (`config.json`)](#5-configuration-reference-configjson)
 6. [Testing & Quality Assurance](#6-testing--quality-assurance)
+7. [Acknowledgments & Third-Party Notices](#acknowledgments--third-party-notices)
 
 ---
 
@@ -430,6 +431,19 @@ python tests/run_tests.py
 - **Tier 2 (Boundary & Corner Cases, 46 tests)**: Empty crops, zero-width horizontal extents, missing brace coordinates, corrupted Humdrum spines, runaway token repetition loops, and corrupt PDF streams.
 - **Tier 3 (Cross-Feature Combinations, 10 tests)**: Real-CUGAN super-resolution under extreme aspect ratios, Verovio C++ compilation of multi-voice piano systems, and stub tag collision avoidance.
 - **Tier 4 (Real-World Workloads, 5 tests)**: Full multi-page textbook batch simulation, crash recovery via `checkpoint.json`, and concurrent NVML telemetry polling.
+
+---
+
+## Acknowledgments & Third-Party Notices
+
+This project builds upon foundational research and open-source models across computer vision and music information retrieval:
+
+- **Sheet Music Transformer (SMT)**: The neural accolade architecture in `core/smt_model/` is adapted from [antoniorv6/SMT](https://github.com/antoniorv6/SMT) by Antonio Ríos-Vila, licensed under the MIT License (see [core/smt_model/LICENSE](core/smt_model/LICENSE)).
+- **YOLO OLA v2.0**: Layout analysis neural model and training pipeline developed by [v-dvorak/omr-layout-analysis](https://github.com/v-dvorak/omr-layout-analysis) (Charles University).
+- **Transcoda-59M**: Optical Music Recognition encoder-decoder architecture developed by [btrkeks/transcoda-59M-zeroshot-v1](https://huggingface.co/btrkeks/transcoda-59M-zeroshot-v1).
+- **Verovio**: C++ MusicXML and Humdrum engraving and validation engine ([verovio.org](https://www.verovio.org)), licensed under LGPL.
+- **xml2abc**: Polyphonic MusicXML-to-ABC translation algorithms by Willem Vree.
+- **Real-CUGAN**: Line-art super-resolution architecture adapted for clean sheet music binarization.
 
 ---
 

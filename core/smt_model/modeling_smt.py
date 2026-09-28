@@ -1,3 +1,9 @@
+"""
+Sheet Music Transformer (SMT) - Modeling
+Based on SMT by Antonio Ríos-Vila (https://github.com/antoniorv6/SMT)
+Licensed under the MIT License.
+"""
+
 import torch
 import warnings
 import numpy as np
