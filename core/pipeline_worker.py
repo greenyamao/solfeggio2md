@@ -27,6 +27,9 @@ class PipelineWorker:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         (self.root_dir / "in").mkdir(parents=True, exist_ok=True)
         
+        self.config_path = self.root_dir / "config.json"
+        self.config = self._load_config()
+
         self.bridge = ABCBridge()
         self.omr_engine = None
         self.layout_detector = None
@@ -34,6 +37,14 @@ class PipelineWorker:
         self._sheet_mapping_cache: Dict[str, Dict[int, Dict[str, Any]]] = {}
         self._page_cache: Dict[str, Dict[str, Any]] = {}
         self._generating_debug: set = set()
+
+    def _load_config(self) -> Dict[str, Any]:
+        if self.config_path.is_file():
+            try:
+                return json.loads(self.config_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        return {}
 
     def get_hardware_status(self) -> Dict[str, Any]:
         """
@@ -366,7 +377,10 @@ class PipelineWorker:
             else:
                 markdown_text = "*(Page text not yet recognized. Start batch processing from the Control Panel)*\n"
 
-        # 2. Dynamic music stub injection: inject BOTH ABC and Humdrum **kern blocks for LLM reading
+        # 2. Dynamic music stub injection: controlled by include_abc and include_kern config
+        include_abc = bool(self.config.get("include_abc", True))
+        include_kern = bool(self.config.get("include_kern", False))
+
         crops_dir = book_dir / "1_crops"
         if "MUSIC_STUB_ID" in markdown_text and crops_dir.is_dir():
             injected_stubs = set()
@@ -379,13 +393,13 @@ class PipelineWorker:
 
                 blocks = []
                 # 1. ABC Notation Block
-                if abc_file.is_file():
+                if include_abc and abc_file.is_file():
                     abc = abc_file.read_text(encoding="utf-8", errors="replace").strip()
                     if abc and not abc.startswith("% [OMR Conversion Error"):
                         blocks.append(f"```abc\n{abc}\n```")
 
                 # 2. Humdrum **kern Notation Block (with spine healing)
-                if kern_file.is_file():
+                if include_kern and kern_file.is_file():
                     raw_kern = kern_file.read_text(encoding="utf-8", errors="replace").strip()
                     if raw_kern:
                         try:
@@ -396,6 +410,8 @@ class PipelineWorker:
 
                 if blocks:
                     return "\n\n" + "\n\n".join(blocks) + "\n\n"
+                if not include_abc and not include_kern:
+                    return f"\n\n<!-- MUSIC_STUB_ID:{cid} -->\n\n"
                 return f"\n\n<!-- MUSIC_STUB_ID:{cid} (Notes not found, awaiting OMR) -->\n\n"
 
             assembled = re.sub(r"<!--\s*MUSIC_STUB_ID:\s*(.*?)\s*-->", inject_music_blocks, markdown_text)
@@ -406,16 +422,16 @@ class PipelineWorker:
                 if not f.name.endswith("_deskew.png")
             ])
             missing_stubs = [s for s in page_stubs if s not in injected_stubs]
-            if missing_stubs:
+            if missing_stubs and (include_abc or include_kern):
                 recovered = []
                 for ms in missing_stubs:
                     abc_file = crops_dir / f"{ms}.abc"
                     kern_file = crops_dir / f"{ms}.kern"
-                    if abc_file.is_file():
+                    if include_abc and abc_file.is_file():
                         abc = abc_file.read_text(encoding="utf-8", errors="replace").strip()
                         if abc and not abc.startswith("% [OMR Conversion Error"):
                             recovered.append(f"```abc\n{abc}\n```")
-                    if kern_file.is_file():
+                    if include_kern and kern_file.is_file():
                         raw_kern = kern_file.read_text(encoding="utf-8", errors="replace").strip()
                         if raw_kern:
                             try:

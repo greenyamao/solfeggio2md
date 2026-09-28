@@ -245,6 +245,15 @@ class SettingsView(QWidget):
         self.sw_save_debug.setChecked(bool(self.config.get("save_debug_images", False)))
         form.addRow("Debug Image Writes:", self.sw_save_debug)
 
+        # Music Notation Output Formats (ABC / Kern)
+        self.sw_include_abc = SwitchButton("Include ABC Notation (```abc)", card)
+        self.sw_include_abc.setChecked(bool(self.config.get("include_abc", True)))
+        form.addRow("Format .abc (Default):", self.sw_include_abc)
+
+        self.sw_include_kern = SwitchButton("Include Humdrum **kern (```kern)", card)
+        self.sw_include_kern.setChecked(bool(self.config.get("include_kern", False)))
+        form.addRow("Format .kern (Optional):", self.sw_include_kern)
+
         self.btn_clean_cache = PushButton(FluentIcon.DELETE, "Clean Intermediate Cache Now", card)
         self.btn_clean_cache.clicked.connect(self._on_clean_cache_clicked)
         form.addRow("Free SSD Space:", self.btn_clean_cache)
@@ -351,6 +360,8 @@ class SettingsView(QWidget):
             "skip_front_matter": self.sw_skip_front.isChecked(),
             "keep_intermediate_files": self.sw_keep_intermediates.isChecked(),
             "save_debug_images": self.sw_save_debug.isChecked(),
+            "include_abc": self.sw_include_abc.isChecked(),
+            "include_kern": self.sw_include_kern.isChecked(),
         }
 
         self.config.update(updates)

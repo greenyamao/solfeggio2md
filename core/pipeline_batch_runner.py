@@ -69,6 +69,8 @@ DEFAULT_CONFIG = {
     "enable_cugan_sr": True,
     "keep_intermediate_files": False,
     "save_debug_images": False,
+    "include_abc": True,
+    "include_kern": False,
     "skip_vlm": False,
     "skip_front_matter": True,
     "skip_back_matter": True,
@@ -1595,10 +1597,13 @@ class PipelineBatchRunner:
 
     def _inject_music_stubs(self, text: str, page_stubs: List[str], crops_dir: Path) -> str:
         """
-        Replaces <!-- MUSIC_STUB_ID:xyz --> tags with ```abc and ```kern blocks from crops_dir.
+        Replaces <!-- MUSIC_STUB_ID:xyz --> tags with ```abc and/or ```kern blocks from crops_dir.
+        Controlled by config options 'include_abc' (default True) and 'include_kern' (default False).
         If any stubs from page_stubs were omitted by the model, appends them cleanly as recovered stubs.
         """
         injected_stubs = set()
+        include_abc = bool(self.config.get("include_abc", True))
+        include_kern = bool(self.config.get("include_kern", False))
 
         def _resolve_crop_file(stem: str, ext: str) -> Optional[Path]:
             direct = crops_dir / f"{stem}{ext}"
@@ -1621,12 +1626,12 @@ class PipelineBatchRunner:
             kern_file = _resolve_crop_file(cid, ".kern")
 
             blocks = []
-            if abc_file is not None and abc_file.is_file():
+            if include_abc and abc_file is not None and abc_file.is_file():
                 abc = abc_file.read_text(encoding="utf-8", errors="replace").strip()
                 if abc and not abc.startswith("% [OMR Conversion Error"):
                     blocks.append(f"```abc\n{abc}\n```")
 
-            if kern_file is not None and kern_file.is_file():
+            if include_kern and kern_file is not None and kern_file.is_file():
                 raw_kern = kern_file.read_text(encoding="utf-8", errors="replace").strip()
                 if raw_kern:
                     try:
@@ -1637,22 +1642,24 @@ class PipelineBatchRunner:
 
             if blocks:
                 return "\n\n" + "\n\n".join(blocks) + "\n\n"
+            if not include_abc and not include_kern:
+                return f"\n\n<!-- MUSIC_STUB_ID:{cid} -->\n\n"
             return f"\n\n<!-- MUSIC_STUB_ID:{cid} (Notes not found, awaiting OMR) -->\n\n"
 
         result = re.sub(r"<!--\s*MUSIC_STUB_ID:\s*(.*?)\s*-->", _inject, text)
 
         # Fallback recovery for omitted stubs
         missing_stubs = [s for s in page_stubs if s not in injected_stubs]
-        if missing_stubs:
+        if missing_stubs and (include_abc or include_kern):
             recovered_blocks = []
             for ms in missing_stubs:
                 abc_file = _resolve_crop_file(ms, ".abc")
                 kern_file = _resolve_crop_file(ms, ".kern")
-                if abc_file is not None and abc_file.is_file():
+                if include_abc and abc_file is not None and abc_file.is_file():
                     abc = abc_file.read_text(encoding="utf-8", errors="replace").strip()
                     if abc and not abc.startswith("% [OMR Conversion Error"):
                         recovered_blocks.append(f"```abc\n{abc}\n```")
-                if kern_file is not None and kern_file.is_file():
+                if include_kern and kern_file is not None and kern_file.is_file():
                     raw_kern = kern_file.read_text(encoding="utf-8", errors="replace").strip()
                     if raw_kern:
                         try:
