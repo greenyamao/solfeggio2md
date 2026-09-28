@@ -128,12 +128,51 @@ class LayoutDetector:
         self.conf_threshold = conf_threshold
         self.model = None
 
+    OLA_RELEASE_URL = "https://github.com/v-dvorak/omr-layout-analysis/releases/download/ola-v2.0/ola-layout-analysis-2.0-2025-03-09.pt"
+
+    @classmethod
+    def _download_weights_if_missing(cls, target_path: Path):
+        """Automatically downloads OLA v2.0 weights on first use if not present."""
+        if target_path.is_file():
+            return
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = target_path.with_suffix(".tmp")
+        print(f"[LayoutDetector] Pretrained weights not found at: {target_path}")
+        print(f"[LayoutDetector] Downloading OLA v2.0 weights from {cls.OLA_RELEASE_URL}...")
+        try:
+            import urllib.request
+            req = urllib.request.Request(cls.OLA_RELEASE_URL, headers={"User-Agent": "pdf_to_md_music"})
+            with urllib.request.urlopen(req) as resp, open(temp_path, "wb") as f_out:
+                total_size = int(resp.headers.get("Content-Length", 0))
+                downloaded = 0
+                chunk_size = 1024 * 1024
+                while True:
+                    chunk = resp.read(chunk_size)
+                    if not chunk:
+                        break
+                    f_out.write(chunk)
+                    downloaded += len(chunk)
+                    if total_size > 0:
+                        pct = (downloaded / total_size) * 100
+                        print(f"\r[LayoutDetector] Download progress: {downloaded / (1024*1024):.1f}/{total_size / (1024*1024):.1f} MB ({pct:.1f}%)", end="", flush=True)
+            print()
+            temp_path.replace(target_path)
+            print(f"[LayoutDetector] Successfully saved weights to: {target_path}")
+        except Exception as e:
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except Exception:
+                    pass
+            raise FileNotFoundError(
+                f"Weights file not found at: {target_path}. Automatic download failed ({e}). "
+                f"Please manually download ola-layout-analysis-2.0-2025-03-09.pt from: {cls.OLA_RELEASE_URL}"
+            ) from e
+
     def _ensure_loaded(self):
         if self.model is None:
             if not self.weights_path.is_file():
-                raise FileNotFoundError(
-                    f"Weights file not found at: {self.weights_path}. Please download ola-layout-analysis-2.0."
-                )
+                self._download_weights_if_missing(self.weights_path)
             from ultralytics import YOLO
             self.model = YOLO(str(self.weights_path))
             self.names = self.model.names
