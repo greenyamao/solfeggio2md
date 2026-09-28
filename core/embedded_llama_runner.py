@@ -54,18 +54,26 @@ def find_llama_server_binary() -> Optional[Path]:
             candidates = glob.glob(pattern_all, recursive=True)
 
         if candidates:
-            # Sort candidates: cuda12 > cuda > vulkan > avx2
-            def _score_candidate(path_str: str) -> int:
+            # Sort candidates: cuda12 > cuda > vulkan > avx2, and prioritize newest version
+            def _score_candidate(path_str: str) -> Tuple[int, Tuple[int, int, int]]:
                 low = path_str.lower()
+                backend_score = 1
                 if "cuda12" in low:
-                    return 40
-                if "cuda" in low:
-                    return 30
-                if "vulkan" in low:
-                    return 20
-                if "avx2" in low:
-                    return 10
-                return 1
+                    backend_score = 40
+                elif "cuda" in low:
+                    backend_score = 30
+                elif "vulkan" in low:
+                    backend_score = 20
+                elif "avx2" in low:
+                    backend_score = 10
+
+                ver_match = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", path_str)
+                ver_tuple = (
+                    (int(ver_match.group(1)), int(ver_match.group(2)), int(ver_match.group(3) or 0))
+                    if ver_match
+                    else (0, 0, 0)
+                )
+                return (backend_score, ver_tuple)
 
             candidates.sort(key=_score_candidate, reverse=True)
             return Path(candidates[0])
@@ -180,7 +188,6 @@ class EmbeddedLlamaRunner:
                 "--ubatch-size", "512",
                 "--reasoning", "off",
                 "--reasoning-budget", "0",
-                "--reasoning-effort", "minimal",
             ]
             if flash_attention:
                 cmd.extend(["-fa", "1"])

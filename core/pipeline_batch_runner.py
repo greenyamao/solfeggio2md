@@ -334,7 +334,7 @@ class PipelineBatchRunner:
                             p = p_fallback
                     if p.is_file():
                         item["path"] = f"in/{p.name}"
-                        book_title = p.stem
+                        book_title = self.sanitize_book_title(p.stem)
                         chk = self._read_checkpoint(book_title)
                         if chk:
                             item["status"] = chk.get("status", item.get("status", "pending"))
@@ -360,7 +360,7 @@ class PipelineBatchRunner:
                 pages_count = 0
 
         # Check existing checkpoint without creating empty directories
-        book_title = p.stem
+        book_title = self.sanitize_book_title(p.stem)
         chk = self._read_checkpoint(book_title)
         status = "completed" if chk and chk.get("status") == "completed" else "pending"
 
@@ -471,13 +471,21 @@ class PipelineBatchRunner:
 
     # ---------------- Checkpointing ---------------- #
 
+    @staticmethod
+    def sanitize_book_title(title: str) -> str:
+        """Sanitizes book title for Windows/Linux file systems, stripping trailing spaces/dots."""
+        clean = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', str(title)).strip(". ")
+        return clean or "unnamed_book"
+
     def _get_book_dir(self, book_title: str) -> Path:
-        d = self.output_root / book_title
+        clean_title = self.sanitize_book_title(book_title)
+        d = self.output_root / clean_title
         d.mkdir(parents=True, exist_ok=True)
         return d
 
     def _read_checkpoint(self, book_title: str) -> Optional[Dict[str, Any]]:
-        chk_file = self.output_root / book_title / "checkpoint.json"
+        clean_title = self.sanitize_book_title(book_title)
+        chk_file = self.output_root / clean_title / "checkpoint.json"
         if chk_file.is_file():
             try:
                 return json.loads(chk_file.read_text(encoding="utf-8"))
@@ -566,7 +574,7 @@ class PipelineBatchRunner:
                 pdf_path = Path(item["path"])
                 if not pdf_path.is_absolute():
                     pdf_path = (ROOT_DIR / pdf_path).resolve()
-                book_title = pdf_path.stem
+                book_title = self.sanitize_book_title(pdf_path.stem)
                 item["status"] = "processing"
 
                 with self._lock:
@@ -644,7 +652,7 @@ class PipelineBatchRunner:
 
     def _process_book(self, pdf_path: Path, item: Dict[str, Any]) -> bool:
         enable_windows_high_performance()
-        book_title = pdf_path.stem
+        book_title = self.sanitize_book_title(pdf_path.stem)
         book_dir = self._get_book_dir(book_title)
 
         crops_dir = book_dir / "1_crops"
